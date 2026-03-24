@@ -69,3 +69,5 @@ dmypy.json
 .pyre/
 
 .vscode
+
+data/
