@@ -352,15 +352,22 @@ def run_motionbert_backend(job: MotionBERTJob) -> Dict[str, Any]:
     )
     image_size_hw = _resolve_image_size_hw(job=job, sequence=sequence)
     causal, effective_window_size, seq_step = _lift_dataset_params(model)
+    filled_sequence_xy = _fill_missing_keypoints_for_lifter(
+        sequence.keypoints_xy,
+        sequence.confidence,
+    )
 
     pred_frames: list[np.ndarray | None] = []
     pred_confidence: list[np.ndarray | None] = []
     pose_history: list[list[Any]] = []
 
     for frame_index in range(sequence.num_frames):
-        keypoints_xy = np.asarray(sequence.keypoints_xy[frame_index], dtype=np.float32)
+        keypoints_xy = np.asarray(filled_sequence_xy[frame_index], dtype=np.float32)
         confidence = np.asarray(sequence.confidence[frame_index], dtype=np.float32)
-        valid_mask = np.isfinite(keypoints_xy).all(axis=1) & (confidence > 0.0)
+        valid_mask = (
+            np.isfinite(np.asarray(sequence.keypoints_xy[frame_index], dtype=np.float32)).all(axis=1)
+            & (confidence > 0.0)
+        )
 
         if not np.any(valid_mask):
             pose_history.append([])
@@ -983,6 +990,42 @@ def _resolve_image_size_hw(*, job: MotionBERTJob, sequence: PoseSequence2D) -> t
                 return max(height, 1), max(width, 1)
 
     return _DEFAULT_IMAGE_SIZE_HW
+
+
+def _fill_missing_keypoints_for_lifter(
+    keypoints_xy: np.ndarray,
+    confidence: np.ndarray,
+) -> np.ndarray:
+    points = np.asarray(keypoints_xy, dtype=np.float32)
+    conf = np.asarray(confidence, dtype=np.float32)
+    if points.ndim != 3 or points.shape[-1] != 2:
+        raise ValueError(f"Expected keypoints_xy shaped as [T, J, 2], got {points.shape}.")
+    if conf.shape != points.shape[:2]:
+        raise ValueError(
+            "Expected confidence shaped as [T, J] for lifter input filling: "
+            f"got points={points.shape} confidence={conf.shape}."
+        )
+
+    filled = points.copy()
+    num_frames = int(filled.shape[0])
+    if num_frames == 0:
+        return filled
+
+    frame_axis = np.arange(num_frames, dtype=np.float32)
+    joint_valid = np.isfinite(filled).all(axis=2) & (conf > 0.0)
+    for joint_index in range(filled.shape[1]):
+        for dim_index in range(filled.shape[2]):
+            dim_values = filled[:, joint_index, dim_index]
+            dim_valid = joint_valid[:, joint_index] & np.isfinite(dim_values)
+            if not np.any(dim_valid):
+                filled[:, joint_index, dim_index] = 0.0
+                continue
+            filled[:, joint_index, dim_index] = np.interp(
+                frame_axis,
+                frame_axis[dim_valid],
+                dim_values[dim_valid],
+            )
+    return filled.astype(np.float32, copy=False)
 
 
 def _postprocess_lifter_keypoints_3d(keypoints: np.ndarray) -> np.ndarray:

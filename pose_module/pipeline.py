@@ -168,6 +168,8 @@ def run_pose3d_pipeline(
     output_dir: str | Path,
     fps_target: int = 20,
     save_debug: bool = True,
+    save_debug_2d: Optional[bool] = None,
+    save_debug_3d: Optional[bool] = None,
     env_name: str = "openmmlab",
     video_metadata: Optional[Mapping[str, Any]] = None,
     model_alias: str = "vitpose-b",
@@ -184,13 +186,15 @@ def run_pose3d_pipeline(
 ) -> Dict[str, Any]:
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
+    save_debug_2d = bool(save_debug if save_debug_2d is None else save_debug_2d)
+    save_debug_3d = bool(save_debug if save_debug_3d is None else save_debug_3d)
 
     pose2d_result = run_pose2d_pipeline(
         clip_id=str(clip_id),
         video_path=str(video_path),
         output_dir=output_dir,
         fps_target=int(fps_target),
-        save_debug=bool(save_debug),
+        save_debug=bool(save_debug_2d),
         env_name=str(env_name),
         video_metadata=video_metadata,
         model_alias=str(model_alias),
@@ -219,7 +223,7 @@ def run_pose3d_pipeline(
         lifter_quality=lifter_result["quality_report"],
     )
     pose3d_debug_overlay_path = None
-    if save_debug:
+    if save_debug_3d:
         cleaner_artifacts = pose2d_result["cleaner_artifacts"]
         clean_keypoints_xy_pixels = _restore_clean_pose_pixels(
             pose2d_result["pose_sequence"].keypoints_xy,

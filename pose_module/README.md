@@ -179,6 +179,9 @@ O comando abaixo executa o fluxo completo com MotionBERT:
 
 Flags uteis do `export-pose3d`:
 
+- `--debug-2d` / `--no-debug-2d`: liga ou desliga os overlays 2D (`debug_overlay.mp4`, `debug_overlay_raw.mp4`, `debug_overlay_clean.mp4`)
+- `--debug-3d` / `--no-debug-3d`: liga ou desliga o overlay side-by-side 3D (`debug_overlay_pose3d_raw.mp4`)
+- `--no-debug`: desliga todos os videos de debug de uma vez
 - `--motionbert-env-name <env>`: usa um env Conda especifico para o backend 3D
 - `--motionbert-window-size <int>`: janela temporal solicitada
 - `--motionbert-window-overlap <float>`: overlap entre janelas
@@ -186,7 +189,20 @@ Flags uteis do `export-pose3d`:
 - `--no-motionbert-confidence`: remove o canal de confianca da entrada do MotionBERT
 - `--allow-motionbert-fallback-backend`: permite cair para o backend heuristico se o MotionBERT real falhar
 
-Esse fluxo gera os artefatos 3D da etapa `5.5`, incluindo `pose3d.npz`, `3d_keypoints_raw.npy`, `motionbert_run.json` e um debug side-by-side com 2D clean + 3D raw.
+Para gerar apenas o debug 3D, sem os videos 2D:
+
+```bash
+.venv/bin/python -m pose_module.robot_emotions \
+  export-pose3d \
+  --dataset-root data/RobotEmotions \
+  --output-dir output/robot_emotions_pose3d \
+  --clip-id robot_emotions_10ms_u02_tag05 \
+  --env-name openmmlab \
+  --no-debug-2d \
+  --debug-3d
+```
+
+Esse fluxo gera os artefatos 3D da etapa `5.5`, incluindo `pose3d.npz`, `3d_keypoints_raw.npy`, `motionbert_run.json` e, quando habilitado, um debug side-by-side com 2D clean + 3D raw.
 
 ## Saidas geradas
 
@@ -246,7 +262,9 @@ Quando voce roda o pipeline completo ate a etapa `5.5`, os arquivos abaixo sao a
 - `pose/pose3d.npz`
 - `pose/3d_keypoints_raw.npy`
 - `pose/motionbert_run.json`
-- `pose/debug_overlay_pose3d_raw.mp4` quando `save_debug=true`
+- `pose/debug_overlay_pose3d_raw.mp4` quando `save_debug=true` ou `save_debug_3d=true`
+
+No pipeline 3D, os overlays 2D e 3D podem ser controlados separadamente com `save_debug_2d` e `save_debug_3d`.
 
 Se uma mesma `Tag` tiver mais de uma captura, o extrator gera um registro por captura, por exemplo `...tag07` e `...tag07_2`.
 
@@ -282,6 +300,8 @@ Nos artefatos auxiliares da etapa 5.5:
 - `3d_keypoints_raw.npy`: `np.ndarray[T, 17, 3]` em referencial de camera
 - `motionbert_run.json`: resumo do backend, janelas e qualidade do lifting 3D
 - `debug_overlay_pose3d_raw.mp4`: video lado a lado com o video original + pose 2D clean e a pose 3D raw do MotionBERT
+
+No comando `export-pose3d`, voce pode controlar os overlays separadamente com `--debug-2d` / `--no-debug-2d` e `--debug-3d` / `--no-debug-3d`.
 
 ## Observacoes
 

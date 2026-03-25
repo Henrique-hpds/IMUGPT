@@ -11,12 +11,14 @@ from pose_module.interfaces import (
     PoseSequence2D,
     PoseSequence3D,
 )
+from pose_module.export.debug_video import _project_pose3d_sequence_to_panel
 from pose_module.motionbert.adapter import (
     build_motionbert_window_batch,
     merge_motionbert_window_predictions,
 )
 from pose_module.motionbert.lifter import (
     _canonicalize_backend_prediction_array,
+    _fill_missing_keypoints_for_lifter,
     _resolve_backend_joint_names,
     run_motionbert_lifter,
 )
@@ -329,19 +331,23 @@ class Pose3DPipelineTests(unittest.TestCase):
                 render_calls.append(dict(kwargs))
                 return output_path.resolve()
 
-            with patch("pose_module.pipeline.run_pose2d_pipeline", return_value=pose2d_result), patch(
+            with patch(
+                "pose_module.pipeline.run_pose2d_pipeline",
+                return_value=pose2d_result,
+            ) as mocked_pose2d_pipeline, patch(
                 "pose_module.pipeline.run_motionbert_lifter",
                 return_value=lifter_result,
             ), patch(
                 "pose_module.pipeline.render_pose3d_side_by_side_video",
                 side_effect=_fake_render_pose3d_side_by_side_video,
-            ):
+            ) as mocked_render:
                 result = run_pose3d_pipeline(
                     clip_id="clip_pipeline3d_debug",
                     video_path=str(Path(tmp_dir) / "video.mp4"),
                     output_dir=tmp_dir,
                     fps_target=20,
-                    save_debug=True,
+                    save_debug_2d=False,
+                    save_debug_3d=True,
                     env_name="current",
                     motionbert_window_size=24,
                     motionbert_window_overlap=0.5,
@@ -353,6 +359,41 @@ class Pose3DPipelineTests(unittest.TestCase):
             self.assertEqual(rendered_outputs, ["debug_overlay_pose3d_raw.mp4"])
             self.assertEqual(len(render_calls), 1)
             self.assertEqual(render_calls[0]["coordinate_space"], "pose_lifter_aligned")
+            self.assertEqual(mocked_render.call_count, 1)
+            self.assertEqual(mocked_pose2d_pipeline.call_args.kwargs["save_debug"], False)
+
+    def test_project_pose3d_pose_lifter_aligned_flips_horizontal_axis_to_match_video_view(self) -> None:
+        joint_positions_xyz = np.asarray(
+            [[[-1.0, 0.0, 0.2], [1.0, 0.0, 0.2]]],
+            dtype=np.float32,
+        )
+        joint_confidence = np.ones((1, 2), dtype=np.float32)
+
+        projected_points, _ = _project_pose3d_sequence_to_panel(
+            joint_positions_xyz,
+            joint_confidence,
+            width=200,
+            height=100,
+            coordinate_space="pose_lifter_aligned",
+        )
+
+        self.assertGreater(float(projected_points[0, 0, 0]), float(projected_points[0, 1, 0]))
+
+    def test_fill_missing_keypoints_for_lifter_replaces_nan_gaps_with_temporal_track(self) -> None:
+        sequence = _make_motionbert_sequence(5)
+        pelvis_index = MOTIONBERT_17_JOINT_NAMES.index("pelvis")
+        left_wrist_index = MOTIONBERT_17_JOINT_NAMES.index("left_wrist")
+
+        keypoints_xy = np.asarray(sequence.keypoints_xy, dtype=np.float32).copy()
+        confidence = np.asarray(sequence.confidence, dtype=np.float32).copy()
+        keypoints_xy[2, left_wrist_index] = np.asarray([np.nan, np.nan], dtype=np.float32)
+        confidence[2, left_wrist_index] = 0.0
+
+        filled = _fill_missing_keypoints_for_lifter(keypoints_xy, confidence)
+
+        self.assertTrue(np.isfinite(filled[2, left_wrist_index]).all())
+        self.assertTrue(np.allclose(filled[2, pelvis_index], keypoints_xy[2, pelvis_index], atol=1e-6))
+        self.assertTrue(np.allclose(filled[2, left_wrist_index], 0.5 * (keypoints_xy[1, left_wrist_index] + keypoints_xy[3, left_wrist_index]), atol=1e-6))
 
 
 if __name__ == "__main__":

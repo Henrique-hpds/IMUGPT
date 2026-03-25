@@ -370,7 +370,7 @@ def _project_pose3d_sequence_to_panel(
         scale = min((float(width) * 0.72) / x_span, (float(height) * 0.72) / z_span)
         ground_y = float(height) * 0.82
 
-        projected_points[..., 0] = ((points_xyz[..., 0] - x_center) * scale) + (float(width) * 0.5)
+        projected_points[..., 0] = ((x_center - points_xyz[..., 0]) * scale) + (float(width) * 0.5)
         projected_points[..., 1] = ground_y - ((points_xyz[..., 2] - z_min) * scale)
         projected_points[~valid_mask] = np.nan
         projected_depth[valid_mask] = valid_depth

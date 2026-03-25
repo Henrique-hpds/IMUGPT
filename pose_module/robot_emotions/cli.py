@@ -53,12 +53,16 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return 0
 
     if args.command == "export-pose3d":
+        save_debug_2d = bool(not args.no_debug) if args.debug_2d is None else bool(args.debug_2d)
+        save_debug_3d = bool(not args.no_debug) if args.debug_3d is None else bool(args.debug_3d)
         summary = run_robot_emotions_pose3d(
             dataset_root=str(args.dataset_root),
             output_dir=str(args.output_dir),
             fps_target=int(args.fps_target),
             clip_ids=None if args.clip_id is None else list(args.clip_id),
             save_debug=bool(not args.no_debug),
+            save_debug_2d=bool(save_debug_2d),
+            save_debug_3d=bool(save_debug_3d),
             env_name=str(args.env_name),
             motionbert_env_name=(
                 None if args.motionbert_env_name in (None, "") else str(args.motionbert_env_name)
@@ -154,6 +158,34 @@ def _add_pose_export_arguments(
     )
     if not include_motionbert_arguments:
         return
+    parser.add_argument(
+        "--debug-2d",
+        dest="debug_2d",
+        action="store_true",
+        default=None,
+        help="Enable the 2D debug overlay videos for export-pose3d.",
+    )
+    parser.add_argument(
+        "--no-debug-2d",
+        dest="debug_2d",
+        action="store_false",
+        default=None,
+        help="Disable the 2D debug overlay videos for export-pose3d.",
+    )
+    parser.add_argument(
+        "--debug-3d",
+        dest="debug_3d",
+        action="store_true",
+        default=None,
+        help="Enable the 3D debug overlay video for export-pose3d.",
+    )
+    parser.add_argument(
+        "--no-debug-3d",
+        dest="debug_3d",
+        action="store_false",
+        default=None,
+        help="Disable the 3D debug overlay video for export-pose3d.",
+    )
     parser.add_argument(
         "--motionbert-env-name",
         type=str,
