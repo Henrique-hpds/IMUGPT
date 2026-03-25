@@ -2,17 +2,17 @@
 
 from __future__ import annotations
 
-import argparse
 import json
 import re
-import subprocess
 from dataclasses import dataclass
-from fractions import Fraction
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 import pandas as pd
+
+from pose_module.io.cache import load_json_file
+from pose_module.io.video_loader import read_video_metadata
 
 from .metadata import (
     CHANNEL_AXIS_ORDER,
@@ -196,6 +196,21 @@ class RobotEmotionsExtractor:
         )
         return records
 
+    def select_records(
+        self,
+        *,
+        clip_ids: list[str] | tuple[str, ...] | None = None,
+    ) -> list[RobotEmotionsClipRecord]:
+        records = self.scan()
+        if clip_ids is not None:
+            requested = {str(clip_id) for clip_id in clip_ids}
+            records = [record for record in records if record.clip_id in requested]
+            found = {record.clip_id for record in records}
+            missing = sorted(requested.difference(found))
+            if missing:
+                raise ValueError(f"Unknown clip_id values requested: {missing}")
+        return records
+
     def extract_clip(self, record: RobotEmotionsClipRecord) -> RobotEmotionsExtractedClip:
         frame = pd.read_csv(record.imu_csv_path)
         if frame.shape[1] < 2:
@@ -226,7 +241,7 @@ class RobotEmotionsExtractor:
             imu=imu,
         )
 
-        video_metadata = _read_video_metadata(record.video_path)
+        video_metadata = read_video_metadata(record.video_path)
         row_ratio = float(len(timestamps_sec) / total_rows) if total_rows > 0 else 0.0
 
         warnings: list[str] = []
@@ -282,43 +297,16 @@ class RobotEmotionsExtractor:
         self,
         output_dir: str | Path,
         *,
-        limit: int | None = None,
+        clip_ids: list[str] | tuple[str, ...] | None = None,
     ) -> dict[str, Any]:
         output_root = Path(output_dir)
         output_root.mkdir(parents=True, exist_ok=True)
 
-        records = self.scan()
-        if limit is not None:
-            records = records[: int(limit)]
+        records = self.select_records(clip_ids=clip_ids)
 
         manifest_entries: list[dict[str, Any]] = []
         for record in records:
-            clip = self.extract_clip(record)
-            clip_dir = output_root / record.domain / f"user_{record.user_id:02d}" / record.clip_id
-            clip_dir.mkdir(parents=True, exist_ok=True)
-
-            imu_npz_path = clip_dir / "imu.npz"
-            np.savez_compressed(
-                imu_npz_path,
-                timestamps_sec=clip.timestamps_sec,
-                timestamp_columns_sec=clip.timestamp_columns_sec,
-                timestamp_column_names=np.asarray(clip.timestamp_column_names),
-                imu=clip.imu,
-                imu_flat=clip.imu.reshape(int(clip.imu.shape[0]), -1),
-                sensor_ids=np.asarray(clip.sensor_ids, dtype=np.int32),
-                channel_axis_order=np.asarray(CHANNEL_AXIS_ORDER),
-            )
-
-            metadata_json_path = clip_dir / "metadata.json"
-            manifest_entry = clip.to_manifest_entry(
-                output_dir=output_root,
-                imu_npz_path=imu_npz_path,
-                metadata_json_path=metadata_json_path,
-            )
-            metadata_json_path.write_text(
-                json.dumps(manifest_entry, indent=2, ensure_ascii=True) + "\n",
-                encoding="utf-8",
-            )
+            manifest_entry = self.ensure_exported_clip(record, output_root=output_root)
             manifest_entries.append(manifest_entry)
 
         manifest_path = output_root / "manifest.jsonl"
@@ -336,6 +324,27 @@ class RobotEmotionsExtractor:
         summary_path = output_root / "summary.json"
         summary_path.write_text(json.dumps(summary, indent=2, ensure_ascii=True) + "\n", encoding="utf-8")
         return summary
+
+    def ensure_exported_clip(
+        self,
+        record: RobotEmotionsClipRecord,
+        *,
+        output_root: str | Path,
+    ) -> dict[str, Any]:
+        output_root = Path(output_root)
+        output_root.mkdir(parents=True, exist_ok=True)
+
+        clip_dir = resolve_clip_output_dir(output_root, record)
+        metadata_json_path = clip_dir / "metadata.json"
+        imu_npz_path = clip_dir / "imu.npz"
+        if metadata_json_path.exists() and imu_npz_path.exists():
+            return load_json_file(metadata_json_path)
+
+        clip = self.extract_clip(record)
+        return save_extracted_clip(
+            clip,
+            output_root=output_root,
+        )
 
 
 def _parse_tag_number(name: str) -> int | None:
@@ -597,135 +606,43 @@ def _collapse_duplicate_timestamps(
     )
 
 
-def _read_video_metadata(video_path: Path) -> dict[str, Any]:
-    command = [
-        "ffprobe",
-        "-v",
-        "error",
-        "-select_streams",
-        "v:0",
-        "-show_entries",
-        "stream=avg_frame_rate,nb_frames,duration:format=duration",
-        "-of",
-        "json",
-        str(video_path),
-    ]
-    try:
-        completed = subprocess.run(
-            command,
-            check=True,
-            capture_output=True,
-            text=True,
-        )
-    except FileNotFoundError:
-        return {
-            "available": False,
-            "video_path": str(video_path.resolve()),
-            "reason": "ffprobe_not_found",
-        }
-    except subprocess.CalledProcessError as exc:
-        return {
-            "available": False,
-            "video_path": str(video_path.resolve()),
-            "reason": "ffprobe_failed",
-            "stderr": exc.stderr.strip(),
-        }
-
-    payload = json.loads(completed.stdout)
-    stream = payload.get("streams", [{}])[0]
-    format_info = payload.get("format", {})
-    fps = _parse_ffprobe_fps(stream.get("avg_frame_rate"))
-    num_frames = _parse_optional_int(stream.get("nb_frames"))
-    duration_sec = _parse_optional_float(stream.get("duration"))
-    if duration_sec is None:
-        duration_sec = _parse_optional_float(format_info.get("duration"))
-    if num_frames is None and fps is not None and duration_sec is not None:
-        num_frames = int(round(fps * duration_sec))
-
-    return {
-        "available": True,
-        "video_path": str(video_path.resolve()),
-        "fps": fps,
-        "num_frames": num_frames,
-        "duration_sec": duration_sec,
-    }
+def resolve_clip_output_dir(output_root: str | Path, record: RobotEmotionsClipRecord) -> Path:
+    output_root = Path(output_root)
+    return output_root / record.domain / f"user_{record.user_id:02d}" / record.clip_id
 
 
-def _parse_ffprobe_fps(raw_value: str | None) -> float | None:
-    if raw_value is None or raw_value in {"", "0/0"}:
-        return None
-    try:
-        return float(Fraction(str(raw_value)))
-    except (ValueError, ZeroDivisionError):
-        return None
+def resolve_pose_output_dir(output_root: str | Path, record: RobotEmotionsClipRecord) -> Path:
+    return resolve_clip_output_dir(output_root, record) / "pose"
 
+def save_extracted_clip(
+    clip: RobotEmotionsExtractedClip,
+    *,
+    output_root: str | Path,
+) -> dict[str, Any]:
+    output_root = Path(output_root)
+    clip_dir = resolve_clip_output_dir(output_root, clip.record)
+    clip_dir.mkdir(parents=True, exist_ok=True)
 
-def _parse_optional_int(raw_value: Any) -> int | None:
-    if raw_value in (None, ""):
-        return None
-    try:
-        return int(raw_value)
-    except (TypeError, ValueError):
-        return None
-
-
-def _parse_optional_float(raw_value: Any) -> float | None:
-    if raw_value in (None, ""):
-        return None
-    try:
-        return float(raw_value)
-    except (TypeError, ValueError):
-        return None
-
-
-def _build_arg_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Extract RobotEmotions into manifest + npz artifacts.")
-    parser.add_argument(
-        "--dataset-root",
-        type=Path,
-        default=Path("data/RobotEmotions"),
-        help="Root folder of the RobotEmotions dataset.",
+    imu_npz_path = clip_dir / "imu.npz"
+    np.savez_compressed(
+        imu_npz_path,
+        timestamps_sec=clip.timestamps_sec,
+        timestamp_columns_sec=clip.timestamp_columns_sec,
+        timestamp_column_names=np.asarray(clip.timestamp_column_names),
+        imu=clip.imu,
+        imu_flat=clip.imu.reshape(int(clip.imu.shape[0]), -1),
+        sensor_ids=np.asarray(clip.sensor_ids, dtype=np.int32),
+        channel_axis_order=np.asarray(CHANNEL_AXIS_ORDER),
     )
-    parser.add_argument(
-        "--output-dir",
-        type=Path,
-        default=None,
-        help="Optional output directory. If omitted, only a scan summary is printed.",
+
+    metadata_json_path = clip_dir / "metadata.json"
+    manifest_entry = clip.to_manifest_entry(
+        output_dir=output_root,
+        imu_npz_path=imu_npz_path,
+        metadata_json_path=metadata_json_path,
     )
-    parser.add_argument(
-        "--domains",
-        nargs="+",
-        default=["10ms", "30ms"],
-        help="Domains to scan.",
+    metadata_json_path.write_text(
+        json.dumps(manifest_entry, indent=2, ensure_ascii=True) + "\n",
+        encoding="utf-8",
     )
-    parser.add_argument(
-        "--limit",
-        type=int,
-        default=None,
-        help="Optional clip limit for quick validation runs.",
-    )
-    return parser
-
-
-def main(argv: list[str] | None = None) -> int:
-    parser = _build_arg_parser()
-    args = parser.parse_args(argv)
-
-    extractor = RobotEmotionsExtractor(args.dataset_root, domains=tuple(args.domains))
-    records = extractor.scan()
-    if args.limit is not None:
-        records = records[: int(args.limit)]
-
-    if args.output_dir is None:
-        summary = {
-            "dataset_root": str(Path(args.dataset_root).resolve()),
-            "domains": list(args.domains),
-            "num_records": int(len(records)),
-            "sample_clip_ids": [record.clip_id for record in records[:5]],
-        }
-        print(json.dumps(summary, indent=2, ensure_ascii=True))
-        return 0
-
-    summary = extractor.export(args.output_dir, limit=args.limit)
-    print(json.dumps(summary, indent=2, ensure_ascii=True))
-    return 0
+    return manifest_entry

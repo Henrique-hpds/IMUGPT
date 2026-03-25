@@ -71,3 +71,4 @@ dmypy.json
 .vscode
 
 data/
+output/

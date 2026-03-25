@@ -1,0 +1,19 @@
+pose_module:
+  mode: offline
+  fps_target: 20
+  single_person_only: true
+  save_intermediate: true
+
+vitpose:
+  model_alias: vitpose-b
+  device: auto
+  keypoint_format: coco
+
+tracking:
+  max_gap_frames: 5
+  min_iou: 0.1
+  max_center_distance: 1.75
+
+quality:
+  min_visible_joint_ratio: 0.8
+  min_mean_confidence: 0.5
