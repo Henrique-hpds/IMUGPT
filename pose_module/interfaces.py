@@ -29,6 +29,46 @@ COCO_17_JOINT_NAMES: Tuple[str, ...] = (
     "right_ankle",
 )
 
+MOTIONBERT_17_JOINT_NAMES: Tuple[str, ...] = (
+    "pelvis",
+    "left_hip",
+    "right_hip",
+    "spine",
+    "left_knee",
+    "right_knee",
+    "thorax",
+    "left_ankle",
+    "right_ankle",
+    "neck",
+    "head",
+    "left_shoulder",
+    "right_shoulder",
+    "left_elbow",
+    "right_elbow",
+    "left_wrist",
+    "right_wrist",
+)
+
+MOTIONBERT_17_PARENT_INDICES: Tuple[int, ...] = (
+    -1,
+    0,
+    0,
+    0,
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    9,
+    6,
+    6,
+    11,
+    12,
+    13,
+    14,
+)
+
 
 @dataclass(frozen=True)
 class Pose2DJob:

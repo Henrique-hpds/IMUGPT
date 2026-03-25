@@ -7,9 +7,14 @@ from typing import Any, Dict, Mapping, Optional
 
 import numpy as np
 
+from pose_module.export.debug_video import (
+    render_pose_overlay_video,
+    resolve_debug_overlay_variant_path,
+)
 from pose_module.interfaces import Pose2DJob
 from pose_module.io.cache import write_json_file
 from pose_module.io.video_loader import frame_indices_to_timestamps, select_frame_indices
+from pose_module.processing.cleaner2d import clean_pose_sequence2d
 from pose_module.processing.quality import merge_stage53_quality_reports
 from pose_module.tracking.person_selector import build_person_track_report, link_person_tracks
 from pose_module.vitpose.adapter import (
@@ -80,7 +85,7 @@ def run_pose2d_pipeline(
         _optional_float(video_metadata.get("fps")),
     )
 
-    pose_sequence, pose_quality = canonicalize_pose_sequence2d(
+    raw_pose_sequence, pose_quality = canonicalize_pose_sequence2d(
         clip_id=str(clip_id),
         selected_track=selected_track,
         selected_frame_indices=selected_frame_indices,
@@ -89,28 +94,67 @@ def run_pose2d_pipeline(
         fps_original=_optional_float(video_metadata.get("fps")),
         source=str(model_alias),
     )
+    pose_sequence, cleaner_quality, cleaner_artifacts = clean_pose_sequence2d(
+        raw_pose_sequence,
+        track_report=track_report,
+    )
     merged_quality = merge_stage53_quality_reports(
         clip_id=str(clip_id),
         backend_quality=backend_run.get("quality_report", {}),
         track_report=track_report,
         pose_quality=pose_quality,
+        cleaner_quality=cleaner_quality,
     )
+    raw_debug_overlay_path = None
+    clean_debug_overlay_path = None
+    if save_debug:
+        raw_debug_overlay_path = _render_debug_overlay_variant(
+            video_path=str(video_path),
+            output_path=resolve_debug_overlay_variant_path(output_dir, variant="raw", enabled=True),
+            pose_sequence=raw_pose_sequence,
+            keypoints_xy=np.asarray(raw_pose_sequence.keypoints_xy, dtype=np.float32),
+            overlay_variant="raw",
+            merged_quality=merged_quality,
+        )
+        clean_debug_overlay_path = _render_debug_overlay_variant(
+            video_path=str(video_path),
+            output_path=resolve_debug_overlay_variant_path(output_dir, variant="clean", enabled=True),
+            pose_sequence=pose_sequence,
+            keypoints_xy=_restore_clean_pose_pixels(
+                pose_sequence.keypoints_xy,
+                cleaner_artifacts["normalization_centers_xy"],
+                cleaner_artifacts["normalization_scales"],
+                pose_sequence.confidence,
+            ),
+            overlay_variant="clean",
+            merged_quality=merged_quality,
+        )
+
     write_json_file(merged_quality, output_dir / "quality_report.json")
+    np.save(output_dir / "2d_keypoints_raw.npy", np.asarray(raw_pose_sequence.keypoints_xy, dtype=np.float32))
+    np.save(output_dir / "2d_keypoints_clean.npy", np.asarray(pose_sequence.keypoints_xy, dtype=np.float32))
     write_pose_sequence_npz(pose_sequence, output_dir / "pose2d.npz")
 
     return {
         "clip_id": str(clip_id),
         "pose_sequence": pose_sequence,
+        "raw_pose_sequence": raw_pose_sequence,
         "quality_report": merged_quality,
+        "cleaner_quality": cleaner_quality,
         "track_report": track_report,
         "backend_run": backend_run,
+        "cleaner_artifacts": cleaner_artifacts,
         "artifacts": {
             "pose2d_npz_path": str((output_dir / "pose2d.npz").resolve()),
+            "pose2d_raw_keypoints_path": str((output_dir / "2d_keypoints_raw.npy").resolve()),
+            "pose2d_clean_keypoints_path": str((output_dir / "2d_keypoints_clean.npy").resolve()),
             "person_track_json_path": str((output_dir / "person_track.json").resolve()),
             "quality_report_json_path": str((output_dir / "quality_report.json").resolve()),
             "backend_run_json_path": str((output_dir / "backend_run.json").resolve()),
             "raw_prediction_json_path": str(Path(raw_prediction_json_path).resolve()),
             "debug_overlay_path": backend_run["artifacts"].get("debug_overlay_path"),
+            "debug_overlay_raw_path": None if raw_debug_overlay_path is None else str(raw_debug_overlay_path),
+            "debug_overlay_clean_path": None if clean_debug_overlay_path is None else str(clean_debug_overlay_path),
         },
     }
 
@@ -125,3 +169,50 @@ def _optional_int(raw_value: Any) -> Optional[int]:
     if raw_value in (None, ""):
         return None
     return int(raw_value)
+
+
+def _restore_clean_pose_pixels(
+    normalized_keypoints_xy: np.ndarray,
+    centers_xy: np.ndarray,
+    scales: np.ndarray,
+    confidence: np.ndarray,
+) -> np.ndarray:
+    points_xy = (
+        np.asarray(normalized_keypoints_xy, dtype=np.float32)
+        * np.asarray(scales, dtype=np.float32)[:, None, None]
+    ) + np.asarray(centers_xy, dtype=np.float32)[:, None, :]
+    invalid_mask = np.asarray(confidence, dtype=np.float32) <= 0.0
+    points_xy[invalid_mask] = np.nan
+    return points_xy
+
+
+def _render_debug_overlay_variant(
+    *,
+    video_path: str,
+    output_path: Path | None,
+    pose_sequence: Any,
+    keypoints_xy: np.ndarray,
+    overlay_variant: str,
+    merged_quality: Dict[str, Any],
+) -> Path | None:
+    if output_path is None:
+        return None
+    try:
+        return render_pose_overlay_video(
+            video_path=video_path,
+            output_path=output_path,
+            frame_indices=np.asarray(pose_sequence.frame_indices, dtype=np.int32),
+            keypoints_xy=np.asarray(keypoints_xy, dtype=np.float32),
+            confidence=np.asarray(pose_sequence.confidence, dtype=np.float32),
+            joint_names=pose_sequence.joint_names_2d,
+            bbox_xywh=np.asarray(pose_sequence.bbox_xywh, dtype=np.float32),
+            fps=pose_sequence.fps,
+            overlay_variant=str(overlay_variant),
+        )
+    except Exception as exc:
+        notes = list(merged_quality.get("notes", []))
+        notes.append(f"{overlay_variant}_debug_overlay_failed:{exc}")
+        merged_quality["notes"] = list(dict.fromkeys(str(value) for value in notes))
+        if merged_quality.get("status") == "ok":
+            merged_quality["status"] = "warning"
+        return None

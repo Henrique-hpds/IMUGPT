@@ -5,6 +5,7 @@ Este modulo documenta como rodar o pipeline de pose implementado ate agora. No m
 - `5.1 video_loader`
 - `5.2 person_selector`
 - `5.3 vitpose_2d_estimator`
+- `5.4 pose2d_cleaner`
 
 ## O que esta implementado
 
@@ -15,16 +16,19 @@ Fluxo atual:
 - exportacao de `imu.npz` e `metadata.json`
 - inferencia 2D com `ViTPose-B`
 - associacao temporal e selecao da pessoa principal
+- limpeza temporal 2D, remocao de outliers e adaptacao para `motionbert17`
 - exportacao de `pose/pose2d.npz` e artefatos auxiliares
 
 ## Estrutura do modulo
 
-- `pose_module/pipeline.py`: orquestracao das etapas 5.1 a 5.3
+- `pose_module/pipeline.py`: orquestracao das etapas 5.1 a 5.4
 - `pose_module/interfaces.py`: contratos e estruturas canonicas
 - `pose_module/io/video_loader.py`: metadata de video, fps e selecao de frames
 - `pose_module/tracking/person_selector.py`: tracking simples e selecao do sujeito
 - `pose_module/vitpose/estimator.py`: backend ViTPose no ambiente `openmmlab`
 - `pose_module/vitpose/adapter.py`: conversao para `PoseSequence2D`
+- `pose_module/processing/cleaner2d.py`: limpeza temporal e adaptacao para `MotionBERT`
+- `pose_module/processing/temporal_filters.py`: interpolacao e suavizacao temporal
 - `pose_module/processing/quality.py`: consolidacao de relatorios
 - `pose_module/robot_emotions/extractor.py`: scanner e export especificos do dataset
 - `pose_module/robot_emotions/pose2d.py`: wrapper do dataset sobre o pipeline generico
@@ -77,7 +81,11 @@ Esse comando usa o layout do extrator, garante `imu.npz` e `metadata.json` quand
   export-pose2d \
   --dataset-root data/RobotEmotions \
   --output-dir output/robot_emotions_pose2d \
+  --clip-id robot_emotions_10ms_u02_tag05 \
   --env-name openmmlab
+```
+
+Retirar `--clip-id` para rodar tudo.
 
 Selecao de ambiente do backend (`--env-name`):
 
@@ -93,7 +101,8 @@ Rodar sem gerar o video de debug:
   export-pose2d \
   --dataset-root data/RobotEmotions \
   --output-dir output/robot_emotions_pose2d \
-  --clip-id robot_emotions_30ms_u06_tag18 \
+  --clip-id robot_emotions_10ms_u02_tag05 \
+  --env-name openmmlab \
   --no-debug
 ```
 
@@ -104,11 +113,15 @@ Para cada clipe exportado:
 - `imu.npz`
 - `metadata.json`
 - `pose/pose2d.npz`
+- `pose/2d_keypoints_raw.npy`
+- `pose/2d_keypoints_clean.npy`
 - `pose/person_track.json`
 - `pose/quality_report.json`
 - `pose/backend_run.json`
 - `pose/raw_predictions.json`
 - `pose/debug_overlay.mp4` quando `save_debug=true`
+- `pose/debug_overlay_raw.mp4` quando `save_debug=true`
+- `pose/debug_overlay_clean.mp4` quando `save_debug=true`
 
 Na raiz da exportacao:
 
@@ -142,6 +155,11 @@ No `pose/pose2d.npz`:
 - `frame_indices`: `np.ndarray[T]`
 - `timestamps_sec`: `np.ndarray[T]`
 
+Nos artefatos auxiliares da etapa 5.4:
+
+- `2d_keypoints_raw.npy`: `np.ndarray[T, 17, 2]` na saida canonica do ViTPose
+- `2d_keypoints_clean.npy`: `np.ndarray[T, 17, 2]` ja limpa e normalizada para o contrato `motionbert17`
+
 ## Observacoes
 
 - `fps_target` inicial recomendado: `20`
@@ -151,7 +169,6 @@ No `pose/pose2d.npz`:
 - o fluxo padrao exporta todos os clipes encontrados nos dominios selecionados
 - para restringir a execucao, use `--clip-id` ou `--domains`
 - as proximas etapas do pipeline ainda nao foram implementadas aqui:
-  - `pose2d_cleaner`
   - `motionbert_3d_lifter`
   - `skeleton_mapper`
   - `metric_normalizer`

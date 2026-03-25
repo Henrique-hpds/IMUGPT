@@ -14,6 +14,13 @@ tracking:
   min_iou: 0.1
   max_center_distance: 1.75
 
+cleaning:
+  max_gap_interp: 5
+  savgol_window: 9
+  savgol_polyorder: 2
+  low_conf_threshold: 0.2
+
 quality:
   min_visible_joint_ratio: 0.8
   min_mean_confidence: 0.5
+  max_outlier_ratio: 0.1
