@@ -12,6 +12,7 @@ from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Union
 import numpy as np
 
 from pose_module.interfaces import (
+    COCO_17_JOINT_NAMES,
     MOTIONBERT_17_JOINT_NAMES,
     MOTIONBERT_17_PARENT_INDICES,
     MotionBERTJob,
@@ -38,6 +39,70 @@ DEFAULT_FALLBACK_BACKEND_NAME = "motionbert_heuristic_baseline"
 DEFAULT_SEQUENCE_BATCH_SIZE = 32
 
 MotionBERTPredictor = Callable[[np.ndarray], Union[np.ndarray, Mapping[str, Any]]]
+
+_H36M_17_JOINT_NAMES = (
+    "root",
+    "right_hip",
+    "right_knee",
+    "right_foot",
+    "left_hip",
+    "left_knee",
+    "left_foot",
+    "spine",
+    "thorax",
+    "neck_base",
+    "head",
+    "left_shoulder",
+    "left_elbow",
+    "left_wrist",
+    "right_shoulder",
+    "right_elbow",
+    "right_wrist",
+)
+
+_MB17_NAME_ALIASES = {
+    "pelvis": ("pelvis", "root"),
+    "left_hip": ("left_hip",),
+    "right_hip": ("right_hip",),
+    "spine": ("spine",),
+    "left_knee": ("left_knee",),
+    "right_knee": ("right_knee",),
+    "thorax": ("thorax",),
+    "left_ankle": ("left_ankle", "left_foot"),
+    "right_ankle": ("right_ankle", "right_foot"),
+    "neck": ("neck", "neck_base"),
+    "head": ("head",),
+    "left_shoulder": ("left_shoulder",),
+    "right_shoulder": ("right_shoulder",),
+    "left_elbow": ("left_elbow",),
+    "right_elbow": ("right_elbow",),
+    "left_wrist": ("left_wrist",),
+    "right_wrist": ("right_wrist",),
+}
+
+_H36M17_NAME_ALIASES = {
+    "root": ("root", "pelvis"),
+    "right_hip": ("right_hip",),
+    "right_knee": ("right_knee",),
+    "right_foot": ("right_foot", "right_ankle"),
+    "left_hip": ("left_hip",),
+    "left_knee": ("left_knee",),
+    "left_foot": ("left_foot", "left_ankle"),
+    "spine": ("spine",),
+    "thorax": ("thorax",),
+    "neck_base": ("neck_base", "neck"),
+    "head": ("head",),
+    "left_shoulder": ("left_shoulder",),
+    "left_elbow": ("left_elbow",),
+    "left_wrist": ("left_wrist",),
+    "right_shoulder": ("right_shoulder",),
+    "right_elbow": ("right_elbow",),
+    "right_wrist": ("right_wrist",),
+}
+
+_POSE_LIFTER_AXIS_ORDER = (0, 2, 1)
+_POSE_LIFTER_AXIS_SIGN = (-1.0, 1.0, -1.0)
+_DEFAULT_IMAGE_SIZE_HW = (256, 256)
 
 _DEPTH_PRIORS = {
     "pelvis": 0.00,
@@ -74,6 +139,8 @@ def run_motionbert_lifter(
     device: str = "auto",
     env_name: str = "openmmlab",
     allow_fallback_backend: bool = False,
+    image_width: Optional[int] = None,
+    image_height: Optional[int] = None,
 ) -> Dict[str, Any]:
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -101,6 +168,8 @@ def run_motionbert_lifter(
         config_path=None if resolved_artifacts is None else str(resolved_artifacts.config_path),
         device=str(device),
         pose2d_source=str(sequence.source),
+        image_width=None if image_width is None else int(image_width),
+        image_height=None if image_height is None else int(image_height),
     )
 
     write_pose_sequence_npz(sequence, job.input_pose2d_path)
@@ -257,9 +326,10 @@ def run_motionbert_backend_job(
 
 def run_motionbert_backend(job: MotionBERTJob) -> Dict[str, Any]:
     import torch
-    from mmengine.dataset import Compose, pseudo_collate
-    from mmengine.registry import init_default_scope
+    from mmengine.structures import InstanceData
     from mmpose.apis import init_model
+    from mmpose.apis import convert_keypoint_definition, extract_pose_sequence, inference_pose_lifter_model
+    from mmpose.structures import PoseDataSample
 
     if job.config_path in (None, "") or job.checkpoint in (None, ""):
         raise FileNotFoundError("MotionBERT config/checkpoint could not be resolved.")
@@ -270,87 +340,181 @@ def run_motionbert_backend(job: MotionBERTJob) -> Dict[str, Any]:
         checkpoint=str(job.checkpoint),
         device=_resolve_device(str(job.device)),
     )
-
-    init_default_scope(model.cfg.get("default_scope", "mmpose"))
-    pipeline = Compose(model.cfg.test_dataloader.dataset.pipeline)
     dataset_meta = dict(model.dataset_meta or {})
-    effective_window_size = _resolve_model_sequence_length(model, fallback=int(job.window_size))
-    window_batch = build_motionbert_window_batch(
-        sequence,
-        window_size=int(effective_window_size),
-        window_overlap=float(job.window_overlap),
-        include_confidence=bool(job.include_confidence),
+    backend_joint_names = _resolve_lifter_joint_names(
+        dataset_meta,
+        joint_count=len(MOTIONBERT_17_JOINT_NAMES),
     )
+    conversion_target_joint_names, conversion_weights = _build_lifter_input_conversion(
+        src_joint_names=tuple(str(name) for name in sequence.joint_names_2d),
+        dst_dataset_name=str(dataset_meta.get("dataset_name", "")),
+        convert_keypoint_definition=convert_keypoint_definition,
+    )
+    image_size_hw = _resolve_image_size_hw(job=job, sequence=sequence)
+    causal, effective_window_size, seq_step = _lift_dataset_params(model)
 
-    predictions_3d = []
-    for start_index in range(0, window_batch.num_windows, DEFAULT_SEQUENCE_BATCH_SIZE):
-        end_index = min(start_index + DEFAULT_SEQUENCE_BATCH_SIZE, window_batch.num_windows)
-        data_list = []
-        batch_inputs = window_batch.inputs[start_index:end_index]
-        for window_input in batch_inputs:
-            window_keypoints = np.asarray(window_input[..., :2], dtype=np.float32)
-            window_visibility = (
-                np.asarray(window_input[..., 2], dtype=np.float32)
-                if window_input.shape[-1] > 2
-                else np.ones(window_input.shape[:2], dtype=np.float32)
-            )
-            window_keypoints = window_keypoints + np.asarray([1.0, 1.0], dtype=np.float32)
-            data_info = {
-                "keypoints": window_keypoints,
-                "keypoints_visible": window_visibility,
-                "lifting_target": np.zeros(
-                    (window_keypoints.shape[0], window_keypoints.shape[1], 3),
-                    dtype=np.float32,
-                ),
-                "factor": np.zeros((window_keypoints.shape[0],), dtype=np.float32),
-                "lifting_target_visible": np.ones(
-                    (window_keypoints.shape[0], window_keypoints.shape[1], 1),
-                    dtype=np.float32,
-                ),
-                "camera_param": {"w": 2.0, "h": 2.0},
-            }
-            data_info.update(dataset_meta)
-            data_list.append(pipeline(data_info))
+    pred_frames: list[np.ndarray | None] = []
+    pred_confidence: list[np.ndarray | None] = []
+    pose_history: list[list[Any]] = []
 
-        batch = pseudo_collate(data_list)
+    for frame_index in range(sequence.num_frames):
+        keypoints_xy = np.asarray(sequence.keypoints_xy[frame_index], dtype=np.float32)
+        confidence = np.asarray(sequence.confidence[frame_index], dtype=np.float32)
+        valid_mask = np.isfinite(keypoints_xy).all(axis=1) & (confidence > 0.0)
+
+        if not np.any(valid_mask):
+            pose_history.append([])
+            pred_frames.append(None)
+            pred_confidence.append(None)
+            continue
+
+        converted_keypoints_xy = _apply_linear_conversion(conversion_weights, keypoints_xy)
+        converted_mask = _convert_mask(valid_mask, conversion_weights)
+        converted_confidence = _convert_confidence(
+            confidence,
+            weights=conversion_weights,
+            converted_mask=converted_mask,
+        )
+        if not bool(job.include_confidence):
+            converted_confidence[converted_mask] = 1.0
+
+        if not np.any(converted_mask):
+            pose_history.append([])
+            pred_frames.append(None)
+            pred_confidence.append(None)
+            continue
+
+        pose_history.append(
+            [
+                _build_pose_lifter_2d_sample(
+                    PoseDataSample=PoseDataSample,
+                    InstanceData=InstanceData,
+                    keypoints=converted_keypoints_xy,
+                    confidence=converted_confidence,
+                    mask=converted_mask,
+                    track_id=0,
+                )
+            ]
+        )
+
+        pose_seq_2d = extract_pose_sequence(
+            pose_history,
+            frame_idx=frame_index,
+            causal=causal,
+            seq_len=effective_window_size,
+            step=seq_step,
+        )
         with torch.no_grad():
-            results = model.test_step(batch)
-        predictions_3d.extend(
-            _extract_backend_window_predictions(
-                results,
-                expected_window_size=int(effective_window_size),
+            lift_results = inference_pose_lifter_model(
+                model,
+                pose_seq_2d,
+                image_size=image_size_hw,
+                norm_pose_2d=True,
             )
-        )
 
-    if len(predictions_3d) != int(window_batch.num_windows):
-        raise RuntimeError(
-            f"MotionBERT backend produced {len(predictions_3d)} windows, expected {window_batch.num_windows}"
-        )
+        if not lift_results:
+            pred_frames.append(None)
+            pred_confidence.append(None)
+            continue
 
-    joint_positions_xyz = merge_motionbert_window_predictions(
-        np.asarray(predictions_3d, dtype=np.float32),
-        window_batch,
-        num_frames=int(sequence.num_frames),
-    )
+        first = lift_results[0]
+        if not hasattr(first, "pred_instances"):
+            pred_frames.append(None)
+            pred_confidence.append(None)
+            continue
+
+        pred_instances = first.pred_instances
+        keypoints_3d = _postprocess_lifter_keypoints_3d(
+            getattr(pred_instances, "keypoints", np.empty((0, 3), dtype=np.float32))
+        )
+        if keypoints_3d.size == 0:
+            pred_frames.append(None)
+            pred_confidence.append(None)
+            continue
+
+        canonical_keypoints_3d = _canonicalize_backend_prediction_array(
+            keypoints_3d[None, ...],
+            joint_names=backend_joint_names,
+        )[0]
+        canonical_input_confidence = _canonicalize_backend_vector_to_mb17(
+            converted_confidence,
+            joint_names=backend_joint_names,
+        )
+        canonical_input_mask = _canonicalize_backend_vector_to_mb17(
+            converted_mask.astype(np.float32),
+            joint_names=backend_joint_names,
+        ) > 0.0
+
+        score_values = getattr(pred_instances, "keypoint_scores", None)
+        if score_values is None:
+            canonical_scores = np.ones((len(MOTIONBERT_17_JOINT_NAMES),), dtype=np.float32)
+        else:
+            scores = np.asarray(score_values, dtype=np.float32)
+            while scores.ndim > 1 and scores.shape[0] == 1:
+                scores = scores[0]
+            canonical_scores = _canonicalize_backend_vector_to_mb17(
+                scores.reshape(-1),
+                joint_names=backend_joint_names,
+            )
+
+        combined_confidence = np.minimum(
+            canonical_input_confidence.astype(np.float32, copy=False),
+            canonical_scores.astype(np.float32, copy=False),
+        )
+        valid_3d_mask = np.isfinite(canonical_keypoints_3d).all(axis=1) & canonical_input_mask & (combined_confidence > 0.0)
+        canonical_keypoints_3d[~valid_3d_mask] = np.nan
+        combined_confidence[~valid_3d_mask] = 0.0
+
+        pred_frames.append(canonical_keypoints_3d.astype(np.float32, copy=False))
+        pred_confidence.append(combined_confidence.astype(np.float32, copy=False))
+
+    joint_positions_xyz = []
+    joint_confidence = []
+    num_joints = len(MOTIONBERT_17_JOINT_NAMES)
+    for frame_points_xyz, frame_confidence in zip(pred_frames, pred_confidence):
+        if frame_points_xyz is None or frame_confidence is None:
+            joint_positions_xyz.append(np.full((num_joints, 3), np.nan, dtype=np.float32))
+            joint_confidence.append(np.zeros((num_joints,), dtype=np.float32))
+            continue
+        joint_positions_xyz.append(np.asarray(frame_points_xyz, dtype=np.float32))
+        joint_confidence.append(np.asarray(frame_confidence, dtype=np.float32))
+
+    joint_positions_xyz = np.stack(joint_positions_xyz, axis=0).astype(np.float32)
+    joint_confidence = np.stack(joint_confidence, axis=0).astype(np.float32)
     pose_sequence = PoseSequence3D(
         clip_id=str(sequence.clip_id),
         fps=None if sequence.fps is None else float(sequence.fps),
         fps_original=None if sequence.fps_original is None else float(sequence.fps_original),
         joint_names_3d=list(MOTIONBERT_17_JOINT_NAMES),
         joint_positions_xyz=joint_positions_xyz,
-        joint_confidence=np.asarray(sequence.confidence, dtype=np.float32),
+        joint_confidence=joint_confidence,
         skeleton_parents=list(MOTIONBERT_17_PARENT_INDICES),
         frame_indices=np.asarray(sequence.frame_indices, dtype=np.int32),
         timestamps_sec=np.asarray(sequence.timestamps_sec, dtype=np.float32),
         source=f"{sequence.source}_{job.backend_name}",
-        coordinate_space="camera",
+        coordinate_space="pose_lifter_aligned",
     )
     np.save(job.raw_keypoints_3d_path, np.asarray(pose_sequence.joint_positions_xyz, dtype=np.float32))
     write_pose_sequence3d_npz(pose_sequence, job.pose3d_npz_path)
 
     notes = []
     if int(effective_window_size) != int(job.window_size):
-        notes.append(f"window_size_adjusted_to_model_seq_len:{effective_window_size}")
+        notes.append(f"window_size_adjusted_to_pose_lifter_seq_len:{effective_window_size}")
+    if int(seq_step) != max(1, int(round(float(job.window_size) * (1.0 - float(job.window_overlap))))):
+        notes.append(f"pose_lifter_seq_step:{seq_step}")
+    if backend_joint_names is not None:
+        notes.append(
+            "backend_joint_order_canonicalized_from:"
+            + ",".join(str(name) for name in backend_joint_names)
+        )
+    notes.append("official_pose_lifter_api_used")
+    notes.append("input_sequence_converted_before_lifting:" + ",".join(conversion_target_joint_names))
+    notes.append(
+        "coordinate_transform_applied:"
+        + ",".join(str(value) for value in _POSE_LIFTER_AXIS_ORDER)
+        + "/"
+        + ",".join(str(value) for value in _POSE_LIFTER_AXIS_SIGN)
+    )
 
     quality_report = _build_motionbert_quality_report(
         pose_sequence=pose_sequence,
@@ -359,8 +523,8 @@ def run_motionbert_backend(job: MotionBERTJob) -> Dict[str, Any]:
         fallback_backend_used=False,
         requested_window_overlap=float(job.window_overlap),
         effective_window_size=int(effective_window_size),
-        num_windows=int(window_batch.num_windows),
-        input_channels=3 if job.include_confidence else 2,
+        num_windows=int(sequence.num_frames),
+        input_channels=2,
         notes=notes,
     )
 
@@ -377,8 +541,11 @@ def run_motionbert_backend(job: MotionBERTJob) -> Dict[str, Any]:
             "config_path": str(job.config_path),
             "checkpoint_path": str(job.checkpoint),
             "device": _resolve_device(str(job.device)),
-            "mode": "mmpose_pose_lifter",
+            "mode": "mmpose_pose_lifter_api",
             "effective_window_size": int(effective_window_size),
+            "seq_step": int(seq_step),
+            "image_size_hw": [int(image_size_hw[0]), int(image_size_hw[1])],
+            "lifter_dataset_name": str(dataset_meta.get("dataset_name", "")),
         },
         "error": None,
     }
@@ -501,6 +668,7 @@ def _extract_backend_window_predictions(
     results: Sequence[Any],
     *,
     expected_window_size: int,
+    joint_names: Sequence[str] | None = None,
 ) -> List[np.ndarray]:
     predictions: List[np.ndarray] = []
     for result in results:
@@ -526,8 +694,371 @@ def _extract_backend_window_predictions(
             raise RuntimeError(
                 f"Unexpected MotionBERT temporal window shape: {array.shape[0]} != {expected_window_size}"
             )
-        predictions.append(array.astype(np.float32, copy=False))
+        predictions.append(
+            _canonicalize_backend_prediction_array(
+                array.astype(np.float32, copy=False),
+                joint_names=joint_names,
+            )
+        )
     return predictions
+
+
+def _resolve_lifter_joint_names(
+    dataset_meta: Mapping[str, Any],
+    joint_count: int,
+) -> List[str]:
+    keypoint_id2name = dataset_meta.get("keypoint_id2name")
+    if isinstance(keypoint_id2name, Mapping) and len(keypoint_id2name) > 0:
+        try:
+            ordered_keys = sorted((int(key), str(value)) for key, value in keypoint_id2name.items())
+            if len(ordered_keys) == int(joint_count):
+                return [value for _, value in ordered_keys]
+        except Exception:
+            pass
+
+    keypoint_names = dataset_meta.get("keypoint_names")
+    if isinstance(keypoint_names, (list, tuple)) and len(keypoint_names) == int(joint_count):
+        return [str(value) for value in keypoint_names]
+
+    keypoint_name2id = dataset_meta.get("keypoint_name2id")
+    if isinstance(keypoint_name2id, Mapping) and len(keypoint_name2id) > 0:
+        try:
+            ordered_items = sorted((int(value), str(key)) for key, value in keypoint_name2id.items())
+            if len(ordered_items) == int(joint_count):
+                return [name for _, name in ordered_items]
+        except Exception:
+            pass
+
+    dataset_name = _normalize_lifter_dataset_name(str(dataset_meta.get("dataset_name", "")))
+    if dataset_name == "h36m" and int(joint_count) == len(_H36M_17_JOINT_NAMES):
+        return list(_H36M_17_JOINT_NAMES)
+    return [f"joint_{index}" for index in range(int(joint_count))]
+
+
+def _resolve_backend_joint_names(dataset_meta: Mapping[str, Any]) -> Optional[List[str]]:
+    joint_count = int(dataset_meta.get("num_keypoints", len(_H36M_17_JOINT_NAMES)))
+    return _resolve_lifter_joint_names(dataset_meta, joint_count)
+
+
+def _normalize_lifter_dataset_name(name: str) -> str:
+    token = str(name).strip().lower()
+    if not token:
+        return token
+    if "wholebody" in token and "coco" in token:
+        return "coco_wholebody"
+    if "coco" in token:
+        return "coco"
+    if "aic" in token:
+        return "aic"
+    if "posetrack" in token:
+        return "posetrack18"
+    if "crowdpose" in token:
+        return "crowdpose"
+    if "h36m" in token or "human36m" in token:
+        return "h36m"
+    if "mb17" in token or "motionbert17" in token:
+        return "mb17"
+    return token
+
+
+def _infer_sequence_dataset_name(joint_names: Sequence[str]) -> str:
+    normalized_joint_names = tuple(str(name) for name in joint_names)
+    if normalized_joint_names == tuple(COCO_17_JOINT_NAMES):
+        return "coco"
+    if normalized_joint_names == tuple(MOTIONBERT_17_JOINT_NAMES):
+        return "mb17"
+    if normalized_joint_names == tuple(_H36M_17_JOINT_NAMES):
+        return "h36m"
+    return ""
+
+
+def _build_mb17_to_h36m_weights() -> np.ndarray:
+    src_index = {name: idx for idx, name in enumerate(MOTIONBERT_17_JOINT_NAMES)}
+    dst_index = {name: idx for idx, name in enumerate(_H36M_17_JOINT_NAMES)}
+    weights = np.zeros((len(_H36M_17_JOINT_NAMES), len(MOTIONBERT_17_JOINT_NAMES)), dtype=np.float32)
+    for dst_joint_name, aliases in _H36M17_NAME_ALIASES.items():
+        dst_joint_index = dst_index[dst_joint_name]
+        for alias in aliases:
+            if alias in src_index:
+                weights[dst_joint_index, src_index[alias]] = np.float32(1.0)
+                break
+    return weights
+
+
+def _derive_linear_conversion_weights(
+    *,
+    src_joint_count: int,
+    src_dataset_name: str,
+    dst_dataset_name: str,
+    convert_keypoint_definition: Callable[..., Any],
+) -> np.ndarray:
+    if not dst_dataset_name or src_dataset_name == dst_dataset_name:
+        return np.eye(src_joint_count, dtype=np.float32)
+
+    weights: np.ndarray | None = None
+    for src_index in range(src_joint_count):
+        probe = np.zeros((1, src_joint_count, 2), dtype=np.float32)
+        probe[0, src_index, 0] = 1.0
+        converted = convert_keypoint_definition(probe, src_dataset_name, dst_dataset_name)
+        converted_arr = np.asarray(converted, dtype=np.float32)
+        if converted_arr.ndim == 3:
+            converted_arr = converted_arr[0]
+        if converted_arr.ndim != 2 or converted_arr.shape[1] < 1:
+            raise RuntimeError(
+                "convert_keypoint_definition returned invalid shape while deriving mapping: "
+                f"{converted_arr.shape}"
+            )
+        if weights is None:
+            weights = np.zeros((converted_arr.shape[0], src_joint_count), dtype=np.float32)
+        elif converted_arr.shape[0] != weights.shape[0]:
+            raise RuntimeError(
+                "convert_keypoint_definition returned inconsistent destination joint count across probes."
+            )
+        weights[:, src_index] = converted_arr[:, 0]
+
+    if weights is None:
+        raise RuntimeError("Unable to derive keypoint conversion mapping.")
+    weights[np.abs(weights) < 1e-6] = 0.0
+    return weights.astype(np.float32)
+
+
+def _build_lifter_input_conversion(
+    *,
+    src_joint_names: Sequence[str],
+    dst_dataset_name: str,
+    convert_keypoint_definition: Callable[..., Any],
+) -> tuple[tuple[str, ...], np.ndarray]:
+    src_dataset_name = _infer_sequence_dataset_name(src_joint_names)
+    dst_dataset_name_normalized = _normalize_lifter_dataset_name(dst_dataset_name)
+
+    if dst_dataset_name_normalized == "h36m":
+        if src_dataset_name == "mb17":
+            return tuple(_H36M_17_JOINT_NAMES), _build_mb17_to_h36m_weights()
+        if src_dataset_name == "h36m":
+            return tuple(_H36M_17_JOINT_NAMES), np.eye(len(_H36M_17_JOINT_NAMES), dtype=np.float32)
+        if src_dataset_name:
+            return (
+                tuple(_H36M_17_JOINT_NAMES),
+                _derive_linear_conversion_weights(
+                    src_joint_count=len(src_joint_names),
+                    src_dataset_name=src_dataset_name,
+                    dst_dataset_name=dst_dataset_name_normalized,
+                    convert_keypoint_definition=convert_keypoint_definition,
+                ),
+            )
+
+    if not dst_dataset_name_normalized or src_dataset_name == dst_dataset_name_normalized:
+        return tuple(str(name) for name in src_joint_names), np.eye(len(src_joint_names), dtype=np.float32)
+
+    raise RuntimeError(
+        "Unsupported pose lifter input conversion path: "
+        f"{src_dataset_name or 'unknown'} -> {dst_dataset_name_normalized or 'unknown'}."
+    )
+
+
+def _apply_linear_conversion(weights: np.ndarray, values: np.ndarray) -> np.ndarray:
+    matrix = np.asarray(weights, dtype=np.float32)
+    array = np.asarray(values, dtype=np.float32)
+    if array.ndim != 2:
+        raise ValueError(f"`values` must be shaped as (J, D), got {array.shape}.")
+    if matrix.ndim != 2:
+        raise ValueError(f"`weights` must be shaped as (J_dst, J_src), got {matrix.shape}.")
+    if array.shape[0] != matrix.shape[1]:
+        raise ValueError(
+            "Keypoint conversion shape mismatch: "
+            f"values J_src={array.shape[0]} but weights expects {matrix.shape[1]}."
+        )
+    return np.sum(matrix[:, :, None] * array[None, :, :], axis=1, dtype=np.float32).astype(np.float32)
+
+
+def _convert_mask(mask_src: np.ndarray, weights: np.ndarray) -> np.ndarray:
+    mask = np.asarray(mask_src, dtype=bool).reshape(-1)
+    matrix = np.asarray(weights, dtype=np.float32)
+    if mask.shape[0] != matrix.shape[1]:
+        raise ValueError(
+            "Source mask length mismatch for keypoint conversion: "
+            f"expected {matrix.shape[1]}, got {mask.shape[0]}."
+        )
+    out = np.zeros((matrix.shape[0],), dtype=bool)
+    for dst_index in range(matrix.shape[0]):
+        contributors = np.flatnonzero(np.abs(matrix[dst_index]) > 1e-6)
+        out[dst_index] = bool(np.all(mask[contributors])) if contributors.size > 0 else False
+    return out
+
+
+def _convert_confidence(
+    confidence_src: np.ndarray,
+    *,
+    weights: np.ndarray,
+    converted_mask: np.ndarray,
+) -> np.ndarray:
+    confidence = np.asarray(confidence_src, dtype=np.float32).reshape(-1)
+    matrix = np.asarray(weights, dtype=np.float32)
+    if confidence.shape[0] != matrix.shape[1]:
+        raise ValueError(
+            "Source confidence length mismatch for keypoint conversion: "
+            f"expected {matrix.shape[1]}, got {confidence.shape[0]}."
+        )
+    out = np.zeros((matrix.shape[0],), dtype=np.float32)
+    for dst_index in range(matrix.shape[0]):
+        if not bool(converted_mask[dst_index]):
+            continue
+        contributors = np.flatnonzero(np.abs(matrix[dst_index]) > 1e-6)
+        if contributors.size == 0:
+            continue
+        out[dst_index] = float(np.min(confidence[contributors]))
+    return out.astype(np.float32)
+
+
+def _bbox_from_keypoints(keypoints: np.ndarray, mask: np.ndarray) -> np.ndarray:
+    valid_mask = np.asarray(mask, dtype=bool)
+    points_xy = np.asarray(keypoints, dtype=np.float32)
+    if not np.any(valid_mask):
+        return np.asarray([0.0, 0.0, 1.0, 1.0], dtype=np.float32)
+    pts = points_xy[valid_mask]
+    return np.asarray(
+        [
+            float(np.min(pts[:, 0])),
+            float(np.min(pts[:, 1])),
+            float(np.max(pts[:, 0])),
+            float(np.max(pts[:, 1])),
+        ],
+        dtype=np.float32,
+    )
+
+
+def _build_pose_lifter_2d_sample(
+    *,
+    PoseDataSample: Any,
+    InstanceData: Any,
+    keypoints: np.ndarray,
+    confidence: np.ndarray,
+    mask: np.ndarray,
+    track_id: int,
+) -> Any:
+    sample = PoseDataSample()
+    pred_instances = InstanceData()
+    pred_instances.set_field(np.asarray(keypoints[None, ...], dtype=np.float32), "keypoints")
+    pred_instances.set_field(np.asarray(confidence[None, ...], dtype=np.float32), "keypoint_scores")
+    pred_instances.set_field(_bbox_from_keypoints(keypoints, mask)[None, ...], "bboxes")
+
+    gt_instances = InstanceData()
+    gt_instances.set_field(np.zeros((1, 4), dtype=np.float32), "bboxes")
+
+    sample.pred_instances = pred_instances
+    sample.gt_instances = gt_instances
+    sample.set_field(int(track_id), "track_id")
+    return sample
+
+
+def _lift_dataset_params(model: Any) -> tuple[bool, int, int]:
+    try:
+        dataset = model.cfg.test_dataloader.dataset
+        causal = bool(dataset.get("causal", False))
+        seq_len = int(dataset.get("seq_len", 1))
+        seq_step = int(dataset.get("seq_step", 1))
+        return causal, max(seq_len, 1), max(seq_step, 1)
+    except Exception:
+        return False, 1, 1
+
+
+def _resolve_image_size_hw(*, job: MotionBERTJob, sequence: PoseSequence2D) -> tuple[int, int]:
+    if job.image_width is not None and job.image_height is not None:
+        return max(int(job.image_height), 1), max(int(job.image_width), 1)
+
+    bbox_xywh = np.asarray(sequence.bbox_xywh, dtype=np.float32)
+    if bbox_xywh.ndim == 2 and bbox_xywh.shape[1] >= 4 and bbox_xywh.shape[0] > 0:
+        width = int(np.ceil(np.nanmax(bbox_xywh[:, 0] + bbox_xywh[:, 2])))
+        height = int(np.ceil(np.nanmax(bbox_xywh[:, 1] + bbox_xywh[:, 3])))
+        if width > 0 and height > 0:
+            return max(height, 1), max(width, 1)
+
+    keypoints_xy = np.asarray(sequence.keypoints_xy, dtype=np.float32)
+    if keypoints_xy.size > 0:
+        finite_mask = np.isfinite(keypoints_xy)
+        if np.any(finite_mask[..., 0]) and np.any(finite_mask[..., 1]):
+            width = int(np.ceil(np.nanmax(keypoints_xy[..., 0]))) + 1
+            height = int(np.ceil(np.nanmax(keypoints_xy[..., 1]))) + 1
+            if width > 0 and height > 0:
+                return max(height, 1), max(width, 1)
+
+    return _DEFAULT_IMAGE_SIZE_HW
+
+
+def _postprocess_lifter_keypoints_3d(keypoints: np.ndarray) -> np.ndarray:
+    array = np.asarray(keypoints, dtype=np.float32)
+    while array.ndim > 2 and array.shape[0] == 1:
+        array = array[0]
+    if array.ndim == 3 and array.shape[0] == 1:
+        array = array[0]
+    if array.ndim != 2 or array.shape[1] < 3:
+        return np.full((0, 3), np.nan, dtype=np.float32)
+
+    transformed = array[:, list(_POSE_LIFTER_AXIS_ORDER)].astype(np.float32)
+    transformed *= np.asarray(_POSE_LIFTER_AXIS_SIGN, dtype=np.float32)[None, :]
+
+    finite_mask = np.isfinite(transformed[:, 2])
+    if np.any(finite_mask):
+        transformed[:, 2] -= np.float32(np.min(transformed[finite_mask, 2]))
+    return transformed
+
+
+def _resolve_mb17_reorder_indices(joint_names: Sequence[str]) -> List[int]:
+    normalized_joint_names = [str(name).strip().lower() for name in joint_names]
+    if normalized_joint_names == [name.lower() for name in MOTIONBERT_17_JOINT_NAMES]:
+        return list(range(len(MOTIONBERT_17_JOINT_NAMES)))
+
+    joint_name_to_index = {name: index for index, name in enumerate(normalized_joint_names)}
+    ordered_indices = []
+    missing_targets = []
+    for target_joint_name in MOTIONBERT_17_JOINT_NAMES:
+        resolved_index = None
+        for alias in _MB17_NAME_ALIASES[str(target_joint_name)]:
+            alias_key = str(alias).strip().lower()
+            if alias_key in joint_name_to_index:
+                resolved_index = int(joint_name_to_index[alias_key])
+                break
+        if resolved_index is None:
+            missing_targets.append(str(target_joint_name))
+        else:
+            ordered_indices.append(resolved_index)
+
+    if missing_targets:
+        raise RuntimeError(
+            "MotionBERT backend output joint names are incompatible with MB17: "
+            + ",".join(missing_targets)
+        )
+    return ordered_indices
+
+
+def _canonicalize_backend_vector_to_mb17(
+    values: np.ndarray,
+    *,
+    joint_names: Sequence[str] | None,
+) -> np.ndarray:
+    array = np.asarray(values, dtype=np.float32).reshape(-1)
+    if joint_names is None:
+        return array
+    ordered_indices = _resolve_mb17_reorder_indices(joint_names)
+    if array.shape[0] != len(ordered_indices):
+        raise RuntimeError(
+            "MotionBERT backend vector length is incompatible with the reported joint names: "
+            f"{array.shape[0]} vs {len(ordered_indices)}"
+        )
+    return array[ordered_indices].astype(np.float32, copy=False)
+
+
+def _canonicalize_backend_prediction_array(
+    prediction: np.ndarray,
+    *,
+    joint_names: Sequence[str] | None,
+) -> np.ndarray:
+    array = np.asarray(prediction, dtype=np.float32)
+    if joint_names is None:
+        return array
+
+    ordered_indices = _resolve_mb17_reorder_indices(joint_names)
+    return array[:, ordered_indices, :].astype(np.float32, copy=False)
 
 
 def _resolve_model_sequence_length(model: Any, *, fallback: int) -> int:

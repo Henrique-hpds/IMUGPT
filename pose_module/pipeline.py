@@ -12,7 +12,7 @@ from pose_module.export.debug_video import (
     render_pose3d_side_by_side_video,
     resolve_debug_overlay_variant_path,
 )
-from pose_module.interfaces import Pose2DJob
+from pose_module.interfaces import Pose2DJob, PoseSequence2D
 from pose_module.io.cache import write_json_file
 from pose_module.motionbert.lifter import MotionBERTPredictor, run_motionbert_lifter
 from pose_module.io.video_loader import frame_indices_to_timestamps, select_frame_indices
@@ -195,9 +195,10 @@ def run_pose3d_pipeline(
         video_metadata=video_metadata,
         model_alias=str(model_alias),
     )
+    motionbert_input_sequence = _build_motionbert_backend_input_sequence(pose2d_result)
 
     lifter_result = run_motionbert_lifter(
-        pose2d_result["pose_sequence"],
+        motionbert_input_sequence,
         output_dir=output_dir,
         window_size=int(motionbert_window_size),
         window_overlap=float(motionbert_window_overlap),
@@ -209,6 +210,8 @@ def run_pose3d_pipeline(
         device=str(motionbert_device),
         env_name=str(env_name if motionbert_env_name is None else motionbert_env_name),
         allow_fallback_backend=bool(allow_motionbert_fallback_backend),
+        image_width=_optional_int(None if video_metadata is None else video_metadata.get("width")),
+        image_height=_optional_int(None if video_metadata is None else video_metadata.get("height")),
     )
 
     merged_quality = merge_stage55_quality_reports(
@@ -288,6 +291,37 @@ def _restore_clean_pose_pixels(
     return points_xy
 
 
+def _build_motionbert_backend_input_sequence(pose2d_result: Mapping[str, Any]) -> PoseSequence2D:
+    pose_sequence = pose2d_result["pose_sequence"]
+    cleaner_artifacts = dict(pose2d_result.get("cleaner_artifacts", {}))
+    clean_points_xy_pixels = cleaner_artifacts.get("clean_motionbert17_xy_pixels")
+    if clean_points_xy_pixels is None and {
+        "normalization_centers_xy",
+        "normalization_scales",
+    }.issubset(cleaner_artifacts.keys()):
+        clean_points_xy_pixels = _restore_clean_pose_pixels(
+            pose_sequence.keypoints_xy,
+            cleaner_artifacts["normalization_centers_xy"],
+            cleaner_artifacts["normalization_scales"],
+            pose_sequence.confidence,
+        )
+    if clean_points_xy_pixels is None:
+        clean_points_xy_pixels = np.asarray(pose_sequence.keypoints_xy, dtype=np.float32)
+
+    return PoseSequence2D(
+        clip_id=str(pose_sequence.clip_id),
+        fps=None if pose_sequence.fps is None else float(pose_sequence.fps),
+        fps_original=None if pose_sequence.fps_original is None else float(pose_sequence.fps_original),
+        joint_names_2d=list(pose_sequence.joint_names_2d),
+        keypoints_xy=np.asarray(clean_points_xy_pixels, dtype=np.float32),
+        confidence=np.asarray(pose_sequence.confidence, dtype=np.float32),
+        bbox_xywh=np.asarray(pose_sequence.bbox_xywh, dtype=np.float32),
+        frame_indices=np.asarray(pose_sequence.frame_indices, dtype=np.int32),
+        timestamps_sec=np.asarray(pose_sequence.timestamps_sec, dtype=np.float32),
+        source=f"{pose_sequence.source}_pixels",
+    )
+
+
 def _render_debug_overlay_variant(
     *,
     video_path: str,
@@ -345,6 +379,7 @@ def _render_pose3d_debug_overlay(
             skeleton_parents=pose_sequence_3d.skeleton_parents,
             bbox_xywh=np.asarray(pose_sequence_2d.bbox_xywh, dtype=np.float32),
             fps=pose_sequence_3d.fps,
+            coordinate_space=str(getattr(pose_sequence_3d, "coordinate_space", "camera")),
         )
     except Exception as exc:
         notes = list(merged_quality.get("notes", []))

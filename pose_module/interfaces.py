@@ -162,6 +162,8 @@ class MotionBERTJob:
     config_path: Optional[str] = None
     device: str = "auto"
     pose2d_source: Optional[str] = None
+    image_width: Optional[int] = None
+    image_height: Optional[int] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -175,6 +177,8 @@ class MotionBERTJob:
             "config_path": None if self.config_path is None else str(self.config_path),
             "device": str(self.device),
             "pose2d_source": None if self.pose2d_source is None else str(self.pose2d_source),
+            "image_width": None if self.image_width is None else int(self.image_width),
+            "image_height": None if self.image_height is None else int(self.image_height),
         }
 
     @classmethod
@@ -190,6 +194,8 @@ class MotionBERTJob:
             config_path=None if payload.get("config_path") in (None, "") else str(payload.get("config_path")),
             device=str(payload.get("device", "auto")),
             pose2d_source=None if payload.get("pose2d_source") in (None, "") else str(payload.get("pose2d_source")),
+            image_width=_optional_int(payload.get("image_width")),
+            image_height=_optional_int(payload.get("image_height")),
         )
 
     @property

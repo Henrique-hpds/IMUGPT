@@ -19,7 +19,7 @@ def read_video_metadata(video_path: str | Path) -> dict[str, Any]:
         "-select_streams",
         "v:0",
         "-show_entries",
-        "stream=avg_frame_rate,nb_frames,duration:format=duration",
+        "stream=avg_frame_rate,nb_frames,duration,width,height:format=duration",
         "-of",
         "json",
         str(Path(video_path)),
@@ -51,6 +51,8 @@ def read_video_metadata(video_path: str | Path) -> dict[str, Any]:
     fps = _parse_ffprobe_fps(stream.get("avg_frame_rate"))
     num_frames = _parse_optional_int(stream.get("nb_frames"))
     duration_sec = _parse_optional_float(stream.get("duration"))
+    width = _parse_optional_int(stream.get("width"))
+    height = _parse_optional_int(stream.get("height"))
     if duration_sec is None:
         duration_sec = _parse_optional_float(format_info.get("duration"))
     if num_frames is None and fps is not None and duration_sec is not None:
@@ -62,6 +64,8 @@ def read_video_metadata(video_path: str | Path) -> dict[str, Any]:
         "fps": fps,
         "num_frames": num_frames,
         "duration_sec": duration_sec,
+        "width": width,
+        "height": height,
     }
 
 

@@ -5,12 +5,21 @@ from unittest.mock import patch
 
 import numpy as np
 
-from pose_module.interfaces import MOTIONBERT_17_JOINT_NAMES, PoseSequence2D
+from pose_module.interfaces import (
+    MOTIONBERT_17_JOINT_NAMES,
+    MOTIONBERT_17_PARENT_INDICES,
+    PoseSequence2D,
+    PoseSequence3D,
+)
 from pose_module.motionbert.adapter import (
     build_motionbert_window_batch,
     merge_motionbert_window_predictions,
 )
-from pose_module.motionbert.lifter import run_motionbert_lifter
+from pose_module.motionbert.lifter import (
+    _canonicalize_backend_prediction_array,
+    _resolve_backend_joint_names,
+    run_motionbert_lifter,
+)
 from pose_module.pipeline import run_pose3d_pipeline
 
 
@@ -33,6 +42,26 @@ _MB17_BASE_POINTS = {
     "left_wrist": (-0.30, -0.04),
     "right_wrist": (0.30, -0.04),
 }
+
+_H36M_17_JOINT_NAMES = [
+    "root",
+    "right_hip",
+    "right_knee",
+    "right_foot",
+    "left_hip",
+    "left_knee",
+    "left_foot",
+    "spine",
+    "thorax",
+    "neck_base",
+    "head",
+    "left_shoulder",
+    "left_elbow",
+    "left_wrist",
+    "right_shoulder",
+    "right_elbow",
+    "right_wrist",
+]
 
 
 def _make_motionbert_sequence(num_frames: int) -> PoseSequence2D:
@@ -115,6 +144,52 @@ class MotionBERTAdapterTests(unittest.TestCase):
         self.assertGreater(float(fused[60, 0, 0]), 1.0)
         self.assertLess(float(fused[60, 0, 0]), 2.0)
 
+    def test_canonicalize_backend_prediction_array_reorders_h36m_output_to_mb17(self) -> None:
+        raw_prediction = np.zeros((5, len(_H36M_17_JOINT_NAMES), 3), dtype=np.float32)
+        for joint_index in range(len(_H36M_17_JOINT_NAMES)):
+            raw_prediction[:, joint_index, 0] = float(joint_index)
+
+        canonical_prediction = _canonicalize_backend_prediction_array(
+            raw_prediction,
+            joint_names=_H36M_17_JOINT_NAMES,
+        )
+
+        expected_joint_positions = {
+            "pelvis": 0.0,
+            "left_hip": 4.0,
+            "right_hip": 1.0,
+            "spine": 7.0,
+            "left_knee": 5.0,
+            "right_knee": 2.0,
+            "thorax": 8.0,
+            "left_ankle": 6.0,
+            "right_ankle": 3.0,
+            "neck": 9.0,
+            "head": 10.0,
+            "left_shoulder": 11.0,
+            "right_shoulder": 14.0,
+            "left_elbow": 12.0,
+            "right_elbow": 15.0,
+            "left_wrist": 13.0,
+            "right_wrist": 16.0,
+        }
+        for joint_index, joint_name in enumerate(MOTIONBERT_17_JOINT_NAMES):
+            self.assertAlmostEqual(
+                float(canonical_prediction[0, joint_index, 0]),
+                expected_joint_positions[joint_name],
+                places=5,
+            )
+
+    def test_resolve_backend_joint_names_prefers_dataset_meta_keypoint_order(self) -> None:
+        dataset_meta = {
+            "dataset_name": "h36m",
+            "keypoint_id2name": {index: name for index, name in enumerate(_H36M_17_JOINT_NAMES)},
+        }
+
+        resolved_joint_names = _resolve_backend_joint_names(dataset_meta)
+
+        self.assertEqual(resolved_joint_names, _H36M_17_JOINT_NAMES)
+
 
 class MotionBERTLifterTests(unittest.TestCase):
     def test_run_motionbert_lifter_exports_pose3d_artifacts(self) -> None:
@@ -184,6 +259,28 @@ class Pose3DPipelineTests(unittest.TestCase):
 
     def test_run_pose3d_pipeline_exports_side_by_side_raw_3d_debug_video(self) -> None:
         sequence = _make_motionbert_sequence(24)
+        joint_positions_xyz = np.zeros((sequence.num_frames, len(MOTIONBERT_17_JOINT_NAMES), 3), dtype=np.float32)
+        joint_positions_xyz[..., 0] = np.asarray(sequence.keypoints_xy[..., 0], dtype=np.float32)
+        joint_positions_xyz[..., 1] = np.linspace(
+            -0.2,
+            0.2,
+            sequence.num_frames * len(MOTIONBERT_17_JOINT_NAMES),
+            dtype=np.float32,
+        ).reshape(sequence.num_frames, len(MOTIONBERT_17_JOINT_NAMES))
+        joint_positions_xyz[..., 2] = np.asarray(-sequence.keypoints_xy[..., 1], dtype=np.float32)
+        pose3d_sequence = PoseSequence3D(
+            clip_id=str(sequence.clip_id),
+            fps=sequence.fps,
+            fps_original=sequence.fps_original,
+            joint_names_3d=list(MOTIONBERT_17_JOINT_NAMES),
+            joint_positions_xyz=joint_positions_xyz,
+            joint_confidence=np.asarray(sequence.confidence, dtype=np.float32),
+            skeleton_parents=list(MOTIONBERT_17_PARENT_INDICES),
+            frame_indices=np.asarray(sequence.frame_indices, dtype=np.int32),
+            timestamps_sec=np.asarray(sequence.timestamps_sec, dtype=np.float32),
+            source="vitpose-b_motionbert17_clean_mmpose_motionbert",
+            coordinate_space="pose_lifter_aligned",
+        )
         pose2d_result = {
             "clip_id": "clip_pipeline3d_debug",
             "pose_sequence": sequence,
@@ -205,18 +302,37 @@ class Pose3DPipelineTests(unittest.TestCase):
                 "quality_report_json_path": None,
             },
         }
+        lifter_result = {
+            "pose_sequence": pose3d_sequence,
+            "quality_report": {
+                "clip_id": "clip_pipeline3d_debug",
+                "status": "ok",
+                "notes": [],
+                "coordinate_space": "pose_lifter_aligned",
+            },
+            "run_report": {"status": "ok"},
+            "artifacts": {
+                "pose3d_npz_path": "/tmp/fake_pose3d.npz",
+                "motionbert_run_json_path": "/tmp/fake_motionbert_run.json",
+            },
+        }
 
         with tempfile.TemporaryDirectory() as tmp_dir:
             rendered_outputs = []
+            render_calls = []
 
             def _fake_render_pose3d_side_by_side_video(*, output_path, **kwargs):
                 output_path = Path(output_path)
                 output_path.parent.mkdir(parents=True, exist_ok=True)
                 output_path.write_bytes(b"fake mp4")
                 rendered_outputs.append(output_path.name)
+                render_calls.append(dict(kwargs))
                 return output_path.resolve()
 
             with patch("pose_module.pipeline.run_pose2d_pipeline", return_value=pose2d_result), patch(
+                "pose_module.pipeline.run_motionbert_lifter",
+                return_value=lifter_result,
+            ), patch(
                 "pose_module.pipeline.render_pose3d_side_by_side_video",
                 side_effect=_fake_render_pose3d_side_by_side_video,
             ):
@@ -235,6 +351,8 @@ class Pose3DPipelineTests(unittest.TestCase):
 
             self.assertTrue(Path(result["artifacts"]["debug_overlay_pose3d_raw_path"]).exists())
             self.assertEqual(rendered_outputs, ["debug_overlay_pose3d_raw.mp4"])
+            self.assertEqual(len(render_calls), 1)
+            self.assertEqual(render_calls[0]["coordinate_space"], "pose_lifter_aligned")
 
 
 if __name__ == "__main__":

@@ -192,6 +192,7 @@ def clean_pose_sequence2d(
     }
     artifacts = {
         "raw_motionbert17_xy": raw_motionbert_xy.astype(np.float32, copy=False),
+        "clean_motionbert17_xy_pixels": points.astype(np.float32, copy=False),
         "clean_motionbert17_xy": normalized_points.astype(np.float32, copy=False),
         "normalization_centers_xy": centers_xy.astype(np.float32, copy=False),
         "normalization_scales": scales.astype(np.float32, copy=False),
