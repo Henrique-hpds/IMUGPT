@@ -338,92 +338,188 @@ Arquivos fixos:
 
 - `configs/skeleton_imugpt22.yaml` (ordem + pais + offsets padrão)
 - `configs/motionbert17_contract.yaml` (ordem MB17 esperada no adapter)
+
 ### 5.7 metric_normalizer
 
-Responsabilidades:
+Responsabilidades
+- transformar a saída do MotionBERT (3D normalizado e dependente da câmera) em uma representação consistente para downstream
+- separar explicitamente:
+- referencial do modelo
+- referencial do corpo
+- escala métrica aproximada
+- preparar dados para o IK sem assumir, prematuramente, um “mundo global real”
+#### 5.7.1 Princípio fundamental
 
-- tirar a pose do referencial da câmera e levá-la a um referencial pseudo-global consistente
-- impor escala métrica aproximada
-- produzir coordenadas em metros
+A saída do MotionBERT não é métrica nem global. Ela deve ser tratada como:
+- pose 3D normalizada
+- em um referencial dependente da câmera/imagem
+- com escala arbitrária
 
-Para transformar poses (MediaPipe ou ViTPose→3D) em um referencial métrico consistente e utilizável pelo IMUSim, é necessário aplicar uma sequência de normalizações geométricas e temporais. Abaixo está o procedimento direto.
+Portanto, este módulo não “recupera a verdade física”, apenas constrói uma representação consistente e utilizável.
 
-1. Definir um referencial consistente (pseudo-global)
+#### 5.7.2 Etapas de transformação
+Etapa 1 — Centralização (remoção de translação local instável)
 
-MediaPipe fornece coordenadas no frame da câmera. O objetivo é construir um frame estável:
+Definir origem no pelvis:
 
-Passo A — Escolher origem
-Use o pelvis/hip center como origem:
-p_i'(t) = p_i(t) - p_pelvis(t)
-Resultado: remove translação global instável da câmera, corpo fica centrado.
+p_i^(centered)(t) = p_i(t) - p_pelvis(t)
 
-Passo B — Definir orientação do corpo
-Construa um sistema de eixos baseado no corpo:
-- eixo X → vetor entre quadris
-- eixo Y → vetor vertical do corpo (pelvis → neck)
-- eixo Z → produto vetorial (X × Y)
+Resultado:
 
-Normalize: x̂, ŷ, ẑ. Monte matriz de rotação R(t). Transforme:
-p_i''(t) = R(t)^T · p_i'(t)
-Resultado: remove rotação da câmera, corpo alinhado em referencial consistente.
+- remove translação dependente da câmera
+- corpo fica centrado por frame
 
-2. Escala métrica (muito importante)
+Etapa 2 — Construção de referencial do corpo (body frame)
 
-MediaPipe/ViTPose não garantem escala real.
+Definir eixos por frame:
 
-Opção simples (mais comum):
-Fixar comprimento de um osso:
-s = L_real / ||p_hip - p_knee||
-p_i'''(t) = s · p_i''(t)
+eixo X (lateral):
 
-Valores típicos:
-- fêmur ≈ 0.45 m
-- altura total ≈ 1.7 m
+x̂ = normalize(Right_hip - Left_hip)
 
-Resultado: movimento em metros aproximados.
+eixo Y (vertical corporal):
 
-3. Continuidade temporal (crítico para IMU)
+ŷ = normalize(Neck - Pelvis)
 
-IMU depende de derivadas → precisa suavidade.
+eixo Z (frente do corpo):
 
-Passo A — Filtro temporal
-Use:
-- Savitzky–Golay (melhor)
+ẑ = normalize(cross(x̂, ŷ))
+
+Re-ortogonalizar se necessário:
+
+ŷ = normalize(cross(ẑ, x̂))
+
+Matriz de rotação:
+
+R_body = [x̂ ŷ ẑ]
+
+Transformação:
+
+p_i^(body)(t) = R_body^T · p_i^(centered)(t)
+
+Resultado:
+
+- remove rotação da câmera
+- expressa pose no referencial do corpo
+
+Etapa 3 — Escala métrica aproximada
+
+Impor escala via prior antropométrico:
+
+s = L_real / ||p_joint_a - p_joint_b||
+
+Exemplos:
+
+- fêmur: hip–knee ≈ 0.45 m
+- altura total: ≈ 1.70 m
+
+Aplicação:
+
+p_i^(metric_local)(t) = s · p_i^(body)(t)
+
+Importante: isso não recupera escala real, apenas impõe consistência entre clipes
+
+Etapa 4 — Suavização temporal
+
+Aplicar filtro temporal por junta:
+- Savitzky–Golay (preferido)
 - ou Butterworth low-pass
 
-Exemplo: cutoff ≈ 5–10 Hz
+p_i^(smooth)(t) = smooth(p_i^(metric_local)(t))
 
-Passo B — Remover jitter
-Aplicar suavização por joint:
-p̃_i(t) = smooth(p_i'''(t))
+Parâmetros típicos:
 
-4. Recuperar movimento global (root)
+- cutoff: 5–10 Hz
 
-Antes você centralizou no pelvis — agora precisa reintroduzir trajetória:
-use posição original do pelvis (suavizada + escalada):
-p_root(t) = p_pelvis_original(t) * s
+Objetivo:
 
-Resultado final: poses locais + movimento global consistente.
+- estabilidade para derivadas (IMU)
+- remoção de jitter de alta frequência
 
-Observação
+#### 5.7.3 Saídas do módulo
 
-Isso é necessário porque o IMUSim usa rotações locais e root translation para sintetizar aceleração e velocidade angular.
+O módulo deve produzir explicitamente múltiplos níveis:
+
+MetricNormalizationResult = {
+    "joint_positions_3d_norm": np.ndarray,         # [T, J, 3] (entrada original)
+    "joint_positions_body_frame": np.ndarray,      # [T, J, 3]
+    "joint_positions_metric_local": np.ndarray,    # [T, J, 3]
+    "joint_positions_smoothed": np.ndarray,        # [T, J, 3]
+    "scale_factor": float,
+}
+
+Regra:
+- nenhuma dessas saídas ainda é “global”
+
+#### 5.7.4 Limitações explícitas
+- não há recuperação de profundidade absoluta real
+- não há garantia de orientação global correta
+- não há trajetória global consistente
+- escala é heurística
 
 ### 5.8 root_trajectory_estimator
 
-Responsabilidades:
+Responsabilidades
+- estimar a translação global do corpo (root)
+- produzir trajetória consistente para uso no IK/IMUSim
+- minimizar drift e inconsistências temporais
 
-- estimar a trajetória do root no espaço
-- compensar drift e câmera
-Estratégia fase 1
-- assumir câmera aproximadamente estática
-- usar pelvis 3D suavizado como root
-- planarizar o movimento quando necessário
-Estratégia fase 2
-- compensação explícita de movimento da câmera
-- homografia / SfM / visual odometry
-Saída
-- root_translation_m  # [T, 3]
+#### 5.8.1 Princípio fundamental
+
+O MotionBERT não fornece trajetória global confiável.
+Logo, este módulo resolve um problema mal condicionado.
+
+A saída deve ser tratada como aproximação plausível, não ground truth físico.
+
+#### 5.8.2 Estratégia fase 1 (baseline controlado)
+
+Assumir:
+
+- câmera aproximadamente estática
+- movimento predominantemente no plano
+
+Definir root como pelvis suavizado:
+
+root(t) = smooth(p_pelvis_original(t)) * s
+
+onde:
+
+- p_pelvis_original vem do espaço normalizado
+- s é o fator de escala do metric_normalizer
+
+Opcional:
+
+- planarização (remover drift vertical espúrio)
+
+#### 5.8.3 Estratégia fase 2 (robusta)
+
+Extensões possíveis:
+
+- compensação de movimento de câmera:
+  - homografia
+  - visual odometry
+  - SLAM/SfM leve
+- integração com:
+  - velocidade estimada por keypoints
+  - constraints de contato (foot contact)
+- regularização física:
+  - suavidade de velocidade
+  - limites biomecânicos
+
+#### 5.8.4 Saída
+root_translation_m: np.ndarray  # [T, 3]
+
+Propriedades desejadas:
+- suavidade temporal
+- ausência de saltos
+- coerência com pose local
+
+#### 5.8.5 Limitações explícitas
+- não é trajetória absoluta real
+- sensível a erro de escala
+- sensível a oclusão
+- drift inevitável sem modelagem de câmera
+
 ### 5.9 ik_adapter
 
 Responsabilidades:
@@ -473,22 +569,65 @@ VirtualIMUSequence = {
 
 ### 6.1 Convenções geométricas
 
-Adotar uma convenção única em todo o módulo:
+#### 6.1.1 Separação de referenciais (obrigatório)
 
-- sistema destro
-- unidade: metros
-- ordem de eixos documentada em geometry.md
-- quaternion ou axis-angle padronizado no IK
-- left/right anatômico (sujeito-cêntrico), não câmera-cêntrico
-Recomendação
+O pipeline deve distinguir explicitamente:
 
-Escolher:
+1. Model frame (MotionBERT output)
+  - coordenadas normalizadas
+  - dependentes da câmera
+  - escala arbitrária
+2. Body frame
+  - origem no pelvis
+  - orientação definida pelo corpo
+  - independente da câmera
+3. Metric local frame
+  - body frame + escala antropométrica
+  - unidade: metros (aproximados)
+4. Pseudo-global frame
+  - metric local + root_translation
+  - usado pelo IK e IMUSim
 
-- x: lateral (positivo para o lado direito do sujeito)
-- y: vertical
-- z: frente do sujeito
+#### 6.1.2 Convenção final (para IK / IMUSim)
 
-e converter tudo internamente para isso.
+Sistema destro:
+- x: lateral (positivo → direita do sujeito)
+- y: vertical (positivo → cima)
+- z: anterior (positivo → frente do sujeito)
+
+Unidade: metros
+
+#### 6.1.3 Representação final obrigatória
+
+Antes do IK, os dados devem satisfazer:
+
+joint_positions_global_m: np.ndarray  # [T, J, 3]
+root_translation_m: np.ndarray        # [T, 3]
+
+onde:
+
+joint_positions_global_m(t) = root_translation_m(t) + joint_positions_metric_local(t)
+
+#### 6.1.4 Regras obrigatórias
+- sistema destro consistente em todo o pipeline
+- left/right anatômico (sujeito)
+- nenhuma junta com NaN
+- ordem de joints fixa (IMUGPT22)
+- pais exatamente iguais ao contrato
+
+#### 6.1.5 Observação crítica
+
+Mesmo após todas as etapas:
+
+- o sistema resultante é pseudo-métrico
+- não representa reconstrução física absoluta
+- é adequado para:
+  - IK
+  - síntese de IMU
+  - HAR
+- mas não para:
+  - reconstrução métrica precisa
+  - análise biomecânica clínica
 
 ### 6.2 Convenções temporais
 - fps_pose = fps_imu = 20 na fase de exportação para IMUSim
