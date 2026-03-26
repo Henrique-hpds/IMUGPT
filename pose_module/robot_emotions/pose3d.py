@@ -150,6 +150,9 @@ def _build_pose3d_manifest_entry(
         "quality_report": quality_report,
         "pose2d_quality_report": dict(pipeline_result["pose2d_quality_report"]),
         "motionbert_quality_report": dict(pipeline_result["motionbert_quality_report"]),
+        "lower_limb_stabilizer_quality_report": dict(
+            pipeline_result.get("lower_limb_stabilizer_quality_report", {})
+        ),
         "skeleton_mapper_quality_report": dict(pipeline_result["skeleton_mapper_quality_report"]),
         "metric_normalizer_quality_report": dict(pipeline_result["metric_normalization_quality_report"]),
         "artifacts": artifacts,

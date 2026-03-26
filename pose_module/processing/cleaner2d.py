@@ -18,6 +18,7 @@ DEFAULT_MAX_GAP_INTERP = 5
 DEFAULT_SAVGOL_WINDOW = 9
 DEFAULT_SAVGOL_POLYORDER = 2
 DEFAULT_LOW_CONF_THRESHOLD = 0.2
+DEFAULT_INTERPOLATED_CONFIDENCE_CAP = 0.15
 DEFAULT_MAX_ANGULAR_VELOCITY_DEG_PER_SEC = 1080.0
 DEFAULT_BBOX_MARGIN_RATIO = 0.2
 DEFAULT_MIN_VISIBLE_JOINT_RATIO = 0.8
@@ -53,6 +54,7 @@ def clean_pose_sequence2d(
     savgol_window: int = DEFAULT_SAVGOL_WINDOW,
     savgol_polyorder: int = DEFAULT_SAVGOL_POLYORDER,
     low_conf_threshold: float = DEFAULT_LOW_CONF_THRESHOLD,
+    interpolated_confidence_cap: float = DEFAULT_INTERPOLATED_CONFIDENCE_CAP,
     max_angular_velocity_deg_per_sec: float = DEFAULT_MAX_ANGULAR_VELOCITY_DEG_PER_SEC,
     bbox_margin_ratio: float = DEFAULT_BBOX_MARGIN_RATIO,
     min_visible_joint_ratio: float = DEFAULT_MIN_VISIBLE_JOINT_RATIO,
@@ -67,6 +69,12 @@ def clean_pose_sequence2d(
     raw_motionbert_xy, raw_motionbert_conf = _map_vitpose_to_motionbert17(sequence)
     points = raw_motionbert_xy.copy()
     confidence = raw_motionbert_conf.copy()
+    if list(sequence.joint_names_2d) == list(MOTIONBERT_17_JOINT_NAMES):
+        observed_mask = np.asarray(sequence.resolved_observed_mask(), dtype=bool).copy()
+        imputed_mask = np.asarray(sequence.resolved_imputed_mask(), dtype=bool).copy()
+    else:
+        observed_mask = np.isfinite(points).all(axis=2) & (confidence > 0.0)
+        imputed_mask = np.zeros(points.shape[:2], dtype=bool)
 
     points, confidence, bbox_outlier_mask, valid_bbox_mask = _invalidate_points_outside_bbox(
         points,
@@ -80,13 +88,18 @@ def clean_pose_sequence2d(
         fps=sequence.fps,
         max_angular_velocity_deg_per_sec=float(max_angular_velocity_deg_per_sec),
     )
+    observed_mask &= np.isfinite(points).all(axis=2) & (confidence > 0.0)
+    imputed_mask &= np.isfinite(points).all(axis=2) & (confidence > 0.0)
 
     points, confidence, interpolated_joint_mask = _interpolate_motionbert_gaps(
         points,
         confidence,
         max_gap_interp=int(max_gap_interp),
         low_conf_threshold=float(low_conf_threshold),
+        interpolated_confidence_cap=float(interpolated_confidence_cap),
     )
+    imputed_mask |= interpolated_joint_mask
+    observed_mask &= ~interpolated_joint_mask
 
     points = _smooth_motionbert_sequence(
         points,
@@ -96,9 +109,11 @@ def clean_pose_sequence2d(
         low_conf_threshold=float(low_conf_threshold),
     )
 
-    invalid_joint_mask = (~np.isfinite(points).all(axis=2)) | (confidence < float(low_conf_threshold))
+    invalid_joint_mask = (~np.isfinite(points).all(axis=2)) | (confidence <= 0.0)
     confidence[invalid_joint_mask] = 0.0
     points[invalid_joint_mask] = np.nan
+    observed_mask[invalid_joint_mask] = False
+    imputed_mask[invalid_joint_mask] = False
 
     normalized_points, centers_xy, scales = _normalize_for_motionbert(
         points,
@@ -106,9 +121,9 @@ def clean_pose_sequence2d(
         sequence.bbox_xywh,
     )
 
-    visible_joint_ratio = _visible_joint_ratio(confidence)
+    visible_joint_ratio = _visible_joint_ratio(observed_mask)
     mean_confidence = _mean_confidence(confidence)
-    per_frame_missing_joint_ratio = 1.0 - np.mean(confidence > 0.0, axis=1)
+    per_frame_missing_joint_ratio = 1.0 - np.mean(observed_mask, axis=1)
     frames_over_missing_ratio = float(
         np.mean(per_frame_missing_joint_ratio > float(max_frame_missing_joint_ratio))
     )
@@ -170,6 +185,8 @@ def clean_pose_sequence2d(
         frame_indices=np.asarray(sequence.frame_indices, dtype=np.int32),
         timestamps_sec=np.asarray(sequence.timestamps_sec, dtype=np.float32),
         source=f"{sequence.source}_motionbert17_clean",
+        observed_mask=observed_mask.astype(bool, copy=False),
+        imputed_mask=imputed_mask.astype(bool, copy=False),
     )
     quality_report = {
         "clip_id": str(sequence.clip_id),
@@ -188,12 +205,15 @@ def clean_pose_sequence2d(
         "interpolated_joint_ratio": float(interpolated_joint_ratio),
         "frames_over_missing_joint_threshold": float(frames_over_missing_ratio),
         "normalization_mode": "pelvis_centered_bbox_scale",
+        "interpolated_confidence_cap": float(interpolated_confidence_cap),
         "notes": list(dict.fromkeys(notes)),
     }
     artifacts = {
         "raw_motionbert17_xy": raw_motionbert_xy.astype(np.float32, copy=False),
         "clean_motionbert17_xy_pixels": points.astype(np.float32, copy=False),
         "clean_motionbert17_xy": normalized_points.astype(np.float32, copy=False),
+        "observed_mask": observed_mask.astype(bool, copy=False),
+        "imputed_mask": imputed_mask.astype(bool, copy=False),
         "normalization_centers_xy": centers_xy.astype(np.float32, copy=False),
         "normalization_scales": scales.astype(np.float32, copy=False),
     }
@@ -436,6 +456,7 @@ def _interpolate_motionbert_gaps(
     *,
     max_gap_interp: int,
     low_conf_threshold: float,
+    interpolated_confidence_cap: float,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     points = np.asarray(points_xy, dtype=np.float32).copy()
     conf = np.asarray(confidence, dtype=np.float32).copy()
@@ -457,6 +478,10 @@ def _interpolate_motionbert_gaps(
         joint_interpolated_mask = np.any(interpolated_xy_mask, axis=1) | interpolated_conf_mask.astype(bool)
         points[:, joint_index] = interpolated_xy
         conf[:, joint_index] = interpolated_conf
+        conf[joint_interpolated_mask, joint_index] = np.minimum(
+            conf[joint_interpolated_mask, joint_index],
+            np.float32(interpolated_confidence_cap),
+        )
         interpolated_joint_mask[:, joint_index] = joint_interpolated_mask
 
     return points, conf, interpolated_joint_mask
@@ -471,6 +496,7 @@ def _smooth_motionbert_sequence(
     low_conf_threshold: float,
 ) -> np.ndarray:
     points = np.asarray(points_xy, dtype=np.float32).copy()
+    original_points = points.copy()
     conf = np.asarray(confidence, dtype=np.float32)
     for joint_index in range(points.shape[1]):
         joint_valid = np.isfinite(points[:, joint_index]).all(axis=1) & (conf[:, joint_index] >= low_conf_threshold)
@@ -480,8 +506,8 @@ def _smooth_motionbert_sequence(
             polyorder=int(polyorder),
             valid_mask=np.repeat(joint_valid[:, None], 2, axis=1),
         )
-        points[:, joint_index] = smoothed_xy
-        points[~joint_valid, joint_index] = np.nan
+        points[joint_valid, joint_index] = smoothed_xy[joint_valid]
+        points[~joint_valid, joint_index] = original_points[~joint_valid, joint_index]
     return points
 
 
@@ -560,10 +586,11 @@ def _fill_missing_scalars(values: np.ndarray) -> np.ndarray:
     return output
 
 
-def _visible_joint_ratio(confidence: np.ndarray) -> float:
-    if confidence.size == 0:
+def _visible_joint_ratio(observed_mask: np.ndarray) -> float:
+    mask = np.asarray(observed_mask, dtype=bool)
+    if mask.size == 0:
         return 0.0
-    return float(np.count_nonzero(confidence > 0.0) / float(confidence.size))
+    return float(np.count_nonzero(mask) / float(mask.size))
 
 
 def _mean_confidence(confidence: np.ndarray) -> float:

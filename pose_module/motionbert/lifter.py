@@ -104,6 +104,14 @@ _POSE_LIFTER_AXIS_ORDER = (0, 2, 1)
 _POSE_LIFTER_AXIS_SIGN = (-1.0, 1.0, -1.0)
 _DEFAULT_IMAGE_SIZE_HW = (256, 256)
 _IMPUTED_2D_CONFIDENCE_FLOOR = 0.05
+_LOWER_LIMB_IMPUTED_CONFIDENCE = 0.05
+_LOWER_LIMB_JOINT_NAMES = (
+    "left_knee",
+    "right_knee",
+    "left_ankle",
+    "right_ankle",
+)
+_LOWER_LIMB_JOINT_INDICES = tuple(MOTIONBERT_17_JOINT_NAMES.index(name) for name in _LOWER_LIMB_JOINT_NAMES)
 
 _DEPTH_PRIORS = {
     "pelvis": 0.00,
@@ -357,34 +365,40 @@ def run_motionbert_backend(job: MotionBERTJob) -> Dict[str, Any]:
         sequence.keypoints_xy,
         sequence.confidence,
     )
+    observed_mask_sequence = np.asarray(sequence.resolved_observed_mask(), dtype=bool)
+    imputed_mask_sequence = np.asarray(sequence.resolved_imputed_mask(), dtype=bool)
 
     pred_frames: list[np.ndarray | None] = []
     pred_confidence: list[np.ndarray | None] = []
+    pred_observed_masks: list[np.ndarray | None] = []
+    pred_imputed_masks: list[np.ndarray | None] = []
     pose_history: list[list[Any]] = []
 
     for frame_index in range(sequence.num_frames):
         keypoints_xy = np.asarray(filled_sequence_xy[frame_index], dtype=np.float32)
         confidence = np.asarray(sequence.confidence[frame_index], dtype=np.float32)
-        original_valid_mask = (
-            np.isfinite(np.asarray(sequence.keypoints_xy[frame_index], dtype=np.float32)).all(axis=1)
-            & (confidence > 0.0)
-        )
+        original_observed_mask = np.asarray(observed_mask_sequence[frame_index], dtype=bool)
+        original_imputed_mask = np.asarray(imputed_mask_sequence[frame_index], dtype=bool)
         filled_valid_mask = np.isfinite(keypoints_xy).all(axis=1)
 
         if not np.any(filled_valid_mask):
             pose_history.append([])
             pred_frames.append(None)
             pred_confidence.append(None)
+            pred_observed_masks.append(None)
+            pred_imputed_masks.append(None)
             continue
 
         converted_keypoints_xy = _apply_linear_conversion(conversion_weights, keypoints_xy)
-        effective_confidence = confidence.copy()
-        imputed_mask = filled_valid_mask & ~original_valid_mask
-        effective_confidence[imputed_mask] = np.maximum(
-            effective_confidence[imputed_mask],
-            np.float32(_IMPUTED_2D_CONFIDENCE_FLOOR),
+        effective_confidence, effective_imputed_mask = _apply_lifter_imputation_confidence_policy(
+            confidence=confidence,
+            original_observed_mask=original_observed_mask,
+            original_imputed_mask=original_imputed_mask,
+            filled_valid_mask=filled_valid_mask,
         )
         converted_mask = _convert_mask(filled_valid_mask, conversion_weights)
+        converted_observed_mask = _convert_mask(original_observed_mask, conversion_weights)
+        converted_imputed_mask = _convert_mask(effective_imputed_mask, conversion_weights)
         converted_confidence = _convert_confidence(
             effective_confidence,
             weights=conversion_weights,
@@ -397,6 +411,8 @@ def run_motionbert_backend(job: MotionBERTJob) -> Dict[str, Any]:
             pose_history.append([])
             pred_frames.append(None)
             pred_confidence.append(None)
+            pred_observed_masks.append(None)
+            pred_imputed_masks.append(None)
             continue
 
         pose_history.append(
@@ -430,12 +446,16 @@ def run_motionbert_backend(job: MotionBERTJob) -> Dict[str, Any]:
         if not lift_results:
             pred_frames.append(None)
             pred_confidence.append(None)
+            pred_observed_masks.append(None)
+            pred_imputed_masks.append(None)
             continue
 
         first = lift_results[0]
         if not hasattr(first, "pred_instances"):
             pred_frames.append(None)
             pred_confidence.append(None)
+            pred_observed_masks.append(None)
+            pred_imputed_masks.append(None)
             continue
 
         pred_instances = first.pred_instances
@@ -445,6 +465,8 @@ def run_motionbert_backend(job: MotionBERTJob) -> Dict[str, Any]:
         if keypoints_3d.size == 0:
             pred_frames.append(None)
             pred_confidence.append(None)
+            pred_observed_masks.append(None)
+            pred_imputed_masks.append(None)
             continue
 
         canonical_keypoints_3d = _canonicalize_backend_prediction_array(
@@ -455,6 +477,14 @@ def run_motionbert_backend(job: MotionBERTJob) -> Dict[str, Any]:
             converted_confidence,
             joint_names=backend_joint_names,
         )
+        canonical_observed_mask = _canonicalize_backend_vector_to_mb17(
+            converted_observed_mask.astype(np.float32),
+            joint_names=backend_joint_names,
+        ) > 0.0
+        canonical_imputed_mask = _canonicalize_backend_vector_to_mb17(
+            converted_imputed_mask.astype(np.float32),
+            joint_names=backend_joint_names,
+        ) > 0.0
         canonical_input_mask = _canonicalize_backend_vector_to_mb17(
             converted_mask.astype(np.float32),
             joint_names=backend_joint_names,
@@ -476,26 +506,52 @@ def run_motionbert_backend(job: MotionBERTJob) -> Dict[str, Any]:
             canonical_input_confidence.astype(np.float32, copy=False),
             canonical_scores.astype(np.float32, copy=False),
         )
-        valid_3d_mask = np.isfinite(canonical_keypoints_3d).all(axis=1) & canonical_input_mask & (combined_confidence > 0.0)
+        valid_3d_mask = (
+            np.isfinite(canonical_keypoints_3d).all(axis=1)
+            & canonical_input_mask
+            & (combined_confidence > 0.0)
+        )
         canonical_keypoints_3d[~valid_3d_mask] = np.nan
         combined_confidence[~valid_3d_mask] = 0.0
+        canonical_observed_mask &= valid_3d_mask
+        canonical_imputed_mask &= valid_3d_mask
 
         pred_frames.append(canonical_keypoints_3d.astype(np.float32, copy=False))
         pred_confidence.append(combined_confidence.astype(np.float32, copy=False))
+        pred_observed_masks.append(canonical_observed_mask.astype(bool, copy=False))
+        pred_imputed_masks.append(canonical_imputed_mask.astype(bool, copy=False))
 
     joint_positions_xyz = []
     joint_confidence = []
+    joint_observed_mask = []
+    joint_imputed_mask = []
     num_joints = len(MOTIONBERT_17_JOINT_NAMES)
-    for frame_points_xyz, frame_confidence in zip(pred_frames, pred_confidence):
-        if frame_points_xyz is None or frame_confidence is None:
+    for frame_points_xyz, frame_confidence, frame_observed_mask, frame_imputed_mask in zip(
+        pred_frames,
+        pred_confidence,
+        pred_observed_masks,
+        pred_imputed_masks,
+    ):
+        if (
+            frame_points_xyz is None
+            or frame_confidence is None
+            or frame_observed_mask is None
+            or frame_imputed_mask is None
+        ):
             joint_positions_xyz.append(np.full((num_joints, 3), np.nan, dtype=np.float32))
             joint_confidence.append(np.zeros((num_joints,), dtype=np.float32))
+            joint_observed_mask.append(np.zeros((num_joints,), dtype=bool))
+            joint_imputed_mask.append(np.zeros((num_joints,), dtype=bool))
             continue
         joint_positions_xyz.append(np.asarray(frame_points_xyz, dtype=np.float32))
         joint_confidence.append(np.asarray(frame_confidence, dtype=np.float32))
+        joint_observed_mask.append(np.asarray(frame_observed_mask, dtype=bool))
+        joint_imputed_mask.append(np.asarray(frame_imputed_mask, dtype=bool))
 
     joint_positions_xyz = np.stack(joint_positions_xyz, axis=0).astype(np.float32)
     joint_confidence = np.stack(joint_confidence, axis=0).astype(np.float32)
+    joint_observed_mask = np.stack(joint_observed_mask, axis=0).astype(bool)
+    joint_imputed_mask = np.stack(joint_imputed_mask, axis=0).astype(bool)
     pose_sequence = PoseSequence3D(
         clip_id=str(sequence.clip_id),
         fps=None if sequence.fps is None else float(sequence.fps),
@@ -508,6 +564,8 @@ def run_motionbert_backend(job: MotionBERTJob) -> Dict[str, Any]:
         timestamps_sec=np.asarray(sequence.timestamps_sec, dtype=np.float32),
         source=f"{sequence.source}_{job.backend_name}",
         coordinate_space="pose_lifter_aligned",
+        observed_mask=joint_observed_mask,
+        imputed_mask=joint_imputed_mask,
     )
     np.save(job.raw_keypoints_3d_path, np.asarray(pose_sequence.joint_positions_xyz, dtype=np.float32))
     write_pose_sequence3d_npz(pose_sequence, job.pose3d_npz_path)
@@ -637,6 +695,8 @@ def _run_motionbert_callable_backend(
         timestamps_sec=np.asarray(sequence.timestamps_sec, dtype=np.float32),
         source=f"{sequence.source}_{backend_name}",
         coordinate_space="camera",
+        observed_mask=np.asarray(sequence.resolved_observed_mask(), dtype=bool),
+        imputed_mask=np.asarray(sequence.resolved_imputed_mask(), dtype=bool),
     )
 
     np.save(job.raw_keypoints_3d_path, np.asarray(pose_sequence.joint_positions_xyz, dtype=np.float32))
@@ -1034,6 +1094,46 @@ def _fill_missing_keypoints_for_lifter(
                 dim_values[dim_valid],
             )
     return filled.astype(np.float32, copy=False)
+
+
+def _apply_lifter_imputation_confidence_policy(
+    *,
+    confidence: np.ndarray,
+    original_observed_mask: np.ndarray,
+    original_imputed_mask: np.ndarray,
+    filled_valid_mask: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    effective_confidence = np.asarray(confidence, dtype=np.float32).copy()
+    observed_mask = np.asarray(original_observed_mask, dtype=bool)
+    imputed_mask = np.asarray(original_imputed_mask, dtype=bool).copy()
+    valid_mask = np.asarray(filled_valid_mask, dtype=bool)
+
+    if (
+        effective_confidence.shape != observed_mask.shape
+        or effective_confidence.shape != valid_mask.shape
+        or imputed_mask.shape != valid_mask.shape
+    ):
+        raise ValueError(
+            "Lifter imputation policy expects confidence, observed_mask, imputed_mask, and "
+            "filled_valid_mask with the same shape; got "
+            f"{effective_confidence.shape}, {observed_mask.shape}, {imputed_mask.shape}, {valid_mask.shape}."
+        )
+
+    if imputed_mask.ndim != 1:
+        raise ValueError(f"Lifter imputation policy expects 1D joint masks per frame, got {imputed_mask.shape}.")
+
+    imputed_mask |= valid_mask & ~observed_mask
+    effective_confidence[imputed_mask] = np.minimum(effective_confidence[imputed_mask], np.float32(0.15))
+    effective_confidence[imputed_mask] = np.maximum(
+        effective_confidence[imputed_mask],
+        np.float32(_IMPUTED_2D_CONFIDENCE_FLOOR),
+    )
+    effective_confidence[list(_LOWER_LIMB_JOINT_INDICES)] = np.where(
+        imputed_mask[list(_LOWER_LIMB_JOINT_INDICES)],
+        np.float32(_LOWER_LIMB_IMPUTED_CONFIDENCE),
+        effective_confidence[list(_LOWER_LIMB_JOINT_INDICES)],
+    )
+    return effective_confidence.astype(np.float32, copy=False), imputed_mask.astype(bool, copy=False)
 
 
 def _postprocess_lifter_keypoints_3d(keypoints: np.ndarray) -> np.ndarray:

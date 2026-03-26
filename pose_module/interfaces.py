@@ -286,10 +286,41 @@ class PoseSequence2D:
     frame_indices: np.ndarray
     timestamps_sec: np.ndarray
     source: str
+    observed_mask: Optional[np.ndarray] = None
+    imputed_mask: Optional[np.ndarray] = None
 
     @property
     def num_frames(self) -> int:
         return int(self.keypoints_xy.shape[0])
+
+    @property
+    def num_joints(self) -> int:
+        return int(self.keypoints_xy.shape[1])
+
+    def resolved_observed_mask(self) -> np.ndarray:
+        if self.observed_mask is None:
+            return (
+                np.isfinite(np.asarray(self.keypoints_xy, dtype=np.float32)).all(axis=2)
+                & (np.asarray(self.confidence, dtype=np.float32) > 0.0)
+            ).astype(bool, copy=False)
+        observed_mask = np.asarray(self.observed_mask, dtype=bool)
+        if observed_mask.shape != self.keypoints_xy.shape[:2]:
+            raise ValueError(
+                "PoseSequence2D observed_mask must match keypoints_xy shape [T, J]: "
+                f"got {observed_mask.shape} vs {self.keypoints_xy.shape[:2]}."
+            )
+        return observed_mask
+
+    def resolved_imputed_mask(self) -> np.ndarray:
+        if self.imputed_mask is None:
+            return np.zeros(self.keypoints_xy.shape[:2], dtype=bool)
+        imputed_mask = np.asarray(self.imputed_mask, dtype=bool)
+        if imputed_mask.shape != self.keypoints_xy.shape[:2]:
+            raise ValueError(
+                "PoseSequence2D imputed_mask must match keypoints_xy shape [T, J]: "
+                f"got {imputed_mask.shape} vs {self.keypoints_xy.shape[:2]}."
+            )
+        return imputed_mask
 
     def to_npz_payload(self) -> Dict[str, Any]:
         return {
@@ -297,6 +328,8 @@ class PoseSequence2D:
             "joint_names_2d": np.asarray(list(self.joint_names_2d)),
             "keypoints_xy": np.asarray(self.keypoints_xy, dtype=np.float32),
             "confidence": np.asarray(self.confidence, dtype=np.float32),
+            "observed_mask": np.asarray(self.resolved_observed_mask(), dtype=bool),
+            "imputed_mask": np.asarray(self.resolved_imputed_mask(), dtype=bool),
             "bbox_xywh": np.asarray(self.bbox_xywh, dtype=np.float32),
             "frame_indices": np.asarray(self.frame_indices, dtype=np.int32),
             "timestamps_sec": np.asarray(self.timestamps_sec, dtype=np.float32),
@@ -320,6 +353,16 @@ class PoseSequence2D:
             joint_names_2d=[str(value) for value in np.asarray(payload["joint_names_2d"]).tolist()],
             keypoints_xy=np.asarray(payload["keypoints_xy"], dtype=np.float32),
             confidence=np.asarray(payload["confidence"], dtype=np.float32),
+            observed_mask=(
+                np.asarray(payload["observed_mask"], dtype=bool)
+                if "observed_mask" in payload
+                else None
+            ),
+            imputed_mask=(
+                np.asarray(payload["imputed_mask"], dtype=bool)
+                if "imputed_mask" in payload
+                else None
+            ),
             bbox_xywh=np.asarray(payload["bbox_xywh"], dtype=np.float32),
             frame_indices=np.asarray(payload["frame_indices"], dtype=np.int32),
             timestamps_sec=np.asarray(payload["timestamps_sec"], dtype=np.float32),
@@ -340,6 +383,8 @@ class PoseSequence3D:
     timestamps_sec: np.ndarray
     source: str
     coordinate_space: str = "camera"
+    observed_mask: Optional[np.ndarray] = None
+    imputed_mask: Optional[np.ndarray] = None
 
     @property
     def num_frames(self) -> int:
@@ -349,12 +394,39 @@ class PoseSequence3D:
     def num_joints(self) -> int:
         return int(self.joint_positions_xyz.shape[1])
 
+    def resolved_observed_mask(self) -> np.ndarray:
+        if self.observed_mask is None:
+            return (
+                np.isfinite(np.asarray(self.joint_positions_xyz, dtype=np.float32)).all(axis=2)
+                & (np.asarray(self.joint_confidence, dtype=np.float32) > 0.0)
+            ).astype(bool, copy=False)
+        observed_mask = np.asarray(self.observed_mask, dtype=bool)
+        if observed_mask.shape != self.joint_positions_xyz.shape[:2]:
+            raise ValueError(
+                "PoseSequence3D observed_mask must match joint_positions_xyz shape [T, J]: "
+                f"got {observed_mask.shape} vs {self.joint_positions_xyz.shape[:2]}."
+            )
+        return observed_mask
+
+    def resolved_imputed_mask(self) -> np.ndarray:
+        if self.imputed_mask is None:
+            return np.zeros(self.joint_positions_xyz.shape[:2], dtype=bool)
+        imputed_mask = np.asarray(self.imputed_mask, dtype=bool)
+        if imputed_mask.shape != self.joint_positions_xyz.shape[:2]:
+            raise ValueError(
+                "PoseSequence3D imputed_mask must match joint_positions_xyz shape [T, J]: "
+                f"got {imputed_mask.shape} vs {self.joint_positions_xyz.shape[:2]}."
+            )
+        return imputed_mask
+
     def to_npz_payload(self) -> Dict[str, Any]:
         return {
             "clip_id": np.asarray(self.clip_id),
             "joint_names_3d": np.asarray(list(self.joint_names_3d)),
             "joint_positions_xyz": np.asarray(self.joint_positions_xyz, dtype=np.float32),
             "joint_confidence": np.asarray(self.joint_confidence, dtype=np.float32),
+            "observed_mask": np.asarray(self.resolved_observed_mask(), dtype=bool),
+            "imputed_mask": np.asarray(self.resolved_imputed_mask(), dtype=bool),
             "skeleton_parents": np.asarray(list(self.skeleton_parents), dtype=np.int32),
             "frame_indices": np.asarray(self.frame_indices, dtype=np.int32),
             "timestamps_sec": np.asarray(self.timestamps_sec, dtype=np.float32),
@@ -385,6 +457,16 @@ class PoseSequence3D:
             timestamps_sec=np.asarray(payload["timestamps_sec"], dtype=np.float32),
             source=str(np.asarray(payload["source"]).item()),
             coordinate_space=str(np.asarray(payload["coordinate_space"]).item()),
+            observed_mask=(
+                np.asarray(payload["observed_mask"], dtype=bool)
+                if "observed_mask" in payload
+                else None
+            ),
+            imputed_mask=(
+                np.asarray(payload["imputed_mask"], dtype=bool)
+                if "imputed_mask" in payload
+                else None
+            ),
         )
 
 

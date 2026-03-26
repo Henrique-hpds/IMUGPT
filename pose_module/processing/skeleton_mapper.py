@@ -56,17 +56,28 @@ def map_pose_sequence_to_imugpt22(
 
     source_xyz = np.asarray(sequence.joint_positions_xyz, dtype=np.float32).copy()
     source_conf = np.asarray(sequence.joint_confidence, dtype=np.float32).copy()
+    source_observed = np.asarray(sequence.resolved_observed_mask(), dtype=bool).copy()
+    source_imputed = np.asarray(sequence.resolved_imputed_mask(), dtype=bool).copy()
     source_xyz, source_conf, handedness_swap_mask = _correct_anatomical_handedness(source_xyz, source_conf)
+    source_observed, source_imputed = _swap_masked_handedness(
+        source_observed,
+        source_imputed,
+        handedness_swap_mask,
+    )
 
     num_frames = int(sequence.num_frames)
     mapped_xyz = np.full((num_frames, len(IMUGPT_22_JOINT_NAMES), 3), np.nan, dtype=np.float32)
     mapped_conf = np.zeros((num_frames, len(IMUGPT_22_JOINT_NAMES)), dtype=np.float32)
+    mapped_observed = np.zeros((num_frames, len(IMUGPT_22_JOINT_NAMES)), dtype=bool)
+    mapped_imputed = np.zeros((num_frames, len(IMUGPT_22_JOINT_NAMES)), dtype=bool)
 
     for target_name, source_name in _DIRECT_COPY_MAP.items():
         target_index = _IMUGPT22_INDEX[target_name]
         source_index = _MB17_INDEX[source_name]
         mapped_xyz[:, target_index] = source_xyz[:, source_index]
         mapped_conf[:, target_index] = source_conf[:, source_index]
+        mapped_observed[:, target_index] = source_observed[:, source_index]
+        mapped_imputed[:, target_index] = source_imputed[:, source_index]
 
     pelvis = source_xyz[:, _MB17_INDEX["pelvis"]]
     thorax = source_xyz[:, _MB17_INDEX["thorax"]]
@@ -98,6 +109,23 @@ def map_pose_sequence_to_imugpt22(
     mapped_conf[:, _IMUGPT22_INDEX["Spine1"]] = spine_conf
     mapped_conf[:, _IMUGPT22_INDEX["Spine2"]] = spine_conf
     mapped_conf[:, _IMUGPT22_INDEX["Spine3"]] = spine_conf
+    spine_observed = (
+        source_observed[:, _MB17_INDEX["pelvis"]]
+        & source_observed[:, _MB17_INDEX["spine"]]
+        & source_observed[:, _MB17_INDEX["thorax"]]
+    )
+    spine_imputed = (
+        source_imputed[:, _MB17_INDEX["pelvis"]]
+        | source_imputed[:, _MB17_INDEX["spine"]]
+        | source_imputed[:, _MB17_INDEX["thorax"]]
+        | ~spine_observed
+    )
+    mapped_observed[:, _IMUGPT22_INDEX["Spine1"]] = spine_observed & spine_valid
+    mapped_observed[:, _IMUGPT22_INDEX["Spine2"]] = spine_observed & spine_valid
+    mapped_observed[:, _IMUGPT22_INDEX["Spine3"]] = spine_observed & thorax_valid
+    mapped_imputed[:, _IMUGPT22_INDEX["Spine1"]] = spine_imputed & spine_valid
+    mapped_imputed[:, _IMUGPT22_INDEX["Spine2"]] = spine_imputed & spine_valid
+    mapped_imputed[:, _IMUGPT22_INDEX["Spine3"]] = spine_imputed & thorax_valid
 
     spine3 = mapped_xyz[:, _IMUGPT22_INDEX["Spine3"]]
     left_shoulder = mapped_xyz[:, _IMUGPT22_INDEX["Left_shoulder"]]
@@ -118,6 +146,18 @@ def map_pose_sequence_to_imugpt22(
         mapped_conf[:, _IMUGPT22_INDEX["Spine3"]],
         mapped_conf[:, _IMUGPT22_INDEX["Right_shoulder"]],
     )
+    mapped_observed[:, _IMUGPT22_INDEX["Left_collar"]] = (
+        mapped_observed[:, _IMUGPT22_INDEX["Spine3"]] & mapped_observed[:, _IMUGPT22_INDEX["Left_shoulder"]]
+    ) & left_collar_valid
+    mapped_observed[:, _IMUGPT22_INDEX["Right_collar"]] = (
+        mapped_observed[:, _IMUGPT22_INDEX["Spine3"]] & mapped_observed[:, _IMUGPT22_INDEX["Right_shoulder"]]
+    ) & right_collar_valid
+    mapped_imputed[:, _IMUGPT22_INDEX["Left_collar"]] = (
+        mapped_imputed[:, _IMUGPT22_INDEX["Spine3"]] | mapped_imputed[:, _IMUGPT22_INDEX["Left_shoulder"]]
+    ) & left_collar_valid
+    mapped_imputed[:, _IMUGPT22_INDEX["Right_collar"]] = (
+        mapped_imputed[:, _IMUGPT22_INDEX["Spine3"]] | mapped_imputed[:, _IMUGPT22_INDEX["Right_shoulder"]]
+    ) & right_collar_valid
 
     forward_vectors, forward_fallback_mask = _build_forward_vectors(source_xyz)
     left_ankle = mapped_xyz[:, _IMUGPT22_INDEX["Left_ankle"]]
@@ -136,6 +176,8 @@ def map_pose_sequence_to_imugpt22(
     mapped_conf[:, _IMUGPT22_INDEX["Right_foot"]] = (
         mapped_conf[:, _IMUGPT22_INDEX["Right_ankle"]] * np.float32(0.8)
     )
+    mapped_imputed[:, _IMUGPT22_INDEX["Left_foot"]] = left_ankle_valid
+    mapped_imputed[:, _IMUGPT22_INDEX["Right_foot"]] = right_ankle_valid
 
     mapped_sequence = PoseSequence3D(
         clip_id=str(sequence.clip_id),
@@ -149,6 +191,8 @@ def map_pose_sequence_to_imugpt22(
         timestamps_sec=np.asarray(sequence.timestamps_sec, dtype=np.float32),
         source=f"{sequence.source}_imugpt22",
         coordinate_space=str(sequence.coordinate_space),
+        observed_mask=mapped_observed.astype(bool, copy=False),
+        imputed_mask=mapped_imputed.astype(bool, copy=False),
     )
     quality_report = _build_skeleton_mapper_quality_report(
         sequence=sequence,
@@ -237,6 +281,34 @@ def _validate_motionbert17_sequence(sequence: PoseSequence3D) -> None:
         raise ValueError("Skeleton mapper expects joint_positions_xyz with shape [T, 17, 3].")
     if confidence.shape != points.shape[:2]:
         raise ValueError("Skeleton mapper expects joint_confidence with shape [T, 17].")
+
+
+def _swap_masked_handedness(
+    observed_mask: np.ndarray,
+    imputed_mask: np.ndarray,
+    swap_mask: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    corrected_observed = np.asarray(observed_mask, dtype=bool).copy()
+    corrected_imputed = np.asarray(imputed_mask, dtype=bool).copy()
+    if not np.any(swap_mask):
+        return corrected_observed, corrected_imputed
+
+    swap_frame_indices = np.flatnonzero(swap_mask)
+    for left_name, right_name in _LEFT_RIGHT_MB17_PAIRS:
+        left_index = _MB17_INDEX[left_name]
+        right_index = _MB17_INDEX[right_name]
+
+        left_observed = corrected_observed[swap_frame_indices, left_index].copy()
+        right_observed = corrected_observed[swap_frame_indices, right_index].copy()
+        corrected_observed[swap_frame_indices, left_index] = right_observed
+        corrected_observed[swap_frame_indices, right_index] = left_observed
+
+        left_imputed = corrected_imputed[swap_frame_indices, left_index].copy()
+        right_imputed = corrected_imputed[swap_frame_indices, right_index].copy()
+        corrected_imputed[swap_frame_indices, left_index] = right_imputed
+        corrected_imputed[swap_frame_indices, right_index] = left_imputed
+
+    return corrected_observed, corrected_imputed
 
 
 def _correct_anatomical_handedness(

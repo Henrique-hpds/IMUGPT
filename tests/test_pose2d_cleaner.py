@@ -93,6 +93,29 @@ class Pose2DCleanerTests(unittest.TestCase):
         self.assertGreaterEqual(quality_report["frames_interpolated"], 2)
         self.assertEqual(quality_report["status"], "ok")
 
+    def test_clean_pose_sequence2d_keeps_interpolated_lower_leg_joints_low_confidence_and_imputed(self) -> None:
+        raw_sequence = _make_pose_sequence(
+            7,
+            missing={
+                2: ("left_ankle",),
+                3: ("left_ankle",),
+            },
+        )
+
+        cleaned_sequence, _, artifacts = clean_pose_sequence2d(
+            raw_sequence,
+            track_report={"status": "ok", "warnings": []},
+        )
+
+        left_ankle_index = MOTIONBERT_17_JOINT_NAMES.index("left_ankle")
+        self.assertTrue(np.isfinite(cleaned_sequence.keypoints_xy[2:4, left_ankle_index]).all())
+        self.assertTrue(np.all(cleaned_sequence.confidence[2:4, left_ankle_index] <= 0.15))
+        self.assertTrue(np.all(cleaned_sequence.confidence[2:4, left_ankle_index] > 0.0))
+        self.assertTrue(np.all(cleaned_sequence.imputed_mask[2:4, left_ankle_index]))
+        self.assertTrue(np.all(~cleaned_sequence.observed_mask[2:4, left_ankle_index]))
+        self.assertTrue(np.all(artifacts["imputed_mask"][2:4, left_ankle_index]))
+        self.assertTrue(np.all(~artifacts["observed_mask"][2:4, left_ankle_index]))
+
     def test_clean_pose_sequence2d_fails_on_excess_missing_joints(self) -> None:
         raw_sequence = _make_pose_sequence(
             10,

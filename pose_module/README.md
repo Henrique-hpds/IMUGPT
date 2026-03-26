@@ -210,6 +210,30 @@ Para gerar apenas o debug 3D, sem os videos 2D:
 
 Esse fluxo gera os artefatos 3D das etapas `5.5`, `5.6` e `5.7`, com `pose3d.npz` no contrato final `IMUGPT22` em `body_metric_local`, `pose3d_motionbert17.npz` preservando a saida MB17 bruta do MotionBERT, `3d_keypoints_raw.npy`, `3d_keypoints_metric.npy`, `motionbert_run.json` e, quando habilitado, um debug side-by-side com 2D clean + 3D raw/final.
 
+### 8. Exportar BVH pela CLI (arquivo customizado)
+
+Voce pode exportar qualquer `pose3d.npz` (incluindo esqueletos diferentes, como `motionbert17`) para BVH com caminho de saida customizado:
+
+```bash
+.venv/bin/python -m pose_module.export.bvh \
+  --pose3d-npz output/robot_emotions_pose3d/10ms/user_02/robot_emotions_10ms_u02_tag05/pose/pose3d_motionbert17.npz \
+  --output-bvh output/robot_emotions_pose3d/10ms/user_02/robot_emotions_10ms_u02_tag05/pose/meu_pipeline_3d_raw.bvh
+```
+
+Argumentos da CLI:
+
+- `--pose3d-npz`: caminho do arquivo de entrada no formato `PoseSequence3D` (`.npz`)
+- `--output-bvh`: caminho do arquivo BVH de saida
+- `--no-ground-to-floor`: opcional, desliga o ajuste vertical que coloca o menor ponto no chao
+
+Exemplo para exportar o esqueleto final do pipeline (`pose3d.npz`):
+
+```bash
+.venv/bin/python -m pose_module.export.bvh \
+  --pose3d-npz output/robot_emotions_pose3d/10ms/user_02/robot_emotions_10ms_u02_tag05/pose/pose3d.npz \
+  --output-bvh output/robot_emotions_pose3d/10ms/user_02/robot_emotions_10ms_u02_tag05/pose/pose3d_final.bvh
+```
+
 ## Saidas geradas
 
 ### Saidas do `export-imu`
@@ -267,6 +291,7 @@ Quando voce roda o pipeline completo ate a etapa `5.7`, os arquivos abaixo sao a
 
 - `pose/pose3d.npz`
 - `pose/pose3d_motionbert17.npz`
+- `pose/pose3d.bvh`
 - `pose/3d_keypoints_raw.npy`
 - `pose/3d_keypoints_metric.npy`
 - `pose/motionbert_run.json`

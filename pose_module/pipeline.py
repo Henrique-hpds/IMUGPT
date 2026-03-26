@@ -19,6 +19,7 @@ from pose_module.motionbert.adapter import write_pose_sequence3d_npz
 from pose_module.motionbert.lifter import MotionBERTPredictor, run_motionbert_lifter
 from pose_module.io.video_loader import frame_indices_to_timestamps, select_frame_indices
 from pose_module.processing.cleaner2d import clean_pose_sequence2d
+from pose_module.processing.lower_limb_stabilizer import run_lower_limb_stabilizer
 from pose_module.processing.metric_normalizer import run_metric_normalizer
 from pose_module.processing.quality import (
     merge_stage53_quality_reports,
@@ -227,10 +228,18 @@ def run_pose3d_pipeline(
     raw_pose_sequence_3d = lifter_result["pose_sequence"]
     raw_motionbert_pose3d_path = output_dir / "pose3d_motionbert17.npz"
     write_pose_sequence3d_npz(raw_pose_sequence_3d, raw_motionbert_pose3d_path)
+    lower_limb_result = run_lower_limb_stabilizer(raw_pose_sequence_3d)
+    stabilized_pose_sequence_3d = lower_limb_result["pose_sequence"]
+    stabilized_motionbert_pose3d_path = output_dir / "pose3d_motionbert17_stabilized.npz"
+    write_pose_sequence3d_npz(stabilized_pose_sequence_3d, stabilized_motionbert_pose3d_path)
+    write_json_file(lower_limb_result["quality_report"], output_dir / "lower_limb_stabilizer_report.json")
     mapped_pose_sequence_3d, mapper_quality, mapper_artifacts = map_pose_sequence_to_imugpt22(
-        raw_pose_sequence_3d,
+        stabilized_pose_sequence_3d,
     )
-    metric_normalizer_result = run_metric_normalizer(mapped_pose_sequence_3d)
+    metric_normalizer_result = run_metric_normalizer(
+        mapped_pose_sequence_3d,
+        lower_limb_correction_masks=lower_limb_result["artifacts"]["correction_masks"],
+    )
     metric_pose_sequence_3d = metric_normalizer_result["pose_sequence"]
     metric_normalization = metric_normalizer_result["normalization_result"]
     metric_quality = metric_normalizer_result["quality_report"]
@@ -248,10 +257,12 @@ def run_pose3d_pipeline(
     merged_quality = merge_stage57_quality_reports(
         pose2d_quality=pose2d_result["quality_report"],
         lifter_quality=lifter_result["quality_report"],
+        lower_limb_quality=lower_limb_result["quality_report"],
         mapper_quality=mapper_quality,
         normalizer_quality=metric_quality,
     )
     pose3d_debug_overlay_path = None
+    pose3d_stabilized_debug_overlay_path = None
     pose3d_imugpt22_debug_overlay_path = None
     if save_debug_3d:
         cleaner_artifacts = pose2d_result["cleaner_artifacts"]
@@ -274,6 +285,19 @@ def run_pose3d_pipeline(
             overlay_variant="pose3d_raw",
             merged_quality=merged_quality,
         )
+        pose3d_stabilized_debug_overlay_path = _render_pose3d_debug_overlay(
+            video_path=str(video_path),
+            output_path=resolve_debug_overlay_variant_path(
+                output_dir,
+                variant="pose3d_stabilized",
+                enabled=True,
+            ),
+            pose_sequence_2d=pose2d_result["pose_sequence"],
+            clean_keypoints_xy=clean_keypoints_xy_pixels,
+            pose_sequence_3d=stabilized_pose_sequence_3d,
+            overlay_variant="pose3d_stabilized",
+            merged_quality=merged_quality,
+        )
         pose3d_imugpt22_debug_overlay_path = _render_pose3d_debug_overlay(
             video_path=str(video_path),
             output_path=resolve_debug_overlay_variant_path(
@@ -292,12 +316,19 @@ def run_pose3d_pipeline(
     artifacts = dict(pose2d_result["artifacts"])
     artifacts.update(lifter_result["artifacts"])
     artifacts["pose3d_motionbert17_npz_path"] = str(raw_motionbert_pose3d_path.resolve())
+    artifacts["pose3d_motionbert17_stabilized_npz_path"] = str(stabilized_motionbert_pose3d_path.resolve())
     artifacts["pose3d_npz_path"] = str((output_dir / "pose3d.npz").resolve())
     artifacts["pose3d_metric_keypoints_path"] = str((output_dir / "3d_keypoints_metric.npy").resolve())
     artifacts["pose3d_bvh_path"] = str(Path(bvh_artifacts["pose3d_bvh_path"]).resolve())
     artifacts["quality_report_json_path"] = str((output_dir / "quality_report.json").resolve())
+    artifacts["lower_limb_stabilizer_report_json_path"] = str(
+        (output_dir / "lower_limb_stabilizer_report.json").resolve()
+    )
     artifacts["debug_overlay_pose3d_raw_path"] = (
         None if pose3d_debug_overlay_path is None else str(pose3d_debug_overlay_path)
+    )
+    artifacts["debug_overlay_pose3d_stabilized_path"] = (
+        None if pose3d_stabilized_debug_overlay_path is None else str(pose3d_stabilized_debug_overlay_path)
     )
     artifacts["debug_overlay_pose3d_imugpt22_path"] = (
         None if pose3d_imugpt22_debug_overlay_path is None else str(pose3d_imugpt22_debug_overlay_path)
@@ -308,17 +339,20 @@ def run_pose3d_pipeline(
         "pose2d_result": pose2d_result,
         "pose_sequence": metric_pose_sequence_3d,
         "motionbert_pose_sequence": raw_pose_sequence_3d,
+        "lower_limb_stabilized_pose_sequence": stabilized_pose_sequence_3d,
         "skeleton_mapped_pose_sequence": mapped_pose_sequence_3d,
         "pose_sequence_2d": pose2d_result["pose_sequence"],
         "raw_pose_sequence_2d": pose2d_result["raw_pose_sequence"],
         "quality_report": merged_quality,
         "pose2d_quality_report": pose2d_result["quality_report"],
         "motionbert_quality_report": lifter_result["quality_report"],
+        "lower_limb_stabilizer_quality_report": lower_limb_result["quality_report"],
         "skeleton_mapper_quality_report": mapper_quality,
         "metric_normalization_quality_report": metric_quality,
         "track_report": pose2d_result["track_report"],
         "backend_run": pose2d_result["backend_run"],
         "motionbert_run": lifter_result["run_report"],
+        "lower_limb_stabilizer_artifacts": lower_limb_result["artifacts"],
         "skeleton_mapper_artifacts": mapper_artifacts,
         "metric_normalization_result": metric_normalization,
         "metric_normalization_artifacts": metric_artifacts,
@@ -381,6 +415,8 @@ def _build_motionbert_backend_input_sequence(pose2d_result: Mapping[str, Any]) -
         frame_indices=np.asarray(pose_sequence.frame_indices, dtype=np.int32),
         timestamps_sec=np.asarray(pose_sequence.timestamps_sec, dtype=np.float32),
         source=f"{pose_sequence.source}_pixels",
+        observed_mask=np.asarray(pose_sequence.resolved_observed_mask(), dtype=bool),
+        imputed_mask=np.asarray(pose_sequence.resolved_imputed_mask(), dtype=bool),
     )
 
 

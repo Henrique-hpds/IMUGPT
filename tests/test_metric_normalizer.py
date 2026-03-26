@@ -160,6 +160,89 @@ class MetricNormalizerTests(unittest.TestCase):
         self.assertTrue(np.isfinite(result["pose_sequence"].joint_positions_xyz).all())
         self.assertEqual(int(np.count_nonzero(result["artifacts"]["body_frame_fallback_mask"])), 1)
 
+    def test_run_metric_normalizer_applies_tibia_prior_only_to_corrected_legs(self) -> None:
+        sequence = _make_imugpt22_sequence()
+
+        result = run_metric_normalizer(
+            sequence,
+            target_femur_length_m=0.45,
+            target_tibia_length_m=0.40,
+            smoothing_window_length=5,
+            corrected_smoothing_window_length=3,
+            smoothing_polyorder=2,
+            lower_limb_correction_masks={
+                "left_leg": np.ones((sequence.num_frames,), dtype=bool),
+                "right_leg": np.zeros((sequence.num_frames,), dtype=bool),
+            },
+        )
+
+        pose_sequence = result["pose_sequence"]
+        quality_report = result["quality_report"]
+        left_knee_index = IMUGPT_22_JOINT_NAMES.index("Left_knee")
+        left_ankle_index = IMUGPT_22_JOINT_NAMES.index("Left_ankle")
+        right_knee_index = IMUGPT_22_JOINT_NAMES.index("Right_knee")
+        right_ankle_index = IMUGPT_22_JOINT_NAMES.index("Right_ankle")
+
+        left_tibia_length = np.linalg.norm(
+            pose_sequence.joint_positions_xyz[:, left_ankle_index] - pose_sequence.joint_positions_xyz[:, left_knee_index],
+            axis=1,
+        )
+        right_tibia_length = np.linalg.norm(
+            pose_sequence.joint_positions_xyz[:, right_ankle_index] - pose_sequence.joint_positions_xyz[:, right_knee_index],
+            axis=1,
+        )
+
+        self.assertTrue(np.allclose(left_tibia_length, 0.40, atol=0.02))
+        self.assertTrue(np.allclose(right_tibia_length, 0.36, atol=0.02))
+        self.assertEqual(quality_report["tibia_prior_applied_frames"], sequence.num_frames)
+        self.assertEqual(quality_report["corrected_smoothing_window_length"], 3)
+        self.assertTrue(
+            np.all(result["artifacts"]["tibia_prior_applied_mask"]["left_leg"])
+        )
+        self.assertFalse(
+            np.any(result["artifacts"]["tibia_prior_applied_mask"]["right_leg"])
+        )
+
+    def test_run_metric_normalizer_excludes_imputed_femur_from_scale_estimate(self) -> None:
+        sequence = _make_imugpt22_sequence()
+        left_hip_index = IMUGPT_22_JOINT_NAMES.index("Left_hip")
+        left_knee_index = IMUGPT_22_JOINT_NAMES.index("Left_knee")
+        joint_confidence = np.asarray(sequence.joint_confidence, dtype=np.float32).copy()
+        imputed_mask = np.zeros((sequence.num_frames, len(IMUGPT_22_JOINT_NAMES)), dtype=bool)
+        observed_mask = np.ones((sequence.num_frames, len(IMUGPT_22_JOINT_NAMES)), dtype=bool)
+        joint_confidence[:, left_hip_index] = 0.05
+        joint_confidence[:, left_knee_index] = 0.05
+        observed_mask[:, left_hip_index] = False
+        observed_mask[:, left_knee_index] = False
+        imputed_mask[:, left_hip_index] = True
+        imputed_mask[:, left_knee_index] = True
+
+        sequence = PoseSequence3D(
+            clip_id=sequence.clip_id,
+            fps=sequence.fps,
+            fps_original=sequence.fps_original,
+            joint_names_3d=sequence.joint_names_3d,
+            joint_positions_xyz=np.asarray(sequence.joint_positions_xyz, dtype=np.float32),
+            joint_confidence=joint_confidence,
+            skeleton_parents=sequence.skeleton_parents,
+            frame_indices=sequence.frame_indices,
+            timestamps_sec=sequence.timestamps_sec,
+            source=sequence.source,
+            coordinate_space=sequence.coordinate_space,
+            observed_mask=observed_mask,
+            imputed_mask=imputed_mask,
+        )
+
+        result = run_metric_normalizer(
+            sequence,
+            target_femur_length_m=0.45,
+            smoothing_window_length=5,
+            smoothing_polyorder=2,
+        )
+
+        self.assertAlmostEqual(float(result["normalization_result"]["scale_factor"]), 0.9, places=4)
+        self.assertNotIn("scale_factor_fallback_to_identity", result["quality_report"]["notes"])
+
 
 if __name__ == "__main__":
     unittest.main()

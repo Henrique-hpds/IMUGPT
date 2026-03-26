@@ -18,6 +18,7 @@ from pose_module.motionbert.adapter import (
     merge_motionbert_window_predictions,
 )
 from pose_module.motionbert.lifter import (
+    _apply_lifter_imputation_confidence_policy,
     _convert_confidence,
     _convert_mask,
     _fill_missing_keypoints_for_lifter,
@@ -199,6 +200,36 @@ class MotionBERTAdapterTests(unittest.TestCase):
 
 
 class MotionBERTLifterTests(unittest.TestCase):
+    def test_apply_lifter_imputation_confidence_policy_keeps_lower_leg_imputations_at_fixed_low_confidence(self) -> None:
+        sequence = _make_motionbert_sequence(1)
+        left_ankle_index = MOTIONBERT_17_JOINT_NAMES.index("left_ankle")
+        right_ankle_index = MOTIONBERT_17_JOINT_NAMES.index("right_ankle")
+        left_wrist_index = MOTIONBERT_17_JOINT_NAMES.index("left_wrist")
+
+        confidence = np.asarray(sequence.confidence[0], dtype=np.float32).copy()
+        original_observed_mask = np.ones((len(MOTIONBERT_17_JOINT_NAMES),), dtype=bool)
+        original_imputed_mask = np.zeros((len(MOTIONBERT_17_JOINT_NAMES),), dtype=bool)
+        filled_valid_mask = np.ones((len(MOTIONBERT_17_JOINT_NAMES),), dtype=bool)
+
+        for joint_index in (left_ankle_index, right_ankle_index, left_wrist_index):
+            original_observed_mask[joint_index] = False
+            confidence[joint_index] = 0.0
+
+        effective_confidence, imputed_mask = _apply_lifter_imputation_confidence_policy(
+            confidence=confidence,
+            original_observed_mask=original_observed_mask,
+            original_imputed_mask=original_imputed_mask,
+            filled_valid_mask=filled_valid_mask,
+        )
+
+        self.assertTrue(bool(imputed_mask[left_ankle_index]))
+        self.assertTrue(bool(imputed_mask[right_ankle_index]))
+        self.assertTrue(bool(imputed_mask[left_wrist_index]))
+        self.assertAlmostEqual(float(effective_confidence[left_ankle_index]), 0.05, places=6)
+        self.assertAlmostEqual(float(effective_confidence[right_ankle_index]), 0.05, places=6)
+        self.assertGreaterEqual(float(effective_confidence[left_wrist_index]), 0.05)
+        self.assertLessEqual(float(effective_confidence[left_wrist_index]), 0.15)
+
     def test_imputed_motionbert_inputs_can_keep_low_positive_confidence_after_conversion(self) -> None:
         sequence = _make_motionbert_sequence(5)
         left_ankle_index = MOTIONBERT_17_JOINT_NAMES.index("left_ankle")
@@ -255,6 +286,8 @@ class MotionBERTLifterTests(unittest.TestCase):
             self.assertEqual(result["quality_report"]["backend_name"], "unit_test_motionbert")
             self.assertEqual(result["quality_report"]["status"], "ok")
             self.assertAlmostEqual(float(pose_sequence.joint_positions_xyz[0, 4, 2]), 4.0, places=5)
+            self.assertEqual(pose_sequence.observed_mask.shape, (90, 17))
+            self.assertEqual(pose_sequence.imputed_mask.shape, (90, 17))
 
 
 class Pose3DPipelineTests(unittest.TestCase):
@@ -300,11 +333,18 @@ class Pose3DPipelineTests(unittest.TestCase):
             self.assertTrue(Path(result["artifacts"]["pose3d_bvh_path"]).exists())
             self.assertEqual(result["pose_sequence"].joint_names_3d, list(IMUGPT_22_JOINT_NAMES))
             self.assertEqual(result["motionbert_pose_sequence"].joint_names_3d, list(MOTIONBERT_17_JOINT_NAMES))
+            self.assertEqual(
+                result["lower_limb_stabilized_pose_sequence"].joint_names_3d,
+                list(MOTIONBERT_17_JOINT_NAMES),
+            )
             self.assertEqual(result["skeleton_mapped_pose_sequence"].joint_names_3d, list(IMUGPT_22_JOINT_NAMES))
             self.assertEqual(result["pose_sequence"].coordinate_space, BODY_METRIC_LOCAL_COORDINATE_SPACE)
             self.assertTrue(Path(result["artifacts"]["pose3d_motionbert17_npz_path"]).exists())
+            self.assertTrue(Path(result["artifacts"]["pose3d_motionbert17_stabilized_npz_path"]).exists())
+            self.assertTrue(Path(result["artifacts"]["lower_limb_stabilizer_report_json_path"]).exists())
             self.assertTrue(result["quality_report"]["skeleton_mapping_ok"])
             self.assertTrue(result["quality_report"]["metric_pose_ok"])
+            self.assertEqual(result["quality_report"]["metric_normalizer_target_tibia_length_m"], 0.4)
             self.assertEqual(
                 result["metric_normalization_quality_report"]["coordinate_space"],
                 BODY_METRIC_LOCAL_COORDINATE_SPACE,
@@ -407,15 +447,21 @@ class Pose3DPipelineTests(unittest.TestCase):
                 )
 
             self.assertTrue(Path(result["artifacts"]["debug_overlay_pose3d_raw_path"]).exists())
+            self.assertTrue(Path(result["artifacts"]["debug_overlay_pose3d_stabilized_path"]).exists())
             self.assertTrue(Path(result["artifacts"]["debug_overlay_pose3d_imugpt22_path"]).exists())
             self.assertEqual(
                 rendered_outputs,
-                ["debug_overlay_pose3d_raw.mp4", "debug_overlay_pose3d_imugpt22.mp4"],
+                [
+                    "debug_overlay_pose3d_raw.mp4",
+                    "debug_overlay_pose3d_stabilized.mp4",
+                    "debug_overlay_pose3d_imugpt22.mp4",
+                ],
             )
-            self.assertEqual(len(render_calls), 2)
+            self.assertEqual(len(render_calls), 3)
             self.assertEqual(render_calls[0]["coordinate_space"], "pose_lifter_aligned")
-            self.assertEqual(render_calls[1]["coordinate_space"], BODY_METRIC_LOCAL_COORDINATE_SPACE)
-            self.assertEqual(mocked_render.call_count, 2)
+            self.assertEqual(render_calls[1]["coordinate_space"], "pose_lifter_aligned")
+            self.assertEqual(render_calls[2]["coordinate_space"], BODY_METRIC_LOCAL_COORDINATE_SPACE)
+            self.assertEqual(mocked_render.call_count, 3)
             self.assertEqual(mocked_pose2d_pipeline.call_args.kwargs["save_debug"], False)
             self.assertTrue(Path(result["artifacts"]["pose3d_metric_keypoints_path"]).exists())
 

@@ -171,17 +171,20 @@ def merge_stage57_quality_reports(
     *,
     pose2d_quality: Mapping[str, Any],
     lifter_quality: Mapping[str, Any],
+    lower_limb_quality: Mapping[str, Any] | None = None,
     mapper_quality: Mapping[str, Any],
     normalizer_quality: Mapping[str, Any],
 ) -> Dict[str, Any]:
     pose2d_quality = dict(pose2d_quality)
     lifter_quality = dict(lifter_quality)
+    lower_limb_quality = {} if lower_limb_quality is None else dict(lower_limb_quality)
     mapper_quality = dict(mapper_quality)
     normalizer_quality = dict(normalizer_quality)
 
     notes = []
     notes.extend([str(value) for value in pose2d_quality.get("notes", [])])
     notes.extend([str(value) for value in lifter_quality.get("notes", [])])
+    notes.extend([str(value) for value in lower_limb_quality.get("notes", [])])
     notes.extend([str(value) for value in mapper_quality.get("notes", [])])
     notes.extend([str(value) for value in normalizer_quality.get("notes", [])])
 
@@ -189,6 +192,7 @@ def merge_stage57_quality_reports(
     if (
         pose2d_quality.get("status") == "fail"
         or lifter_quality.get("status") == "fail"
+        or lower_limb_quality.get("status") == "fail"
         or mapper_quality.get("status") == "fail"
         or normalizer_quality.get("status") == "fail"
     ):
@@ -196,6 +200,7 @@ def merge_stage57_quality_reports(
     elif (
         pose2d_quality.get("status") == "warning"
         or lifter_quality.get("status") == "warning"
+        or lower_limb_quality.get("status") == "warning"
         or mapper_quality.get("status") == "warning"
         or normalizer_quality.get("status") == "warning"
         or len(notes) > 0
@@ -224,6 +229,10 @@ def merge_stage57_quality_reports(
             "motionbert_input_channels": lifter_quality.get("input_channels"),
             "depth_variation": lifter_quality.get("depth_variation"),
             "window_coverage_ratio": lifter_quality.get("window_coverage_ratio"),
+            "lower_limb_left_correction_frames": lower_limb_quality.get("left_leg_correction_frames"),
+            "lower_limb_right_correction_frames": lower_limb_quality.get("right_leg_correction_frames"),
+            "lower_limb_left_uncertain_frames": lower_limb_quality.get("left_leg_uncertain_frames"),
+            "lower_limb_right_uncertain_frames": lower_limb_quality.get("right_leg_uncertain_frames"),
             "skeleton_mapping_ok": mapper_quality.get("skeleton_mapping_ok"),
             "skeleton_mapper_input_joint_format": mapper_quality.get("input_joint_format"),
             "skeleton_mapper_output_joint_format": mapper_quality.get("output_joint_format"),
@@ -233,14 +242,21 @@ def merge_stage57_quality_reports(
             "metric_normalizer_coordinate_space": normalizer_quality.get("coordinate_space"),
             "metric_normalizer_scale_factor": normalizer_quality.get("scale_factor"),
             "metric_normalizer_target_femur_length_m": normalizer_quality.get("target_femur_length_m"),
+            "metric_normalizer_target_tibia_length_m": normalizer_quality.get("target_tibia_length_m"),
             "metric_normalizer_observed_femur_length_model_units": normalizer_quality.get(
                 "observed_femur_length_model_units"
             ),
             "metric_normalizer_body_frame_fallback_frames": normalizer_quality.get(
                 "body_frame_fallback_frames"
             ),
+            "metric_normalizer_tibia_prior_applied_frames": normalizer_quality.get(
+                "tibia_prior_applied_frames"
+            ),
             "metric_normalizer_smoothing_window_length": normalizer_quality.get(
                 "smoothing_window_length"
+            ),
+            "metric_normalizer_corrected_smoothing_window_length": normalizer_quality.get(
+                "corrected_smoothing_window_length"
             ),
             "metric_normalizer_smoothing_polyorder": normalizer_quality.get("smoothing_polyorder"),
             "notes": list(dict.fromkeys(notes)),

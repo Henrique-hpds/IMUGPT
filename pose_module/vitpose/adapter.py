@@ -56,6 +56,8 @@ def canonicalize_pose_sequence2d(
     num_selected_frames = int(len(selected_frame_indices))
     keypoints_xy = np.full((num_selected_frames, len(COCO_17_JOINT_NAMES), 2), np.nan, dtype=np.float32)
     confidence = np.zeros((num_selected_frames, len(COCO_17_JOINT_NAMES)), dtype=np.float32)
+    observed_mask = np.zeros((num_selected_frames, len(COCO_17_JOINT_NAMES)), dtype=bool)
+    imputed_mask = np.zeros((num_selected_frames, len(COCO_17_JOINT_NAMES)), dtype=bool)
     bbox_xywh = np.full((num_selected_frames, 4), np.nan, dtype=np.float32)
 
     warnings: List[str] = []
@@ -73,6 +75,7 @@ def canonicalize_pose_sequence2d(
 
         keypoints_xy[output_index] = normalized_keypoints
         confidence[output_index] = normalized_scores
+        observed_mask[output_index] = np.isfinite(normalized_keypoints).all(axis=1) & (normalized_scores > 0.0)
         bbox_xywh[output_index] = _bbox_xyxy_to_xywh(detection.bbox_xyxy)
         detected_frames += 1
 
@@ -105,6 +108,8 @@ def canonicalize_pose_sequence2d(
         frame_indices=selected_frame_indices.astype(np.int32, copy=False),
         timestamps_sec=timestamps_sec.astype(np.float32, copy=False),
         source=str(source),
+        observed_mask=observed_mask,
+        imputed_mask=imputed_mask,
     )
     quality_report = {
         "clip_id": str(clip_id),

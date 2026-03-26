@@ -116,6 +116,8 @@ class SkeletonMapperTests(unittest.TestCase):
             0.72,
             places=5,
         )
+        self.assertFalse(bool(mapped_sequence.observed_mask[0, IMUGPT_22_JOINT_NAMES.index("Left_foot")]))
+        self.assertTrue(bool(mapped_sequence.imputed_mask[0, IMUGPT_22_JOINT_NAMES.index("Left_foot")]))
 
     def test_map_pose_sequence_to_imugpt22_corrects_flipped_handedness(self) -> None:
         sequence = _make_mb17_pose_sequence(flip_handedness=True)
@@ -134,6 +136,38 @@ class SkeletonMapperTests(unittest.TestCase):
         left_hip_x = mapped_sequence.joint_positions_xyz[:, IMUGPT_22_JOINT_NAMES.index("Left_hip"), 0]
         right_hip_x = mapped_sequence.joint_positions_xyz[:, IMUGPT_22_JOINT_NAMES.index("Right_hip"), 0]
         self.assertTrue(np.all(right_hip_x > left_hip_x))
+
+    def test_map_pose_sequence_to_imugpt22_propagates_low_confidence_ankle_to_synthetic_foot(self) -> None:
+        sequence = _make_mb17_pose_sequence()
+        left_ankle_index = MOTIONBERT_17_JOINT_NAMES.index("left_ankle")
+        observed_mask = np.ones((sequence.num_frames, len(MOTIONBERT_17_JOINT_NAMES)), dtype=bool)
+        imputed_mask = np.zeros((sequence.num_frames, len(MOTIONBERT_17_JOINT_NAMES)), dtype=bool)
+        joint_confidence = np.asarray(sequence.joint_confidence, dtype=np.float32).copy()
+        joint_confidence[:, left_ankle_index] = 0.1
+        observed_mask[:, left_ankle_index] = False
+        imputed_mask[:, left_ankle_index] = True
+        sequence = PoseSequence3D(
+            clip_id=sequence.clip_id,
+            fps=sequence.fps,
+            fps_original=sequence.fps_original,
+            joint_names_3d=sequence.joint_names_3d,
+            joint_positions_xyz=sequence.joint_positions_xyz,
+            joint_confidence=joint_confidence,
+            skeleton_parents=sequence.skeleton_parents,
+            frame_indices=sequence.frame_indices,
+            timestamps_sec=sequence.timestamps_sec,
+            source=sequence.source,
+            coordinate_space=sequence.coordinate_space,
+            observed_mask=observed_mask,
+            imputed_mask=imputed_mask,
+        )
+
+        mapped_sequence, _, _ = map_pose_sequence_to_imugpt22(sequence)
+
+        left_foot_index = IMUGPT_22_JOINT_NAMES.index("Left_foot")
+        self.assertTrue(np.allclose(mapped_sequence.joint_confidence[:, left_foot_index], 0.08, atol=1e-6))
+        self.assertTrue(np.all(mapped_sequence.imputed_mask[:, left_foot_index]))
+        self.assertTrue(np.all(~mapped_sequence.observed_mask[:, left_foot_index]))
 
 
 if __name__ == "__main__":
