@@ -367,6 +367,25 @@ def merge_stage510_quality_reports(
             "virtual_imu_sensor_names": virtual_imu_quality.get("sensor_names"),
             "virtual_imu_acc_noise_std_m_s2": virtual_imu_quality.get("acc_noise_std_m_s2"),
             "virtual_imu_gyro_noise_std_rad_s": virtual_imu_quality.get("gyro_noise_std_rad_s"),
+            "virtual_imu_real_calibration_applied": virtual_imu_quality.get("real_imu_calibration_applied"),
+            "virtual_imu_real_calibration_signal_mode": virtual_imu_quality.get(
+                "real_imu_calibration_signal_mode"
+            ),
+            "virtual_imu_real_calibration_per_class_applied": virtual_imu_quality.get(
+                "real_imu_calibration_per_class_applied"
+            ),
+            "virtual_imu_real_calibration_reference_path": virtual_imu_quality.get(
+                "real_imu_calibration_reference_path"
+            ),
+            "virtual_imu_real_calibration_matched_sensor_names": virtual_imu_quality.get(
+                "real_imu_calibration_matched_sensor_names"
+            ),
+            "virtual_imu_real_calibration_mean_abs_delta": virtual_imu_quality.get(
+                "real_imu_calibration_mean_abs_delta"
+            ),
+            "virtual_imu_real_calibration_max_abs_delta": virtual_imu_quality.get(
+                "real_imu_calibration_max_abs_delta"
+            ),
             "virtual_imu_max_acceleration_norm_m_s2": virtual_imu_quality.get("max_acceleration_norm_m_s2"),
             "virtual_imu_max_gyro_norm_rad_s": virtual_imu_quality.get("max_gyro_norm_rad_s"),
             "notes": list(dict.fromkeys(notes)),

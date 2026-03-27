@@ -388,6 +388,7 @@ def run_virtual_imu_pipeline(
     clip_id: str,
     video_path: str,
     output_dir: str | Path,
+    activity_label: Any = None,
     fps_target: int = 20,
     save_debug: bool = True,
     save_debug_2d: Optional[bool] = None,
@@ -409,6 +410,10 @@ def run_virtual_imu_pipeline(
     imu_acc_noise_std_m_s2: Optional[float] = None,
     imu_gyro_noise_std_rad_s: Optional[float] = None,
     imu_random_seed: int = 0,
+    real_imu_reference_path: str | Path | None = None,
+    real_imu_signal_mode: str = "acc",
+    real_imu_percentile_resolution: int = 100,
+    real_imu_per_class_calibration: bool = True,
 ) -> Dict[str, Any]:
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -447,6 +452,11 @@ def run_virtual_imu_pipeline(
         acc_noise_std_m_s2=imu_acc_noise_std_m_s2,
         gyro_noise_std_rad_s=imu_gyro_noise_std_rad_s,
         random_seed=int(imu_random_seed),
+        real_imu_reference_path=real_imu_reference_path,
+        real_imu_activity_label=activity_label,
+        real_imu_signal_mode=str(real_imu_signal_mode),
+        real_imu_percentile_resolution=int(real_imu_percentile_resolution),
+        real_imu_per_class_calibration=bool(real_imu_per_class_calibration),
     )
     merged_quality = merge_stage510_quality_reports(
         pose3d_quality=pose3d_result["quality_report"],
@@ -470,6 +480,7 @@ def run_virtual_imu_pipeline(
         "pose3d_quality_report": pose3d_result["quality_report"],
         "ik_quality_report": ik_result["quality_report"],
         "virtual_imu_quality_report": imusim_result["quality_report"],
+        "virtual_imu_calibration_report": imusim_result["calibration_report"],
         "ik_result": ik_result,
         "imusim_result": imusim_result,
         "artifacts": artifacts,
@@ -498,6 +509,7 @@ def generate_virtual_imu_from_video(
     video_path: str,
     clip_id: str,
     *,
+    activity_label: Any = None,
     fps_target: int = 20,
 ) -> Any:
     output_dir = Path("output") / str(clip_id) / "pose"
@@ -505,6 +517,7 @@ def generate_virtual_imu_from_video(
         clip_id=str(clip_id),
         video_path=str(video_path),
         output_dir=output_dir,
+        activity_label=activity_label,
         fps_target=int(fps_target),
     )
     return result["virtual_imu_sequence"]

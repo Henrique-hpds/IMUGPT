@@ -1,6 +1,7 @@
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import numpy as np
@@ -24,6 +25,8 @@ from pose_module.motionbert.lifter import (
     _fill_missing_keypoints_for_lifter,
     _build_mb17_to_h36m_weights,
     _canonicalize_backend_prediction_array,
+    _lift_dataset_params,
+    _select_lifter_output_timestep,
     _resolve_backend_joint_names,
     run_motionbert_lifter,
 )
@@ -201,6 +204,55 @@ class MotionBERTAdapterTests(unittest.TestCase):
 
 
 class MotionBERTLifterTests(unittest.TestCase):
+    def test_lift_dataset_params_prefers_temporal_context_from_multiple_target_and_backbone(self) -> None:
+        cfg = {
+            "model": {
+                "backbone": {
+                    "seq_len": 243,
+                }
+            }
+        }
+        cfg = type("DummyCfg", (dict,), {})(cfg)
+        cfg.test_dataloader = SimpleNamespace(
+            dataset={
+                "seq_len": 1,
+                "seq_step": 1,
+                "multiple_target": 243,
+            }
+        )
+        model = SimpleNamespace(
+            cfg=cfg,
+            backbone=SimpleNamespace(seq_len=243),
+        )
+
+        causal, seq_len, seq_step = _lift_dataset_params(model)
+
+        self.assertFalse(causal)
+        self.assertEqual(seq_len, 243)
+        self.assertEqual(seq_step, 1)
+
+    def test_select_lifter_output_timestep_uses_center_for_noncausal_temporal_outputs(self) -> None:
+        values = np.arange(5 * 17 * 3, dtype=np.float32).reshape(5, 17, 3)
+
+        selected = _select_lifter_output_timestep(
+            values,
+            causal=False,
+            temporal_ndim=3,
+        )
+
+        np.testing.assert_array_equal(selected, values[2])
+
+    def test_select_lifter_output_timestep_uses_last_frame_for_causal_temporal_outputs(self) -> None:
+        values = np.arange(5 * 17, dtype=np.float32).reshape(5, 17)
+
+        selected = _select_lifter_output_timestep(
+            values,
+            causal=True,
+            temporal_ndim=2,
+        )
+
+        np.testing.assert_array_equal(selected, values[-1])
+
     def test_apply_lifter_imputation_confidence_policy_keeps_lower_leg_imputations_at_fixed_low_confidence(self) -> None:
         sequence = _make_motionbert_sequence(1)
         left_ankle_index = MOTIONBERT_17_JOINT_NAMES.index("left_ankle")

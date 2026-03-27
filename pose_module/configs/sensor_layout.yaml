@@ -20,14 +20,14 @@
       "name": "right_forearm",
       "segment_start_joint": "Right_elbow",
       "segment_end_joint": "Right_wrist",
-      "segment_fraction": 0.5,
+      "segment_fraction": 0.25,
       "orientation_joint": "Right_elbow"
     },
     {
       "name": "left_forearm",
       "segment_start_joint": "Left_elbow",
       "segment_end_joint": "Left_wrist",
-      "segment_fraction": 0.5,
+      "segment_fraction": 0.25,
       "orientation_joint": "Left_elbow"
     }
   ]

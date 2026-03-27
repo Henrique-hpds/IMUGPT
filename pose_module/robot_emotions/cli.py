@@ -104,6 +104,15 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             imu_acc_noise_std_m_s2=args.imu_acc_noise_std_m_s2,
             imu_gyro_noise_std_rad_s=args.imu_gyro_noise_std_rad_s,
             imu_random_seed=int(args.imu_random_seed),
+            real_imu_reference_path=(
+                None if args.real_imu_reference_path in (None, "") else str(args.real_imu_reference_path)
+            ),
+            real_imu_label_key=(
+                None if args.real_imu_label_key in (None, "") else str(args.real_imu_label_key)
+            ),
+            real_imu_signal_mode=str(args.real_imu_signal_mode),
+            real_imu_percentile_resolution=int(args.real_imu_percentile_resolution),
+            real_imu_per_class_calibration=bool(not args.no_real_imu_per_class_calibration),
             domains=tuple(args.domains),
         )
         print(json.dumps(summary, indent=2, ensure_ascii=True))
@@ -163,6 +172,36 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         type=int,
         default=0,
         help="Random seed used for optional virtual IMU noise.",
+    )
+    export_virtual_imu_parser.add_argument(
+        "--real-imu-reference-path",
+        type=str,
+        default=None,
+        help="Optional NPZ reference with real IMU data used for percentile calibration of the virtual IMU.",
+    )
+    export_virtual_imu_parser.add_argument(
+        "--real-imu-label-key",
+        type=str,
+        default=None,
+        help="Optional label field from the RobotEmotions manifest used for per-class calibration, e.g. action.",
+    )
+    export_virtual_imu_parser.add_argument(
+        "--real-imu-signal-mode",
+        type=str,
+        default="acc",
+        choices=["acc", "gyro", "both"],
+        help="Which signal subset to calibrate against the real IMU reference.",
+    )
+    export_virtual_imu_parser.add_argument(
+        "--real-imu-percentile-resolution",
+        type=int,
+        default=100,
+        help="Number of percentile bins used by the article-style rank mapping calibration.",
+    )
+    export_virtual_imu_parser.add_argument(
+        "--no-real-imu-per-class-calibration",
+        action="store_true",
+        help="Disable per-class calibration and always use the full real IMU reference distribution.",
     )
     return parser
 

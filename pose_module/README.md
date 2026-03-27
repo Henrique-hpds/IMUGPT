@@ -215,9 +215,9 @@ Para gerar apenas o debug 3D, sem os videos 2D:
   export-pose3d \
   --dataset-root data/RobotEmotions \
   --output-dir output/robot_emotions_pose3d \
-  --clip-id robot_emotions_10ms_u02_tag05 \
+  --clip-id robot_emotions_10ms_u02_tag01 \
   --env-name openmmlab \
-  --no-debug-2d \
+  --debug-2d \
   --debug-3d
 ```
 
@@ -232,10 +232,21 @@ O comando abaixo fecha o pipeline com `IK` e `IMUSim`, preservando tambem os art
   export-virtual-imu \
   --dataset-root data/RobotEmotions \
   --output-dir output/robot_emotions_virtual_imu \
-  --env-name openmmlab
-```
+  --clip-id robot_emotions_10ms_u02_tag01 \
+  --env-name openmmlab \
+  --no-debug-2d --no-debug-3d
+```  
 
-  --clip-id robot_emotions_10ms_u02_tag05 \
+.venv/bin/python -m pose_module.robot_emotions export-virtual-imu \
+  --dataset-root data/RobotEmotions \
+  --output-dir output/robot_emotions_virtual_imu_cal \
+  --clip-id robot_emotions_10ms_u02_tag01 \
+  --fps-target 20 \
+  --real-imu-label-key action \
+  --real-imu-signal-mode both \
+  --real-imu-percentile-resolution 100 \
+  --no-debug
+
 
 Flags uteis do `export-virtual-imu`:
 
@@ -243,10 +254,15 @@ Flags uteis do `export-virtual-imu`:
 - `--imu-acc-noise-std-m-s2 <float>`: injeta ruido gaussiano no acelerometro
 - `--imu-gyro-noise-std-rad-s <float>`: injeta ruido gaussiano no giroscopio
 - `--imu-random-seed <int>`: fixa a seed do ruido opcional
+- `--real-imu-reference-path <arquivo.npz>`: aplica a calibracao virtual->real por percentis usando uma referencia real
+- `--real-imu-label-key <campo>`: usa um campo de `labels` do manifest (`action`, `emotion`, `stimulus`) para calibracao por classe
+- `--real-imu-signal-mode <acc|gyro|both>`: escolhe quais canais serao calibrados contra a referencia real
+- `--real-imu-percentile-resolution <int>`: controla o numero de percentis usados no mapeamento do artigo
+- `--no-real-imu-per-class-calibration`: desabilita a calibracao por classe e usa a distribuicao global da referencia
 - `--debug-2d` / `--no-debug-2d`: controla os overlays 2D do trecho 3D do pipeline
 - `--debug-3d` / `--no-debug-3d`: controla os overlays 3D do trecho 3D do pipeline
 
-Esse fluxo gera os artefatos finais das etapas `5.9` e `5.10`, incluindo `ik_sequence.npz`, `pose3d_ik.bvh`, `virtual_imu.npz`, `virtual_imu_report.json`, `sensor_layout_resolved.json` e um `quality_report.json` consolidado com pose 3D, IK e IMU virtual.
+Esse fluxo gera os artefatos finais das etapas `5.9` e `5.10`, incluindo `ik_sequence.npz`, `pose3d_ik.bvh`, `virtual_imu.npz`, `virtual_imu_report.json`, `sensor_layout_resolved.json` e um `quality_report.json` consolidado com pose 3D, IK e IMU virtual. Quando a referencia real e fornecida, o pipeline tambem salva `virtual_imu_raw.npz` e `virtual_imu_calibration_report.json`.
 
 O `sensor_layout` padrao fica em `pose_module/configs/sensor_layout.yaml` e replica o arranjo de 4 sensores do `RobotEmotions` (`waist`, `head`, `right_forearm`, `left_forearm`). Se o seu downstream exigir outro arranjo, troque esse arquivo pelo layout correspondente.
 
@@ -428,6 +444,8 @@ Nos artefatos auxiliares das etapas 5.5, 5.6, 5.7, 5.8, 5.9 e 5.10:
 - `ik_report.json`: resumo da adaptacao para IK, incluindo erro medio de reconstrucao
 - `pose3d_ik.bvh`: export BVH derivado da saida pseudo-global final
 - `virtual_imu_report.json`: resumo da sintese de IMU virtual e faixas dinamicas dos sensores
+- `virtual_imu_raw.npz`: IMU virtual bruto antes da calibracao contra IMU real, quando a calibracao opcional esta ativa
+- `virtual_imu_calibration_report.json`: resumo da calibracao por percentis com a referencia real, quando ativa
 - `sensor_layout_resolved.json`: layout de sensores efetivamente resolvido contra o esqueleto IMUGPT22
 - `quality_report.json`: consolidacao final da qualidade do clip, incluindo pose 3D, IK e IMU virtual
 - `debug_overlay_pose3d_raw.mp4`: video lado a lado com o video original + pose 2D clean e a pose 3D raw do MotionBERT

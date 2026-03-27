@@ -36,6 +36,11 @@ def run_robot_emotions_virtual_imu(
     imu_acc_noise_std_m_s2: Optional[float] = None,
     imu_gyro_noise_std_rad_s: Optional[float] = None,
     imu_random_seed: int = 0,
+    real_imu_reference_path: Optional[str] = None,
+    real_imu_label_key: Optional[str] = None,
+    real_imu_signal_mode: str = "acc",
+    real_imu_percentile_resolution: int = 100,
+    real_imu_per_class_calibration: bool = True,
     domains: Sequence[str] = ("10ms", "30ms"),
 ) -> Dict[str, Any]:
     extractor = RobotEmotionsExtractor(dataset_root, domains=tuple(str(domain) for domain in domains))
@@ -51,11 +56,15 @@ def run_robot_emotions_virtual_imu(
     num_fail = 0
     for record in records:
         manifest_entry = extractor.ensure_exported_clip(record, output_root=output_root)
+        activity_label = None
+        if real_imu_label_key not in (None, ""):
+            activity_label = manifest_entry.get("labels", {}).get(str(real_imu_label_key))
         try:
             pipeline_result = run_virtual_imu_pipeline(
                 clip_id=record.clip_id,
                 video_path=str(record.video_path.resolve()),
                 output_dir=resolve_pose_output_dir(output_root, record),
+                activity_label=activity_label,
                 fps_target=int(fps_target),
                 save_debug=bool(save_debug),
                 save_debug_2d=save_debug_2d,
@@ -75,6 +84,12 @@ def run_robot_emotions_virtual_imu(
                 imu_acc_noise_std_m_s2=imu_acc_noise_std_m_s2,
                 imu_gyro_noise_std_rad_s=imu_gyro_noise_std_rad_s,
                 imu_random_seed=int(imu_random_seed),
+                real_imu_reference_path=(
+                    None if real_imu_reference_path in (None, "") else str(real_imu_reference_path)
+                ),
+                real_imu_signal_mode=str(real_imu_signal_mode),
+                real_imu_percentile_resolution=int(real_imu_percentile_resolution),
+                real_imu_per_class_calibration=bool(real_imu_per_class_calibration),
             )
             entry = _build_virtual_imu_manifest_entry(
                 record=record,
@@ -113,6 +128,10 @@ def run_robot_emotions_virtual_imu(
         "num_warning": int(num_warning),
         "num_fail": int(num_fail),
         "virtual_imu_manifest_path": str(manifest_path.resolve()),
+        "real_imu_reference_path": (
+            None if real_imu_reference_path in (None, "") else str(Path(real_imu_reference_path).resolve())
+        ),
+        "real_imu_label_key": None if real_imu_label_key in (None, "") else str(real_imu_label_key),
         "sample_clip_ids": [record.clip_id for record in records[:5]],
     }
     write_json_file(summary, output_root / "virtual_imu_summary.json")

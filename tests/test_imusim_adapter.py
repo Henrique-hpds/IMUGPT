@@ -48,3 +48,38 @@ class IMUSimAdapterTests(unittest.TestCase):
             self.assertTrue(np.isfinite(sequence.gyro).all())
             self.assertGreater(float(np.median(np.linalg.norm(sequence.acc[:, 0], axis=1))), 5.0)
 
+    def test_run_imusim_can_calibrate_with_real_imu_reference(self) -> None:
+        ik_sequence = _make_ik_sequence()
+
+        with tempfile.TemporaryDirectory() as raw_dir, tempfile.TemporaryDirectory() as calibrated_dir:
+            raw_result = run_imusim(ik_sequence, output_dir=raw_dir)
+            raw_sequence = raw_result["virtual_imu_sequence"]
+            reference_path = Path(raw_dir) / "real_imu_reference.npz"
+            np.savez_compressed(
+                reference_path,
+                acc=(np.asarray(raw_sequence.acc, dtype=np.float32) * np.float32(0.35) + np.float32(1.5)),
+                sensor_names=np.asarray(raw_sequence.sensor_names),
+                y=np.asarray(["walking"] * raw_sequence.num_frames),
+            )
+
+            calibrated_result = run_imusim(
+                ik_sequence,
+                output_dir=calibrated_dir,
+                real_imu_reference_path=reference_path,
+                real_imu_activity_label="walking",
+            )
+
+            calibrated_sequence = calibrated_result["virtual_imu_sequence"]
+            calibrated_raw_sequence = calibrated_result["raw_virtual_imu_sequence"]
+            self.assertIsNotNone(calibrated_result["calibration_report"])
+            self.assertTrue(calibrated_result["quality_report"]["real_imu_calibration_applied"])
+            self.assertTrue(
+                Path(calibrated_result["artifacts"]["virtual_imu_calibration_report_json_path"]).exists()
+            )
+            self.assertTrue(Path(calibrated_result["artifacts"]["virtual_imu_raw_npz_path"]).exists())
+            self.assertFalse(np.allclose(calibrated_sequence.acc, calibrated_raw_sequence.acc))
+            np.testing.assert_allclose(
+                calibrated_sequence.gyro,
+                calibrated_raw_sequence.gyro,
+                atol=1e-6,
+            )

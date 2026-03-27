@@ -335,9 +335,12 @@ def run_motionbert_backend_job(
 
 def run_motionbert_backend(job: MotionBERTJob) -> Dict[str, Any]:
     import torch
+    from mmengine.dataset import Compose, pseudo_collate
+    from mmengine.registry import init_default_scope
     from mmengine.structures import InstanceData
     from mmpose.apis import init_model
-    from mmpose.apis import convert_keypoint_definition, extract_pose_sequence, inference_pose_lifter_model
+    from mmpose.apis import convert_keypoint_definition, extract_pose_sequence
+    from mmpose.apis.inference_3d import collate_pose_sequence
     from mmpose.structures import PoseDataSample
 
     if job.config_path in (None, "") or job.checkpoint in (None, ""):
@@ -436,9 +439,14 @@ def run_motionbert_backend(job: MotionBERTJob) -> Dict[str, Any]:
             step=seq_step,
         )
         with torch.no_grad():
-            lift_results = inference_pose_lifter_model(
+            lift_results = _inference_pose_lifter_model_with_fixed_targets(
                 model,
                 pose_seq_2d,
+                collate_pose_sequence=collate_pose_sequence,
+                Compose=Compose,
+                pseudo_collate=pseudo_collate,
+                init_default_scope=init_default_scope,
+                PoseDataSample=PoseDataSample,
                 image_size=image_size_hw,
                 norm_pose_2d=True,
             )
@@ -460,7 +468,8 @@ def run_motionbert_backend(job: MotionBERTJob) -> Dict[str, Any]:
 
         pred_instances = first.pred_instances
         keypoints_3d = _postprocess_lifter_keypoints_3d(
-            getattr(pred_instances, "keypoints", np.empty((0, 3), dtype=np.float32))
+            getattr(pred_instances, "keypoints", np.empty((0, 3), dtype=np.float32)),
+            causal=causal,
         )
         if keypoints_3d.size == 0:
             pred_frames.append(None)
@@ -494,9 +503,11 @@ def run_motionbert_backend(job: MotionBERTJob) -> Dict[str, Any]:
         if score_values is None:
             canonical_scores = np.ones((len(MOTIONBERT_17_JOINT_NAMES),), dtype=np.float32)
         else:
-            scores = np.asarray(score_values, dtype=np.float32)
-            while scores.ndim > 1 and scores.shape[0] == 1:
-                scores = scores[0]
+            scores = _select_lifter_output_timestep(
+                score_values,
+                causal=causal,
+                temporal_ndim=2,
+            )
             canonical_scores = _canonicalize_backend_vector_to_mb17(
                 scores.reshape(-1),
                 joint_names=backend_joint_names,
@@ -622,6 +633,120 @@ def run_motionbert_backend(job: MotionBERTJob) -> Dict[str, Any]:
         },
         "error": None,
     }
+
+
+def _inference_pose_lifter_model_with_fixed_targets(
+    model: Any,
+    pose_results_2d: Sequence[Sequence[Any]],
+    *,
+    collate_pose_sequence: Callable[..., Any],
+    Compose: Any,
+    pseudo_collate: Callable[..., Any],
+    init_default_scope: Callable[..., Any],
+    PoseDataSample: Any,
+    image_size: tuple[int, int] | None = None,
+    norm_pose_2d: bool = False,
+) -> list[Any]:
+    """Local copy of MMPose pose-lifter inference with temporal target fix.
+
+    MMPose's helper currently hardcodes `lifting_target` as shape `(1, K, 3)`,
+    which breaks MotionBERT test-time inference when the temporal context is
+    longer than one frame because `factor` is shaped as `(T,)`.
+    """
+
+    init_default_scope(model.cfg.get("default_scope", "mmpose"))
+    pipeline = Compose(model.cfg.test_dataloader.dataset.pipeline)
+
+    causal = bool(model.cfg.test_dataloader.dataset.get("causal", False))
+    target_idx = -1 if causal else len(pose_results_2d) // 2
+
+    dataset_info = model.dataset_meta
+    if dataset_info is not None:
+        if "stats_info" in dataset_info:
+            bbox_center = dataset_info["stats_info"]["bbox_center"]
+            bbox_scale = dataset_info["stats_info"]["bbox_scale"]
+        elif norm_pose_2d:
+            bbox_center = np.zeros((1, 2), dtype=np.float32)
+            bbox_scale = 0.0
+            num_bbox = 0
+            for pose_res in pose_results_2d:
+                for data_sample in pose_res:
+                    for bbox in data_sample.pred_instances.bboxes:
+                        bbox_center += np.array(
+                            [[(bbox[0] + bbox[2]) / 2, (bbox[1] + bbox[3]) / 2]],
+                            dtype=np.float32,
+                        )
+                        bbox_scale += max(float(bbox[2] - bbox[0]), float(bbox[3] - bbox[1]))
+                        num_bbox += 1
+            bbox_center /= max(num_bbox, 1)
+            bbox_scale /= max(num_bbox, 1)
+        else:
+            bbox_center = None
+            bbox_scale = None
+    else:
+        bbox_center = None
+        bbox_scale = None
+
+    pose_results_2d_copy = []
+    for pose_res in pose_results_2d:
+        pose_res_copy = []
+        for data_sample in pose_res:
+            data_sample_copy = PoseDataSample()
+            data_sample_copy.gt_instances = data_sample.gt_instances.clone()
+            data_sample_copy.pred_instances = data_sample.pred_instances.clone()
+            data_sample_copy.track_id = data_sample.track_id
+            kpts = data_sample.pred_instances.keypoints
+            bboxes = data_sample.pred_instances.bboxes
+            keypoints = []
+            for k in range(len(kpts)):
+                kpt = kpts[k]
+                if norm_pose_2d:
+                    bbox = bboxes[k]
+                    center = np.array(
+                        [[(bbox[0] + bbox[2]) / 2, (bbox[1] + bbox[3]) / 2]],
+                        dtype=np.float32,
+                    )
+                    scale = max(float(bbox[2] - bbox[0]), float(bbox[3] - bbox[1]))
+                    keypoints.append((kpt[:, :2] - center) / scale * bbox_scale + bbox_center)
+                else:
+                    keypoints.append(kpt[:, :2])
+            data_sample_copy.pred_instances.set_field(np.array(keypoints), "keypoints")
+            pose_res_copy.append(data_sample_copy)
+        pose_results_2d_copy.append(pose_res_copy)
+
+    pose_sequences_2d = collate_pose_sequence(
+        pose_results_2d_copy,
+        with_track_id=True,
+        target_frame=target_idx,
+    )
+    if not pose_sequences_2d:
+        return []
+
+    data_list = []
+    for pose_seq in pose_sequences_2d:
+        data_info: Dict[str, Any] = {}
+        keypoints_2d = pose_seq.pred_instances.keypoints
+        keypoints_2d = np.squeeze(keypoints_2d, axis=0) if keypoints_2d.ndim == 4 else keypoints_2d
+        t_steps, num_joints, _ = keypoints_2d.shape
+
+        data_info["keypoints"] = keypoints_2d
+        data_info["keypoints_visible"] = np.ones((t_steps, num_joints), dtype=np.float32)
+        data_info["lifting_target"] = np.zeros((t_steps, num_joints, 3), dtype=np.float32)
+        data_info["factor"] = np.zeros((t_steps,), dtype=np.float32)
+        data_info["lifting_target_visible"] = np.ones((t_steps, num_joints, 1), dtype=np.float32)
+
+        if image_size is not None:
+            if len(image_size) != 2:
+                raise ValueError("image_size must contain exactly two values.")
+            data_info["camera_param"] = dict(w=image_size[0], h=image_size[1])
+
+        data_info.update(model.dataset_meta)
+        data_list.append(pipeline(data_info))
+
+    if len(data_list) == 0:
+        return []
+    batch = pseudo_collate(data_list)
+    return model.test_step(batch)
 
 
 def main(argv: Optional[List[str]] = None) -> int:
@@ -1027,14 +1152,42 @@ def _build_pose_lifter_2d_sample(
 
 
 def _lift_dataset_params(model: Any) -> tuple[bool, int, int]:
+    causal = False
+    seq_step = 1
+    seq_len_candidates: list[int] = []
+
     try:
         dataset = model.cfg.test_dataloader.dataset
-        causal = bool(dataset.get("causal", False))
-        seq_len = int(dataset.get("seq_len", 1))
-        seq_step = int(dataset.get("seq_step", 1))
-        return causal, max(seq_len, 1), max(seq_step, 1)
     except Exception:
-        return False, 1, 1
+        dataset = None
+
+    if dataset is not None:
+        causal = bool(dataset.get("causal", False))
+        seq_step = max(int(dataset.get("seq_step", 1)), 1)
+
+        # Pose-lifter configs in MMPose may expose temporal context through
+        # `multiple_target` and/or the backbone `seq_len` while keeping the
+        # dataset `seq_len` at 1 for sample packing. Prefer the longest valid
+        # temporal context available so we do not silently fall back to
+        # frame-by-frame lifting for temporal backbones such as MotionBERT.
+        for raw_value in (
+            dataset.get("multiple_target"),
+            dataset.get("seq_len"),
+        ):
+            try:
+                value = int(raw_value)
+            except (TypeError, ValueError):
+                continue
+            if value > 0:
+                seq_len_candidates.append(value)
+
+    model_seq_len = _resolve_model_sequence_length(model, fallback=0)
+    if int(model_seq_len) > 0:
+        seq_len_candidates.append(int(model_seq_len))
+
+    if len(seq_len_candidates) == 0:
+        return causal, 1, seq_step
+    return causal, max(seq_len_candidates), seq_step
 
 
 def _resolve_image_size_hw(*, job: MotionBERTJob, sequence: PoseSequence2D) -> tuple[int, int]:
@@ -1136,12 +1289,31 @@ def _apply_lifter_imputation_confidence_policy(
     return effective_confidence.astype(np.float32, copy=False), imputed_mask.astype(bool, copy=False)
 
 
-def _postprocess_lifter_keypoints_3d(keypoints: np.ndarray) -> np.ndarray:
-    array = np.asarray(keypoints, dtype=np.float32)
-    while array.ndim > 2 and array.shape[0] == 1:
+def _select_lifter_output_timestep(
+    values: np.ndarray,
+    *,
+    causal: bool,
+    temporal_ndim: int,
+) -> np.ndarray:
+    array = np.asarray(values, dtype=np.float32)
+    while array.ndim > temporal_ndim and array.shape[0] == 1:
         array = array[0]
-    if array.ndim == 3 and array.shape[0] == 1:
-        array = array[0]
+    if array.ndim == temporal_ndim:
+        target_index = -1 if bool(causal) else int(array.shape[0] // 2)
+        array = array[target_index]
+    return array.astype(np.float32, copy=False)
+
+
+def _postprocess_lifter_keypoints_3d(
+    keypoints: np.ndarray,
+    *,
+    causal: bool,
+) -> np.ndarray:
+    array = _select_lifter_output_timestep(
+        keypoints,
+        causal=causal,
+        temporal_ndim=3,
+    )
     if array.ndim != 2 or array.shape[1] < 3:
         return np.full((0, 3), np.nan, dtype=np.float32)
 
