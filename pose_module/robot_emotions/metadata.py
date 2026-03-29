@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Sequence
 
 PARTICIPANTS_BY_DOMAIN: dict[str, dict[int, dict[str, Any]]] = {
     "30ms": {
@@ -213,12 +213,12 @@ CHANNEL_AXIS_ORDER: tuple[str, ...] = ("ax", "ay", "az", "gx", "gy", "gz")
 SENSOR_NAME_BY_ID: dict[int, str] = {
     1: "waist",
     2: "head",
-    3: "right_forearm",
-    4: "left_forearm",
+    3: "left_forearm",
+    4: "right_forearm",
 }
 
 SENSOR_MAPPING_POLICY_NOTE = (
-    "CSV sensor ids are mapped as 1-waist, 2-head, 3-right_forearm, 4-left_forearm."
+    "CSV sensor ids are mapped as 1-waist, 2-head, 3-left_forearm, 4-right_forearm."
 )
 
 
@@ -236,3 +236,7 @@ def get_protocol_info(domain: str, tag_number: int) -> dict[str, Any] | None:
 
 def get_sensor_name(sensor_id: int) -> str:
     return SENSOR_NAME_BY_ID.get(int(sensor_id), f"sensor_{int(sensor_id)}")
+
+
+def resolve_sensor_names(sensor_ids: Sequence[int]) -> list[str]:
+    return [get_sensor_name(int(sensor_id)) for sensor_id in sensor_ids]

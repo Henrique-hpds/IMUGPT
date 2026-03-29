@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any, Dict, Mapping, Sequence
 
 import numpy as np
 
 from pose_module.interfaces import VirtualIMUSequence
+from pose_module.robot_emotions.metadata import resolve_sensor_names
 
 DEFAULT_CALIBRATION_SIGNAL_MODE = "acc"
 DEFAULT_CALIBRATION_PERCENTILE_RESOLUTION = 100
@@ -36,6 +38,7 @@ def calibrate_virtual_imu_sequence(
             payload=payload,
             target_sensor_names=imu_sequence.sensor_names,
             signal_mode=resolved_signal_mode,
+            reference_path=reference_path,
         )
 
     matched_sensor_indices = [
@@ -139,9 +142,10 @@ def _extract_reference_signal(
     payload: Mapping[str, Any],
     target_sensor_names: Sequence[str],
     signal_mode: str,
+    reference_path: Path | None = None,
 ) -> Dict[str, Any]:
     labels = _extract_reference_labels(payload)
-    sensor_names = _extract_optional_sensor_names(payload)
+    sensor_names = _extract_optional_sensor_names(payload, reference_path=reference_path)
     notes: list[str] = []
 
     if "imu" in payload:
@@ -212,7 +216,15 @@ def _extract_reference_labels(payload: Mapping[str, Any]) -> np.ndarray | None:
     return None
 
 
-def _extract_optional_sensor_names(payload: Mapping[str, Any]) -> list[str] | None:
+def _extract_optional_sensor_names(
+    payload: Mapping[str, Any],
+    *,
+    reference_path: Path | None = None,
+) -> list[str] | None:
+    robot_emotions_sensor_ids = _extract_robot_emotions_sensor_ids(payload, reference_path=reference_path)
+    if robot_emotions_sensor_ids is not None:
+        return resolve_sensor_names(robot_emotions_sensor_ids)
+
     for key in ("sensor_names", "sensors"):
         if key not in payload:
             continue
@@ -221,6 +233,35 @@ def _extract_optional_sensor_names(payload: Mapping[str, Any]) -> list[str] | No
             continue
         return [str(value) for value in values.reshape(-1).tolist()]
     return None
+
+
+def _extract_robot_emotions_sensor_ids(
+    payload: Mapping[str, Any],
+    *,
+    reference_path: Path | None = None,
+) -> list[int] | None:
+    metadata = _load_reference_metadata(reference_path)
+    if metadata is None or metadata.get("dataset") != "RobotEmotions":
+        return None
+
+    if "sensor_ids" in payload:
+        sensor_ids = [int(value) for value in np.asarray(payload["sensor_ids"]).reshape(-1).tolist()]
+        if len(sensor_ids) > 0:
+            return sensor_ids
+
+    metadata_sensor_ids = metadata.get("imu", {}).get("sensor_ids", [])
+    if isinstance(metadata_sensor_ids, list) and len(metadata_sensor_ids) > 0:
+        return [int(value) for value in metadata_sensor_ids]
+    return None
+
+
+def _load_reference_metadata(reference_path: Path | None) -> Mapping[str, Any] | None:
+    if reference_path is None:
+        return None
+    metadata_path = reference_path.with_name("metadata.json")
+    if not metadata_path.exists():
+        return None
+    return json.loads(metadata_path.read_text(encoding="utf-8"))
 
 
 def _combine_acc_gyro_payload(payload: Mapping[str, Any], *, signal_mode: str) -> np.ndarray:

@@ -18,8 +18,8 @@ from .metadata import (
     CHANNEL_AXIS_ORDER,
     SENSOR_MAPPING_POLICY_NOTE,
     get_protocol_info,
-    get_sensor_name,
     get_user_profile,
+    resolve_sensor_names,
 )
 
 EXPECTED_NUM_SENSORS = 4
@@ -57,7 +57,7 @@ class RobotEmotionsExtractedClip:
 
     @property
     def sensor_names(self) -> list[str]:
-        return [get_sensor_name(sensor_id) for sensor_id in self.sensor_ids]
+        return resolve_sensor_names(self.sensor_ids)
 
     def to_manifest_entry(
         self,
@@ -93,7 +93,8 @@ class RobotEmotionsExtractedClip:
                 "sensor_ids": [int(sensor_id) for sensor_id in self.sensor_ids],
                 "sensor_names": self.sensor_names,
                 "sensor_id_to_name": {
-                    str(sensor_id): get_sensor_name(sensor_id) for sensor_id in self.sensor_ids
+                    str(sensor_id): sensor_name
+                    for sensor_id, sensor_name in zip(self.sensor_ids, self.sensor_names, strict=False)
                 },
                 "channel_axis_order": list(CHANNEL_AXIS_ORDER),
                 "timestamps_sec_range": [

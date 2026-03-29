@@ -12,8 +12,8 @@ Esta etapa prepara o dataset `RobotEmotions` para uso futuro no pipeline de pose
 - aplica o mapeamento:
   - `1 = waist`
   - `2 = head`
-  - `3 = right_forearm`
-  - `4 = left_forearm`
+  - `3 = left_forearm`
+  - `4 = right_forearm`
 - gera artefatos prontos para consumo posterior
 
 ## Saídas

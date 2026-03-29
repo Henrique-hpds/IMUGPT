@@ -12,6 +12,7 @@ from scipy.spatial.transform import Rotation
 
 from pose_module.interfaces import VirtualIMUSequence
 from pose_module.io.cache import write_json_file
+from pose_module.robot_emotions.metadata import resolve_sensor_names
 
 DEFAULT_TARGET_SENSOR_NAMES = ("left_forearm", "right_forearm")
 DEFAULT_MAX_LAG_SEC = 2.5
@@ -358,14 +359,21 @@ def _resolve_real_sensor_names(
     *,
     sensor_count: int,
 ) -> list[str]:
+    metadata_path = real_imu_npz_path.with_name("metadata.json")
+    metadata = None
+    if metadata_path.exists():
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        if metadata.get("dataset") == "RobotEmotions":
+            sensor_ids = _resolve_real_sensor_ids(payload, metadata, sensor_count=sensor_count)
+            if sensor_ids is not None:
+                return resolve_sensor_names(sensor_ids)
+
     if "sensor_names" in payload:
         sensor_names = [str(value) for value in np.asarray(payload["sensor_names"]).tolist()]
         if len(sensor_names) == sensor_count:
             return sensor_names
 
-    metadata_path = real_imu_npz_path.with_name("metadata.json")
-    if metadata_path.exists():
-        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    if metadata is not None:
         metadata_sensor_names = metadata.get("imu", {}).get("sensor_names", [])
         if isinstance(metadata_sensor_names, list) and len(metadata_sensor_names) == sensor_count:
             return [str(value) for value in metadata_sensor_names]
@@ -383,6 +391,23 @@ def _resolve_real_sensor_names(
         if len(sensor_ids) == sensor_count:
             return [f"sensor_{sensor_id}" for sensor_id in sensor_ids]
     return [f"sensor_{index}" for index in range(sensor_count)]
+
+
+def _resolve_real_sensor_ids(
+    payload: Mapping[str, Any],
+    metadata: Mapping[str, Any],
+    *,
+    sensor_count: int,
+) -> list[int] | None:
+    if "sensor_ids" in payload:
+        sensor_ids = [int(value) for value in np.asarray(payload["sensor_ids"]).tolist()]
+        if len(sensor_ids) == sensor_count:
+            return sensor_ids
+
+    metadata_sensor_ids = metadata.get("imu", {}).get("sensor_ids", [])
+    if isinstance(metadata_sensor_ids, list) and len(metadata_sensor_ids) == sensor_count:
+        return [int(value) for value in metadata_sensor_ids]
+    return None
 
 
 def _estimate_lag_from_gyro_norm(

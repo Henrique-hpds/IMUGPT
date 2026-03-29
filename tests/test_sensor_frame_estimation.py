@@ -1,3 +1,4 @@
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -183,3 +184,87 @@ class SensorFrameEstimationTests(unittest.TestCase):
             self.assertIsNone(left_report["rotation_matrix"])
             self.assertEqual(left_report["confidence_score"], 0.0)
             self.assertIn("dynamic_gyro_energy_too_low", left_report["notes"])
+
+    def test_estimate_sensor_frame_alignment_uses_robot_emotions_sensor_ids_for_legacy_real_labels(self) -> None:
+        virtual_timestamps_sec = np.arange(360, dtype=np.float32) / np.float32(20.0)
+        real_timestamps_sec = np.arange(1800, dtype=np.float32) / np.float32(100.0)
+        virtual_sensor_names = ["waist", "head", "right_forearm", "left_forearm"]
+        legacy_sensor_names = ["waist", "head", "right_forearm", "left_forearm"]
+
+        virtual_acc = np.zeros((virtual_timestamps_sec.shape[0], len(virtual_sensor_names), 3), dtype=np.float32)
+        virtual_gyro = np.zeros_like(virtual_acc)
+        virtual_acc[:, 2, :] = _acc_signal_right(virtual_timestamps_sec)
+        virtual_acc[:, 3, :] = _acc_signal_left(virtual_timestamps_sec)
+        virtual_gyro[:, 2, :] = _gyro_signal_right(virtual_timestamps_sec)
+        virtual_gyro[:, 3, :] = _gyro_signal_left(virtual_timestamps_sec)
+
+        virtual_sequence = VirtualIMUSequence(
+            clip_id="synthetic_robot_emotions_legacy_labels",
+            fps=20.0,
+            sensor_names=virtual_sensor_names,
+            acc=virtual_acc,
+            gyro=virtual_gyro,
+            timestamps_sec=virtual_timestamps_sec,
+            source="synthetic_virtual",
+        )
+
+        right_rotation = Rotation.from_euler("xyz", [12.0, -7.0, 26.0], degrees=True).as_matrix().astype(np.float32)
+        left_rotation = Rotation.from_euler("xyz", [-16.0, 11.0, 21.0], degrees=True).as_matrix().astype(np.float32)
+        right_lag_sec = -0.24
+        left_lag_sec = 0.37
+
+        real_acc = np.zeros((real_timestamps_sec.shape[0], 4, 3), dtype=np.float32)
+        real_gyro = np.zeros_like(real_acc)
+        real_acc[:, 2, :] = _apply_rotation(
+            _acc_signal_left(real_timestamps_sec - np.float32(left_lag_sec)),
+            left_rotation,
+        )
+        real_acc[:, 3, :] = _apply_rotation(
+            _acc_signal_right(real_timestamps_sec - np.float32(right_lag_sec)),
+            right_rotation,
+        )
+        real_gyro[:, 2, :] = _apply_rotation(
+            _gyro_signal_left(real_timestamps_sec - np.float32(left_lag_sec)),
+            left_rotation,
+        )
+        real_gyro[:, 3, :] = _apply_rotation(
+            _gyro_signal_right(real_timestamps_sec - np.float32(right_lag_sec)),
+            right_rotation,
+        )
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            real_path = Path(tmp_dir) / "imu.npz"
+            np.savez_compressed(
+                real_path,
+                timestamps_sec=real_timestamps_sec,
+                acc=real_acc,
+                gyro=real_gyro,
+                sensor_ids=np.asarray([1, 2, 3, 4], dtype=np.int32),
+                sensor_names=np.asarray(legacy_sensor_names),
+            )
+            metadata_path = Path(tmp_dir) / "metadata.json"
+            metadata_path.write_text(
+                json.dumps(
+                    {
+                        "dataset": "RobotEmotions",
+                        "imu": {
+                            "sensor_ids": [1, 2, 3, 4],
+                            "sensor_names": legacy_sensor_names,
+                        },
+                    },
+                    ensure_ascii=True,
+                ),
+                encoding="utf-8",
+            )
+
+            result = estimate_sensor_frame_alignment(
+                virtual_sequence,
+                real_imu_npz_path=real_path,
+                output_dir=tmp_dir,
+            )
+
+            self.assertEqual(result["status"], "ok")
+            right_report = result["frame_estimation_report"]["sensor_reports"]["right_forearm"]
+            left_report = result["frame_estimation_report"]["sensor_reports"]["left_forearm"]
+            self.assertAlmostEqual(float(right_report["lag_sec"]), right_lag_sec, delta=0.05)
+            self.assertAlmostEqual(float(left_report["lag_sec"]), left_lag_sec, delta=0.05)
