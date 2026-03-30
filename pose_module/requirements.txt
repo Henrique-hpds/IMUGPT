@@ -1,0 +1,21 @@
+# Dependencias Python para pose_module e validation
+
+# Core do pipeline e notebooks de validacao
+numpy
+scipy
+pandas
+matplotlib
+pyyaml
+ipython
+umap-learn
+
+# Backend OpenMMLab (ViTPose + MotionBERT)
+# torch
+# mmengine
+# mmpose
+# mmdet
+# mmpretrain
+
+# Dependencias de sistema (instalar fora do pip):
+# - ffmpeg
+# - ffprobe
