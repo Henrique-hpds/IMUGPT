@@ -9,7 +9,16 @@ import numpy as np
 
 from pose_module.export.bvh import export_pose_sequence3d_to_bvh
 from pose_module.export.ik_adapter import run_ik
-from pose_module.export.imusim_adapter import DEFAULT_SENSOR_LAYOUT_PATH, run_imusim
+from pose_module.export.imusim_adapter import (
+    DEFAULT_IMU_CALIBRATION_REPORT_FILENAME,
+    DEFAULT_IMU_REPORT_FILENAME,
+    DEFAULT_MAX_ACCELERATION_WARNING_M_S2,
+    DEFAULT_MAX_GYRO_WARNING_RAD_S,
+    DEFAULT_RAW_IMU_SEQUENCE_FILENAME,
+    DEFAULT_SENSOR_LAYOUT_PATH,
+    _build_virtual_imu_quality_report,
+    run_imusim,
+)
 from pose_module.export.debug_video import (
     render_pose_overlay_video,
     render_pose3d_side_by_side_video,
@@ -420,11 +429,25 @@ def run_virtual_imu_pipeline(
     real_imu_signal_mode: str = "acc",
     real_imu_percentile_resolution: int = 100,
     real_imu_per_class_calibration: bool = True,
+    defer_real_imu_calibration: bool = False,
     estimate_sensor_frame: bool = False,
     estimate_sensor_names: Sequence[str] | None = None,
 ) -> Dict[str, Any]:
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
+    geometric_alignment_settings = load_alignment_runtime_settings(None)
+    has_real_imu_reference = real_imu_reference_path not in (None, "")
+    defer_real_imu_calibration = bool(defer_real_imu_calibration and has_real_imu_reference)
+    postpone_real_imu_calibration_until_after_alignment = bool(
+        has_real_imu_reference
+        and not defer_real_imu_calibration
+        and geometric_alignment_settings.get("enable", False)
+    )
+    imusim_real_imu_reference_path = (
+        None
+        if defer_real_imu_calibration or postpone_real_imu_calibration_until_after_alignment
+        else real_imu_reference_path
+    )
 
     pose3d_result = run_pose3d_pipeline(
         clip_id=str(clip_id),
@@ -460,14 +483,13 @@ def run_virtual_imu_pipeline(
         acc_noise_std_m_s2=imu_acc_noise_std_m_s2,
         gyro_noise_std_rad_s=imu_gyro_noise_std_rad_s,
         random_seed=int(imu_random_seed),
-        real_imu_reference_path=real_imu_reference_path,
+        real_imu_reference_path=imusim_real_imu_reference_path,
         real_imu_activity_label=activity_label,
         real_imu_signal_mode=str(real_imu_signal_mode),
         real_imu_percentile_resolution=int(real_imu_percentile_resolution),
         real_imu_per_class_calibration=bool(real_imu_per_class_calibration),
     )
     resolved_real_imu_npz_path = _resolve_real_imu_npz_path(output_dir=output_dir)
-    geometric_alignment_settings = load_alignment_runtime_settings(None)
     if bool(geometric_alignment_settings.get("enable", False)):
         geometric_alignment_result = _run_optional_geometric_alignment(
             raw_virtual_imu_sequence=imusim_result["raw_virtual_imu_sequence"],
@@ -479,28 +501,37 @@ def run_virtual_imu_pipeline(
             raw_virtual_imu_sequence=imusim_result["raw_virtual_imu_sequence"],
             config_path=geometric_alignment_settings.get("config_path"),
         )
+    post_geometric_virtual_imu_sequence = geometric_alignment_result["aligned_virtual_imu_sequence"]
     final_virtual_imu_sequence = imusim_result["virtual_imu_sequence"]
     final_virtual_imu_calibration_report = imusim_result["calibration_report"]
-    geometric_alignment_enabled = bool(geometric_alignment_result.get("enabled"))
-    if geometric_alignment_enabled:
-        geometrically_aligned_sequence = geometric_alignment_result["aligned_virtual_imu_sequence"]
-        if real_imu_reference_path not in (None, ""):
-            calibration_result = calibrate_virtual_imu_sequence(
-                geometrically_aligned_sequence,
-                real_imu_reference_path=str(real_imu_reference_path),
-                activity_label=activity_label,
-                signal_mode=str(real_imu_signal_mode),
-                percentile_resolution=int(real_imu_percentile_resolution),
-                per_class=bool(real_imu_per_class_calibration),
-            )
-            final_virtual_imu_sequence = calibration_result["virtual_imu_sequence"]
-            final_virtual_imu_calibration_report = dict(calibration_result["calibration_report"])
-        else:
-            final_virtual_imu_sequence = geometrically_aligned_sequence
+    pre_calibration_virtual_imu_sequence = (
+        imusim_result["raw_virtual_imu_sequence"]
+        if final_virtual_imu_calibration_report is not None
+        else None
+    )
 
-        final_virtual_imu_path = output_dir / "virtual_imu.npz"
-        np.savez_compressed(final_virtual_imu_path, **final_virtual_imu_sequence.to_npz_payload())
-        imusim_result["artifacts"]["virtual_imu_npz_path"] = str(final_virtual_imu_path.resolve())
+    if postpone_real_imu_calibration_until_after_alignment:
+        calibration_result = calibrate_virtual_imu_sequence(
+            post_geometric_virtual_imu_sequence,
+            real_imu_reference_path=str(real_imu_reference_path),
+            activity_label=activity_label,
+            signal_mode=str(real_imu_signal_mode),
+            percentile_resolution=int(real_imu_percentile_resolution),
+            per_class=bool(real_imu_per_class_calibration),
+        )
+        final_virtual_imu_sequence = calibration_result["virtual_imu_sequence"]
+        final_virtual_imu_calibration_report = dict(calibration_result["calibration_report"])
+        pre_calibration_virtual_imu_sequence = post_geometric_virtual_imu_sequence
+    elif bool(geometric_alignment_result.get("enabled")) or bool(defer_real_imu_calibration):
+        final_virtual_imu_sequence = post_geometric_virtual_imu_sequence
+
+    final_virtual_imu_quality_report = _sync_virtual_imu_pipeline_outputs(
+        output_dir=output_dir,
+        imusim_result=imusim_result,
+        virtual_imu_sequence=final_virtual_imu_sequence,
+        calibration_report=final_virtual_imu_calibration_report,
+        pre_calibration_virtual_imu_sequence=pre_calibration_virtual_imu_sequence,
+    )
 
     frame_alignment_result = _build_disabled_sensor_frame_estimation_result(
         raw_virtual_imu_sequence=final_virtual_imu_sequence,
@@ -518,7 +549,7 @@ def run_virtual_imu_pipeline(
     merged_quality = merge_stage510_quality_reports(
         pose3d_quality=pose3d_result["quality_report"],
         ik_quality=ik_result["quality_report"],
-        virtual_imu_quality=imusim_result["quality_report"],
+        virtual_imu_quality=final_virtual_imu_quality_report,
         geometric_alignment_quality=geometric_alignment_result["quality_report"],
         frame_alignment_quality=frame_alignment_result["quality_report"],
     )
@@ -540,7 +571,7 @@ def run_virtual_imu_pipeline(
         "quality_report": merged_quality,
         "pose3d_quality_report": pose3d_result["quality_report"],
         "ik_quality_report": ik_result["quality_report"],
-        "virtual_imu_quality_report": imusim_result["quality_report"],
+        "virtual_imu_quality_report": final_virtual_imu_quality_report,
         "virtual_imu_calibration_report": final_virtual_imu_calibration_report,
         "geometric_alignment_quality_report": geometric_alignment_result["quality_report"],
         "geometric_alignment_result": geometric_alignment_result,
@@ -554,6 +585,52 @@ def run_virtual_imu_pipeline(
         "frame_alignment_result": frame_alignment_result,
         "artifacts": artifacts,
     }
+
+
+def _sync_virtual_imu_pipeline_outputs(
+    *,
+    output_dir: Path,
+    imusim_result: Dict[str, Any],
+    virtual_imu_sequence: VirtualIMUSequence,
+    calibration_report: Mapping[str, Any] | None,
+    pre_calibration_virtual_imu_sequence: VirtualIMUSequence | None,
+) -> Dict[str, Any]:
+    original_quality = dict(imusim_result.get("quality_report", {}))
+    quality_report = _build_virtual_imu_quality_report(
+        imu_sequence=virtual_imu_sequence,
+        acc_noise_std_m_s2=float(original_quality.get("acc_noise_std_m_s2", 0.0)),
+        gyro_noise_std_rad_s=float(original_quality.get("gyro_noise_std_rad_s", 0.0)),
+        max_acceleration_warning_m_s2=float(DEFAULT_MAX_ACCELERATION_WARNING_M_S2),
+        max_gyro_warning_rad_s=float(DEFAULT_MAX_GYRO_WARNING_RAD_S),
+        calibration_report=None if calibration_report is None else dict(calibration_report),
+    )
+
+    final_virtual_imu_path = output_dir / "virtual_imu.npz"
+    np.savez_compressed(final_virtual_imu_path, **virtual_imu_sequence.to_npz_payload())
+
+    report_path = output_dir / DEFAULT_IMU_REPORT_FILENAME
+    write_json_file(quality_report, report_path)
+
+    artifacts = dict(imusim_result.get("artifacts", {}))
+    artifacts["virtual_imu_npz_path"] = str(final_virtual_imu_path.resolve())
+    artifacts["virtual_imu_report_json_path"] = str(report_path.resolve())
+
+    if calibration_report is not None and pre_calibration_virtual_imu_sequence is not None:
+        raw_path = output_dir / DEFAULT_RAW_IMU_SEQUENCE_FILENAME
+        np.savez_compressed(raw_path, **pre_calibration_virtual_imu_sequence.to_npz_payload())
+        calibration_report_path = output_dir / DEFAULT_IMU_CALIBRATION_REPORT_FILENAME
+        write_json_file(dict(calibration_report), calibration_report_path)
+        artifacts["virtual_imu_raw_npz_path"] = str(raw_path.resolve())
+        artifacts["virtual_imu_calibration_report_json_path"] = str(calibration_report_path.resolve())
+    else:
+        artifacts["virtual_imu_raw_npz_path"] = None
+        artifacts["virtual_imu_calibration_report_json_path"] = None
+
+    imusim_result["virtual_imu_sequence"] = virtual_imu_sequence
+    imusim_result["quality_report"] = quality_report
+    imusim_result["calibration_report"] = None if calibration_report is None else dict(calibration_report)
+    imusim_result["artifacts"] = artifacts
+    return quality_report
 
 
 def generate_pose_from_video(

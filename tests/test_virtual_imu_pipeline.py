@@ -128,6 +128,114 @@ class VirtualIMUPipelineTests(unittest.TestCase):
                 )
             )
 
+    def test_run_virtual_imu_pipeline_calibrates_after_geometric_alignment(self) -> None:
+        pose_sequence = _make_pose3d_sequence()
+        pose3d_result = {
+            "clip_id": "clip_virtual_pipeline",
+            "pose_sequence": pose_sequence,
+            "quality_report": {"clip_id": "clip_virtual_pipeline", "status": "ok", "notes": []},
+            "artifacts": {
+                "pose3d_npz_path": "/tmp/fake_pose3d.npz",
+                "quality_report_json_path": "/tmp/fake_pose3d_quality.json",
+            },
+        }
+        timestamps = np.arange(8, dtype=np.float32) / np.float32(20.0)
+        raw_sequence = VirtualIMUSequence(
+            clip_id="clip_virtual_pipeline",
+            fps=20.0,
+            sensor_names=["waist", "head", "right_forearm", "left_forearm"],
+            acc=np.zeros((8, 4, 3), dtype=np.float32),
+            gyro=np.zeros((8, 4, 3), dtype=np.float32),
+            timestamps_sec=timestamps,
+            source="unit_test_virtual_imu_raw",
+        )
+        aligned_sequence = VirtualIMUSequence(
+            clip_id="clip_virtual_pipeline",
+            fps=20.0,
+            sensor_names=list(raw_sequence.sensor_names),
+            acc=np.ones((8, 4, 3), dtype=np.float32),
+            gyro=np.ones((8, 4, 3), dtype=np.float32),
+            timestamps_sec=timestamps,
+            source="unit_test_virtual_imu_aligned",
+        )
+        calibrated_sequence = VirtualIMUSequence(
+            clip_id="clip_virtual_pipeline",
+            fps=20.0,
+            sensor_names=list(raw_sequence.sensor_names),
+            acc=np.full((8, 4, 3), 2.0, dtype=np.float32),
+            gyro=np.full((8, 4, 3), 2.0, dtype=np.float32),
+            timestamps_sec=timestamps,
+            source="unit_test_virtual_imu_aligned_calibrated",
+        )
+        imusim_result = {
+            "virtual_imu_sequence": raw_sequence,
+            "raw_virtual_imu_sequence": raw_sequence,
+            "quality_report": {
+                "clip_id": "clip_virtual_pipeline",
+                "status": "ok",
+                "virtual_imu_ok": True,
+                "acc_noise_std_m_s2": 0.0,
+                "gyro_noise_std_rad_s": 0.0,
+                "notes": [],
+            },
+            "calibration_report": None,
+            "artifacts": {
+                "virtual_imu_npz_path": None,
+                "virtual_imu_raw_npz_path": None,
+                "virtual_imu_report_json_path": None,
+                "virtual_imu_calibration_report_json_path": None,
+            },
+        }
+        geometric_alignment_result = {
+            "status": "ok",
+            "enabled": True,
+            "aligned_virtual_imu_sequence": aligned_sequence,
+            "quality_report": {"enabled": True, "status": "ok", "notes": []},
+            "artifacts": {},
+        }
+        calibration_report = {
+            "status": "ok",
+            "signal_mode": "acc",
+            "per_class_applied": True,
+            "reference_path": "/tmp/reference.npz",
+            "matched_sensor_names": ["waist", "head", "right_forearm", "left_forearm"],
+            "mean_abs_delta": 0.1,
+            "max_abs_delta": 0.2,
+            "notes": [],
+        }
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            with patch("pose_module.pipeline.run_pose3d_pipeline", return_value=pose3d_result):
+                with patch("pose_module.pipeline.run_imusim", return_value=imusim_result) as mocked_imusim:
+                    with patch(
+                        "pose_module.pipeline.load_alignment_runtime_settings",
+                        return_value={"enable": True},
+                    ):
+                        with patch(
+                            "pose_module.pipeline._run_optional_geometric_alignment",
+                            return_value=geometric_alignment_result,
+                        ):
+                            with patch(
+                                "pose_module.pipeline.calibrate_virtual_imu_sequence",
+                                return_value={
+                                    "virtual_imu_sequence": calibrated_sequence,
+                                    "calibration_report": calibration_report,
+                                },
+                            ) as mocked_calibration:
+                                result = run_virtual_imu_pipeline(
+                                    clip_id="clip_virtual_pipeline",
+                                    video_path=str(Path(tmp_dir) / "video.mp4"),
+                                    output_dir=tmp_dir,
+                                    save_debug=False,
+                                    real_imu_reference_path=Path(tmp_dir) / "reference.npz",
+                                )
+
+            self.assertIsNone(mocked_imusim.call_args.kwargs["real_imu_reference_path"])
+            self.assertIs(mocked_calibration.call_args.args[0], aligned_sequence)
+            np.testing.assert_allclose(result["virtual_imu_sequence"].acc, calibrated_sequence.acc)
+            self.assertTrue(result["virtual_imu_quality_report"]["real_imu_calibration_applied"])
+            self.assertTrue(Path(result["artifacts"]["virtual_imu_raw_npz_path"]).exists())
+
     def test_run_virtual_imu_pipeline_merges_sensor_frame_estimation_outputs(self) -> None:
         pose_sequence = _make_pose3d_sequence()
         pose3d_result = {

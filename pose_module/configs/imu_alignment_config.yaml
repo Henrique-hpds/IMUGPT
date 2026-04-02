@@ -1,28 +1,50 @@
-# Configuracao do modulo de alinhamento geometrico IMU.
-# Mantido desligado por padrao para nao alterar pipelines existentes.
+# Configuracao do alinhamento geometrico entre IMU virtual e IMU real.
+# Leitura rapida:
+# - `fit_from_current_pair: true` => aprende uma rotacao por captura
+# - `fit_from_current_pair: false` => reaproveita transforms fora do clip atual
 
+# Liga ou desliga o modulo inteiro.
 enable: true
 
+# Estima um pequeno atraso temporal antes do ajuste.
 enable_time_lag_estimation: true
+# Estima a rotacao 3D entre virtual e real.
 enable_rotation_alignment: true
-enable_bias_scale_refinement: false
+# Abre a porta para refino de bias/scale.
+enable_bias_scale_refinement: true
 
+# Mantem a busca de lag ativa. Em geral deixe `true`.
 estimate_time_lag: true
+# Lag maximo em numero de amostras.
 max_lag_samples: 20
+# Qual sinal usar para achar o lag: `gyro_norm` ou `acc_norm`.
 lag_signal: "gyro_norm"
 
+# Usa acelerometro no ajuste.
 use_acc: true
+# Usa giroscopio no ajuste.
 use_gyro: true
+# Ajusta bias por eixo. So vale se o refino estiver ligado.
 use_bias: false
-use_scale: false
+# Ajusta escala por eixo. So vale se o refino estiver ligado.
+use_scale: true
 
-gravity_window_only: false
-min_motion_norm_gyro: 0.1
+# Se `true`, favorece trechos quase parados para usar gravidade.
+gravity_window_only: true
+# Movimento minimo do gyro para considerar a amostra informativa.
+min_motion_norm_gyro: 0.5 # original 0.1
+# Norma minima do acc para considerar a amostra informativa.
 min_motion_norm_acc: 0.2
+# Regularizacao numerica pequena para o ajuste.
 ridge_lambda: 1.0e-6
 
+# Pasta base para salvar artifacts do alinhamento.
 output_dir: "./output/imu_alignment"
-save_transforms: true
+# Salva o JSON de transforms aprendidos.
+save_transforms: false
+# Salva metricas e relatorios do alinhamento.
 save_metrics: true
-fit_from_current_pair: false
+# `true` = fit no par atual, por captura. `false` = usa/reaproveita transforms externos.
+fit_from_current_pair: true
+# Caminho fixo para um JSON de transforms. `null` usa o caminho padrao do output atual.
 transforms_path: null

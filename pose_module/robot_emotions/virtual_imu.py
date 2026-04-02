@@ -116,6 +116,9 @@ def run_robot_emotions_virtual_imu(
                 real_imu_signal_mode=str(real_imu_signal_mode),
                 real_imu_percentile_resolution=int(real_imu_percentile_resolution),
                 real_imu_per_class_calibration=bool(real_imu_per_class_calibration),
+                defer_real_imu_calibration=bool(
+                    use_subject_level_alignment and real_imu_reference_path not in (None, "")
+                ),
                 estimate_sensor_frame=bool(estimate_sensor_frame),
                 estimate_sensor_names=(
                     None if estimate_sensor_names is None else tuple(str(name) for name in estimate_sensor_names)

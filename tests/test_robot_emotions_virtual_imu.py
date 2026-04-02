@@ -275,6 +275,67 @@ class RobotEmotionsVirtualIMUTests(unittest.TestCase):
         )
         mocked_print.assert_called_once()
 
+    def test_run_robot_emotions_virtual_imu_defers_rank_calibration_for_subject_level_alignment(self) -> None:
+        record = _make_record("robot_emotions_10ms_u02_tag05")
+        fake_pipeline_result = {
+            "clip_id": record.clip_id,
+            "pose_sequence": _make_pose3d_sequence(),
+            "virtual_imu_sequence": VirtualIMUSequence(
+                clip_id=record.clip_id,
+                fps=20.0,
+                sensor_names=["waist", "head", "right_forearm", "left_forearm"],
+                acc=np.zeros((6, 4, 3), dtype=np.float32),
+                gyro=np.zeros((6, 4, 3), dtype=np.float32),
+                timestamps_sec=np.arange(6, dtype=np.float32) / np.float32(20.0),
+                source="unit_test_virtual_imu",
+            ),
+            "ik_sequence": _make_ik_sequence(),
+            "quality_report": {"clip_id": record.clip_id, "status": "ok", "notes": []},
+            "pose3d_quality_report": {"clip_id": record.clip_id, "status": "ok"},
+            "ik_quality_report": {"clip_id": record.clip_id, "status": "ok", "ik_ok": True},
+            "virtual_imu_quality_report": {
+                "clip_id": record.clip_id,
+                "status": "ok",
+                "virtual_imu_ok": True,
+            },
+            "artifacts": {"virtual_imu_npz_path": "/tmp/fake_virtual_imu.npz"},
+            "imusim_result": {
+                "raw_virtual_imu_sequence": VirtualIMUSequence(
+                    clip_id=record.clip_id,
+                    fps=20.0,
+                    sensor_names=["waist", "head", "right_forearm", "left_forearm"],
+                    acc=np.zeros((6, 4, 3), dtype=np.float32),
+                    gyro=np.zeros((6, 4, 3), dtype=np.float32),
+                    timestamps_sec=np.arange(6, dtype=np.float32) / np.float32(20.0),
+                    source="unit_test_virtual_imu_raw",
+                ),
+            },
+        }
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            with patch("pose_module.robot_emotions.virtual_imu.RobotEmotionsExtractor", _FakeExtractor):
+                with patch(
+                    "pose_module.robot_emotions.virtual_imu.run_virtual_imu_pipeline",
+                    return_value=fake_pipeline_result,
+                ) as mocked_pipeline:
+                    with patch(
+                        "pose_module.robot_emotions.virtual_imu.load_alignment_runtime_settings",
+                        return_value={"enable": True, "fit_from_current_pair": False},
+                    ):
+                        with patch(
+                            "pose_module.robot_emotions.virtual_imu._apply_subject_level_geometric_alignment",
+                            return_value=None,
+                        ):
+                            run_robot_emotions_virtual_imu(
+                                dataset_root="data/RobotEmotions",
+                                output_dir=tmp_dir,
+                                clip_ids=[record.clip_id],
+                                env_name="openmmlab",
+                                real_imu_reference_path="/tmp/reference.npz",
+                            )
+
+            self.assertTrue(mocked_pipeline.call_args.kwargs["defer_real_imu_calibration"])
+
     def test_run_robot_emotions_virtual_imu_fits_subject_level_geometric_alignment(self) -> None:
         record_a = _make_record("robot_emotions_10ms_u02_tag05")
         record_b = _make_record("robot_emotions_10ms_u02_tag06")
