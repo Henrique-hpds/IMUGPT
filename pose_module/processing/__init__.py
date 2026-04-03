@@ -7,11 +7,12 @@ from .metric_normalizer import run_metric_normalizer
 from .root_estimator import run_root_trajectory_estimator
 from .sensor_frame_estimation import estimate_sensor_frame_alignment
 from .quality import (
-    merge_stage53_quality_reports,
-    merge_stage56_quality_reports,
-    merge_stage57_quality_reports,
-    merge_stage58_quality_reports,
-    merge_stage510_quality_reports,
+    merge_metric_pose_quality_reports,
+    merge_motionbert_quality_reports,
+    merge_pose2d_quality_reports,
+    merge_pose3d_mapping_quality_reports,
+    merge_pose3d_quality_reports,
+    merge_virtual_imu_quality_reports,
 )
 from .skeleton_mapper import map_pose_sequence_to_imugpt22
 
@@ -23,9 +24,10 @@ __all__ = [
     "run_metric_normalizer",
     "run_root_trajectory_estimator",
     "estimate_sensor_frame_alignment",
-    "merge_stage53_quality_reports",
-    "merge_stage56_quality_reports",
-    "merge_stage57_quality_reports",
-    "merge_stage58_quality_reports",
-    "merge_stage510_quality_reports",
+    "merge_pose2d_quality_reports",
+    "merge_motionbert_quality_reports",
+    "merge_pose3d_mapping_quality_reports",
+    "merge_metric_pose_quality_reports",
+    "merge_pose3d_quality_reports",
+    "merge_virtual_imu_quality_reports",
 ]

@@ -25,7 +25,7 @@ from pose_module.imu_alignment import (
 from pose_module.io.cache import write_json_file
 from pose_module.pipeline import run_virtual_imu_pipeline
 from pose_module.processing.imu_calibration import calibrate_virtual_imu_sequence
-from pose_module.processing.quality import merge_stage510_quality_reports
+from pose_module.processing.quality import merge_virtual_imu_quality_reports
 
 from .extractor import (
     RobotEmotionsClipRecord,
@@ -340,7 +340,7 @@ def _apply_subject_transforms_to_pipeline_result(
     )
     write_json_file(virtual_imu_quality_report, pose_dir / "virtual_imu_report.json")
 
-    merged_quality = merge_stage510_quality_reports(
+    merged_quality = merge_virtual_imu_quality_reports(
         pose3d_quality=dict(pipeline_result["pose3d_quality_report"]),
         ik_quality=dict(pipeline_result["ik_quality_report"]),
         virtual_imu_quality=virtual_imu_quality_report,
@@ -405,7 +405,7 @@ def _mark_subject_alignment_warning(
         "mean_gyro_corr_after": None,
         "notes": [f"subject_geometric_alignment_failed:{error}"],
     }
-    merged_quality = merge_stage510_quality_reports(
+    merged_quality = merge_virtual_imu_quality_reports(
         pose3d_quality=dict(pipeline_result["pose3d_quality_report"]),
         ik_quality=dict(pipeline_result["ik_quality_report"]),
         virtual_imu_quality=dict(pipeline_result["virtual_imu_quality_report"]),

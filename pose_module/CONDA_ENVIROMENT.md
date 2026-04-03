@@ -30,6 +30,7 @@ mim install "mmengine==0.10.5"
 mim install "mmcv==2.1.0"
 mim install "mmdet==3.2.0"
 mim install "mmpose==1.3.2"
+mim install "mmpretrain==1.2.0"
 ```
 
 ### 4) Download checkpoints used by this pipeline

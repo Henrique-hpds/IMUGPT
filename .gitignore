@@ -6,7 +6,7 @@ ViT-B-32.pt
 api_key.txt
 data/*
 .codex
-
+especif/
 
 # Sphinx documentation
 docs/_build/

@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any, Dict, Mapping
 
 
-def merge_stage53_quality_reports(
+def merge_pose2d_quality_reports(
     *,
     clip_id: str,
     backend_quality: Mapping[str, Any],
@@ -61,7 +61,7 @@ def merge_stage53_quality_reports(
     }
 
 
-def merge_stage55_quality_reports(
+def merge_motionbert_quality_reports(
     *,
     pose2d_quality: Mapping[str, Any],
     lifter_quality: Mapping[str, Any],
@@ -104,7 +104,7 @@ def merge_stage55_quality_reports(
     return merged
 
 
-def merge_stage56_quality_reports(
+def merge_pose3d_mapping_quality_reports(
     *,
     pose2d_quality: Mapping[str, Any],
     lifter_quality: Mapping[str, Any],
@@ -167,7 +167,7 @@ def merge_stage56_quality_reports(
     return merged
 
 
-def merge_stage57_quality_reports(
+def merge_metric_pose_quality_reports(
     *,
     pose2d_quality: Mapping[str, Any],
     lifter_quality: Mapping[str, Any],
@@ -265,7 +265,7 @@ def merge_stage57_quality_reports(
     return merged
 
 
-def merge_stage58_quality_reports(
+def merge_pose3d_quality_reports(
     *,
     pose2d_quality: Mapping[str, Any],
     lifter_quality: Mapping[str, Any],
@@ -275,7 +275,7 @@ def merge_stage58_quality_reports(
     root_quality: Mapping[str, Any],
 ) -> Dict[str, Any]:
     root_quality = dict(root_quality)
-    merged = merge_stage57_quality_reports(
+    merged = merge_metric_pose_quality_reports(
         pose2d_quality=pose2d_quality,
         lifter_quality=lifter_quality,
         lower_limb_quality=lower_limb_quality,
@@ -324,7 +324,7 @@ def merge_stage58_quality_reports(
     return merged
 
 
-def merge_stage510_quality_reports(
+def merge_virtual_imu_quality_reports(
     *,
     pose3d_quality: Mapping[str, Any],
     ik_quality: Mapping[str, Any],

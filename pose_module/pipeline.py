@@ -1,4 +1,4 @@
-"""Top-level orchestration for the pose pipeline stages implemented so far."""
+"""Top-level orchestration for the pose pipeline stages"""
 
 from __future__ import annotations
 
@@ -17,63 +17,43 @@ from pose_module.export.imusim_adapter import (
     DEFAULT_RAW_IMU_SEQUENCE_FILENAME,
     DEFAULT_SENSOR_LAYOUT_PATH,
     _build_virtual_imu_quality_report,
-    run_imusim,
+    run_imusim
 )
-from pose_module.export.debug_video import (
-    render_pose_overlay_video,
-    render_pose3d_side_by_side_video,
-    resolve_debug_overlay_variant_path,
-)
+
+from pose_module.export.debug_video import render_pose_overlay_video, render_pose3d_side_by_side_video, resolve_debug_overlay_variant_path
 from pose_module.imu_alignment import load_alignment_runtime_settings, run_geometric_alignment
 from pose_module.interfaces import Pose2DJob, PoseSequence2D, VirtualIMUSequence
 from pose_module.io.cache import write_json_file
+
 from pose_module.motionbert.adapter import write_pose_sequence3d_npz
 from pose_module.motionbert.lifter import MotionBERTPredictor, run_motionbert_lifter
+
 from pose_module.io.video_loader import frame_indices_to_timestamps, select_frame_indices
 from pose_module.processing.cleaner2d import clean_pose_sequence2d
 from pose_module.processing.lower_limb_stabilizer import run_lower_limb_stabilizer
 from pose_module.processing.metric_normalizer import run_metric_normalizer
 from pose_module.processing.imu_calibration import calibrate_virtual_imu_sequence
-from pose_module.processing.quality import (
-    merge_stage53_quality_reports,
-    merge_stage58_quality_reports,
-    merge_stage510_quality_reports,
-)
+from pose_module.processing.quality import merge_pose2d_quality_reports, merge_pose3d_quality_reports, merge_virtual_imu_quality_reports
+
 from pose_module.processing.root_estimator import run_root_trajectory_estimator
-from pose_module.processing.sensor_frame_estimation import (
-    DEFAULT_TARGET_SENSOR_NAMES,
-    estimate_sensor_frame_alignment,
-)
+from pose_module.processing.sensor_frame_estimation import DEFAULT_TARGET_SENSOR_NAMES, estimate_sensor_frame_alignment
+
 from pose_module.processing.skeleton_mapper import map_pose_sequence_to_imugpt22
 from pose_module.tracking.person_selector import build_person_track_report, link_person_tracks
-from pose_module.vitpose.adapter import (
-    canonicalize_pose_sequence2d,
-    load_raw_prediction_frames,
-    write_pose_sequence_npz,
-)
 from pose_module.vitpose.estimator import run_backend_job
+from pose_module.vitpose.adapter import canonicalize_pose_sequence2d, load_raw_prediction_frames, write_pose_sequence_npz
 
-
-def run_pose2d_pipeline(
-    *,
-    clip_id: str,
-    video_path: str,
-    output_dir: str | Path,
-    fps_target: int = 20,
-    save_debug: bool = True,
-    env_name: str = "openmmlab",
-    video_metadata: Optional[Mapping[str, Any]] = None,
-    model_alias: str = "vitpose-b",
-) -> Dict[str, Any]:
+def run_pose2d_pipeline(*, clip_id: str, video_path: str, output_dir: str | Path, fps_target: int = 20, save_debug: bool = True, env_name: str = "openmmlab", video_metadata: Optional[Mapping[str, Any]] = None, model_alias: str = "vitpose-b",) -> Dict[str, Any]:
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
+    pose2d_output_dir = _resolve_stage_output_dir(output_dir, "pose2d")
     video_metadata = {} if video_metadata is None else dict(video_metadata)
 
     job = Pose2DJob(
         clip_id=str(clip_id),
         video_path=str(Path(video_path).resolve()),
         fps_target=int(fps_target),
-        output_dir=str(output_dir.resolve()),
+        output_dir=str(pose2d_output_dir.resolve()),
         save_debug=bool(save_debug),
         device_preference="auto",
         model_alias=str(model_alias),
@@ -82,7 +62,9 @@ def run_pose2d_pipeline(
         video_num_frames=_optional_int(video_metadata.get("num_frames")),
         video_duration_sec=_optional_float(video_metadata.get("duration_sec")),
     )
-    backend_run = run_backend_job(job=job, env_name=env_name, output_dir=output_dir)
+    
+    # Run the 2D backend and recover a single person track.
+    backend_run = run_backend_job(job=job, env_name=env_name, output_dir=pose2d_output_dir)
     if backend_run.get("status") != "ok":
         raise RuntimeError(str(backend_run.get("error", "pose2d_backend_failed")))
 
@@ -90,30 +72,23 @@ def run_pose2d_pipeline(
     frame_predictions = load_raw_prediction_frames(raw_prediction_json_path)
     tracks = link_person_tracks(frame_predictions)
     selected_track = tracks[0] if len(tracks) > 0 else None
-    track_report = build_person_track_report(
-        tracks,
-        selected_track=selected_track,
-        total_frames=int(len(frame_predictions)),
-    )
-    write_json_file(track_report, output_dir / "person_track.json")
+    track_report = build_person_track_report(tracks, selected_track=selected_track, total_frames=int(len(frame_predictions)))
+    write_json_file(track_report, pose2d_output_dir / "person_track.json")
 
     if selected_track is None:
         raise RuntimeError("No valid person track produced from backend predictions.")
 
+    # Rebuild timing information for the sampled frames.
     selected_frame_indices = np.asarray(backend_run.get("selected_frame_indices", []), dtype=np.int32)
+    
     if selected_frame_indices.size == 0:
-        selected_frame_indices, effective_fps, _ = select_frame_indices(
-            len(frame_predictions),
-            _optional_float(video_metadata.get("fps")),
-            int(fps_target),
-        )
+        selected_frame_indices, effective_fps, _ = select_frame_indices(len(frame_predictions), _optional_float(video_metadata.get("fps")), int(fps_target))
     else:
         effective_fps = _optional_float(backend_run.get("effective_fps"))
-    timestamps_sec = frame_indices_to_timestamps(
-        selected_frame_indices,
-        _optional_float(video_metadata.get("fps")),
-    )
+        
+    timestamps_sec = frame_indices_to_timestamps(selected_frame_indices, _optional_float(video_metadata.get("fps")))
 
+    # Canonicalize the poses and clean unstable detections.
     raw_pose_sequence, pose_quality = canonicalize_pose_sequence2d(
         clip_id=str(clip_id),
         selected_track=selected_track,
@@ -123,23 +98,24 @@ def run_pose2d_pipeline(
         fps_original=_optional_float(video_metadata.get("fps")),
         source=str(model_alias),
     )
-    pose_sequence, cleaner_quality, cleaner_artifacts = clean_pose_sequence2d(
-        raw_pose_sequence,
-        track_report=track_report,
-    )
-    merged_quality = merge_stage53_quality_reports(
+    
+    pose_sequence, cleaner_quality, cleaner_artifacts = clean_pose_sequence2d(raw_pose_sequence, track_report=track_report)
+    merged_quality = merge_pose2d_quality_reports(
         clip_id=str(clip_id),
         backend_quality=backend_run.get("quality_report", {}),
         track_report=track_report,
         pose_quality=pose_quality,
         cleaner_quality=cleaner_quality,
     )
+    
     raw_debug_overlay_path = None
     clean_debug_overlay_path = None
+    
     if save_debug:
+        # Render quick visual checks for the raw and cleaned poses.
         raw_debug_overlay_path = _render_debug_overlay_variant(
             video_path=str(video_path),
-            output_path=resolve_debug_overlay_variant_path(output_dir, variant="raw", enabled=True),
+            output_path=resolve_debug_overlay_variant_path(pose2d_output_dir, variant="raw", enabled=True),
             pose_sequence=raw_pose_sequence,
             keypoints_xy=np.asarray(raw_pose_sequence.keypoints_xy, dtype=np.float32),
             overlay_variant="raw",
@@ -147,7 +123,7 @@ def run_pose2d_pipeline(
         )
         clean_debug_overlay_path = _render_debug_overlay_variant(
             video_path=str(video_path),
-            output_path=resolve_debug_overlay_variant_path(output_dir, variant="clean", enabled=True),
+            output_path=resolve_debug_overlay_variant_path(pose2d_output_dir, variant="clean", enabled=True),
             pose_sequence=pose_sequence,
             keypoints_xy=_restore_clean_pose_pixels(
                 pose_sequence.keypoints_xy,
@@ -159,10 +135,11 @@ def run_pose2d_pipeline(
             merged_quality=merged_quality,
         )
 
-    write_json_file(merged_quality, output_dir / "quality_report.json")
-    np.save(output_dir / "2d_keypoints_raw.npy", np.asarray(raw_pose_sequence.keypoints_xy, dtype=np.float32))
-    np.save(output_dir / "2d_keypoints_clean.npy", np.asarray(pose_sequence.keypoints_xy, dtype=np.float32))
-    write_pose_sequence_npz(pose_sequence, output_dir / "pose2d.npz")
+    # Persist the cleaned sequence and its reports.
+    write_json_file(merged_quality, pose2d_output_dir / "quality_report.json")
+    np.save(pose2d_output_dir / "2d_keypoints_raw.npy", np.asarray(raw_pose_sequence.keypoints_xy, dtype=np.float32))
+    np.save(pose2d_output_dir / "2d_keypoints_clean.npy", np.asarray(pose_sequence.keypoints_xy, dtype=np.float32))
+    write_pose_sequence_npz(pose_sequence, pose2d_output_dir / "pose2d.npz")
 
     return {
         "clip_id": str(clip_id),
@@ -174,12 +151,12 @@ def run_pose2d_pipeline(
         "backend_run": backend_run,
         "cleaner_artifacts": cleaner_artifacts,
         "artifacts": {
-            "pose2d_npz_path": str((output_dir / "pose2d.npz").resolve()),
-            "pose2d_raw_keypoints_path": str((output_dir / "2d_keypoints_raw.npy").resolve()),
-            "pose2d_clean_keypoints_path": str((output_dir / "2d_keypoints_clean.npy").resolve()),
-            "person_track_json_path": str((output_dir / "person_track.json").resolve()),
-            "quality_report_json_path": str((output_dir / "quality_report.json").resolve()),
-            "backend_run_json_path": str((output_dir / "backend_run.json").resolve()),
+            "pose2d_npz_path": str((pose2d_output_dir / "pose2d.npz").resolve()),
+            "pose2d_raw_keypoints_path": str((pose2d_output_dir / "2d_keypoints_raw.npy").resolve()),
+            "pose2d_clean_keypoints_path": str((pose2d_output_dir / "2d_keypoints_clean.npy").resolve()),
+            "person_track_json_path": str((pose2d_output_dir / "person_track.json").resolve()),
+            "quality_report_json_path": str((pose2d_output_dir / "quality_report.json").resolve()),
+            "backend_run_json_path": str((pose2d_output_dir / "backend_run.json").resolve()),
             "raw_prediction_json_path": str(Path(raw_prediction_json_path).resolve()),
             "debug_overlay_path": backend_run["artifacts"].get("debug_overlay_path"),
             "debug_overlay_raw_path": None if raw_debug_overlay_path is None else str(raw_debug_overlay_path),
@@ -189,30 +166,32 @@ def run_pose2d_pipeline(
 
 
 def run_pose3d_pipeline(
-    *,
-    clip_id: str,
-    video_path: str,
-    output_dir: str | Path,
-    fps_target: int = 20,
-    save_debug: bool = True,
-    save_debug_2d: Optional[bool] = None,
-    save_debug_3d: Optional[bool] = None,
-    env_name: str = "openmmlab",
-    video_metadata: Optional[Mapping[str, Any]] = None,
-    model_alias: str = "vitpose-b",
-    motionbert_window_size: int = 81,
-    motionbert_window_overlap: float = 0.5,
-    include_motionbert_confidence: bool = True,
-    motionbert_predictor: Optional[MotionBERTPredictor] = None,
-    motionbert_backend_name: Optional[str] = None,
-    motionbert_env_name: Optional[str] = None,
-    motionbert_config_path: Optional[str] = None,
-    motionbert_checkpoint_path: Optional[str] = None,
-    motionbert_device: str = "auto",
-    allow_motionbert_fallback_backend: bool = False,
-) -> Dict[str, Any]:
+        *,
+        clip_id: str,
+        video_path: str,
+        output_dir: str | Path,
+        fps_target: int = 20,
+        save_debug: bool = True,
+        save_debug_2d: Optional[bool] = None,
+        save_debug_3d: Optional[bool] = None,
+        env_name: str = "openmmlab",
+        video_metadata: Optional[Mapping[str, Any]] = None,
+        model_alias: str = "vitpose-b",
+        motionbert_window_size: int = 81,
+        motionbert_window_overlap: float = 0.5,
+        include_motionbert_confidence: bool = True,
+        motionbert_predictor: Optional[MotionBERTPredictor] = None,
+        motionbert_backend_name: Optional[str] = None,
+        motionbert_env_name: Optional[str] = None,
+        motionbert_config_path: Optional[str] = None,
+        motionbert_checkpoint_path: Optional[str] = None,
+        motionbert_device: str = "auto",
+        allow_motionbert_fallback_backend: bool = False) -> Dict[str, Any]:
+
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
+    pose3d_output_dir = _resolve_stage_output_dir(output_dir, "pose3d")
+    motionbert_output_dir = _resolve_stage_output_dir(output_dir, "motionbert")
     save_debug_2d = bool(save_debug if save_debug_2d is None else save_debug_2d)
     save_debug_3d = bool(save_debug if save_debug_3d is None else save_debug_3d)
 
@@ -226,11 +205,13 @@ def run_pose3d_pipeline(
         video_metadata=video_metadata,
         model_alias=str(model_alias),
     )
+    # Feed the cleaned 2D sequence into the 3D lifter.
     motionbert_input_sequence = _build_motionbert_backend_input_sequence(pose2d_result)
 
+    # Lift image-space keypoints into a raw 3D pose sequence.
     lifter_result = run_motionbert_lifter(
         motionbert_input_sequence,
-        output_dir=output_dir,
+        output_dir=motionbert_output_dir,
         window_size=int(motionbert_window_size),
         window_overlap=float(motionbert_window_overlap),
         include_confidence=bool(include_motionbert_confidence),
@@ -244,47 +225,39 @@ def run_pose3d_pipeline(
         image_width=_optional_int(None if video_metadata is None else video_metadata.get("width")),
         image_height=_optional_int(None if video_metadata is None else video_metadata.get("height")),
     )
+    
     raw_pose_sequence_3d = lifter_result["pose_sequence"]
-    raw_motionbert_pose3d_path = output_dir / "pose3d_motionbert17.npz"
+    raw_motionbert_pose3d_path = pose3d_output_dir / "pose3d_motionbert17.npz"
     write_pose_sequence3d_npz(raw_pose_sequence_3d, raw_motionbert_pose3d_path)
+    
+    # Stabilize lower-limb motion before remapping the skeleton.
     lower_limb_result = run_lower_limb_stabilizer(raw_pose_sequence_3d)
     stabilized_pose_sequence_3d = lower_limb_result["pose_sequence"]
-    stabilized_motionbert_pose3d_path = output_dir / "pose3d_motionbert17_stabilized.npz"
+    stabilized_motionbert_pose3d_path = pose3d_output_dir / "pose3d_motionbert17_stabilized.npz"
     write_pose_sequence3d_npz(stabilized_pose_sequence_3d, stabilized_motionbert_pose3d_path)
-    write_json_file(lower_limb_result["quality_report"], output_dir / "lower_limb_stabilizer_report.json")
-    mapped_pose_sequence_3d, mapper_quality, mapper_artifacts = map_pose_sequence_to_imugpt22(
-        stabilized_pose_sequence_3d,
-    )
-    metric_normalizer_result = run_metric_normalizer(
-        mapped_pose_sequence_3d,
-        lower_limb_correction_masks=lower_limb_result["artifacts"]["correction_masks"],
-    )
+    write_json_file(lower_limb_result["quality_report"], pose3d_output_dir / "lower_limb_stabilizer_report.json")
+    
+    # Convert the lifted joints into the project skeleton.
+    mapped_pose_sequence_3d, mapper_quality, mapper_artifacts = map_pose_sequence_to_imugpt22(stabilized_pose_sequence_3d)
+    
+    # Recover metric scale and smooth local joint positions.
+    metric_normalizer_result = run_metric_normalizer(mapped_pose_sequence_3d, lower_limb_correction_masks=lower_limb_result["artifacts"]["correction_masks"])
     metric_pose_sequence_3d = metric_normalizer_result["pose_sequence"]
     metric_normalization = metric_normalizer_result["normalization_result"]
     metric_quality = metric_normalizer_result["quality_report"]
     metric_artifacts = metric_normalizer_result["artifacts"]
-    metric_pose_sequence_path = output_dir / "pose3d_metric_local.npz"
+    metric_pose_sequence_path = pose3d_output_dir / "pose3d_metric_local.npz"
     write_pose_sequence3d_npz(metric_pose_sequence_3d, metric_pose_sequence_path)
-    np.save(
-        output_dir / "3d_keypoints_metric.npy",
-        np.asarray(metric_normalization["joint_positions_smoothed"], dtype=np.float32),
-    )
-    root_result = run_root_trajectory_estimator(
-        metric_pose_sequence_3d,
-        normalization_result=metric_normalization,
-    )
+    np.save(pose3d_output_dir / "3d_keypoints_metric.npy", np.asarray(metric_normalization["joint_positions_smoothed"], dtype=np.float32))
+    
+    # Estimate global root motion and export the final motion.
+    root_result = run_root_trajectory_estimator(metric_pose_sequence_3d, normalization_result=metric_normalization)
     root_pose_sequence_3d = root_result["pose_sequence"]
-    write_pose_sequence3d_npz(root_pose_sequence_3d, output_dir / "pose3d.npz")
-    np.save(
-        output_dir / "root_translation.npy",
-        np.asarray(root_result["root_translation_m"], dtype=np.float32),
-    )
-    bvh_artifacts = export_pose_sequence3d_to_bvh(
-        root_pose_sequence_3d,
-        output_dir / "pose3d.bvh",
-    )
+    write_pose_sequence3d_npz(root_pose_sequence_3d, pose3d_output_dir / "pose3d.npz")
+    np.save(pose3d_output_dir / "root_translation.npy", np.asarray(root_result["root_translation_m"], dtype=np.float32))
+    bvh_artifacts = export_pose_sequence3d_to_bvh(root_pose_sequence_3d, pose3d_output_dir / "pose3d.bvh")
 
-    merged_quality = merge_stage58_quality_reports(
+    merged_quality = merge_pose3d_quality_reports(
         pose2d_quality=pose2d_result["quality_report"],
         lifter_quality=lifter_result["quality_report"],
         lower_limb_quality=lower_limb_result["quality_report"],
@@ -292,80 +265,64 @@ def run_pose3d_pipeline(
         normalizer_quality=metric_quality,
         root_quality=root_result["quality_report"],
     )
+    
     pose3d_debug_overlay_path = None
     pose3d_stabilized_debug_overlay_path = None
     pose3d_imugpt22_debug_overlay_path = None
+    
     if save_debug_3d:
+        # Render side-by-side previews for key 3D variants.
         cleaner_artifacts = pose2d_result["cleaner_artifacts"]
         clean_keypoints_xy_pixels = _restore_clean_pose_pixels(
             pose2d_result["pose_sequence"].keypoints_xy,
             cleaner_artifacts["normalization_centers_xy"],
             cleaner_artifacts["normalization_scales"],
-            pose2d_result["pose_sequence"].confidence,
+            pose2d_result["pose_sequence"].confidence
         )
         pose3d_debug_overlay_path = _render_pose3d_debug_overlay(
             video_path=str(video_path),
-            output_path=resolve_debug_overlay_variant_path(
-                output_dir,
-                variant="pose3d_raw",
-                enabled=True,
-            ),
+            output_path=resolve_debug_overlay_variant_path(pose3d_output_dir, variant="pose3d_raw", enabled=True),
             pose_sequence_2d=pose2d_result["pose_sequence"],
             clean_keypoints_xy=clean_keypoints_xy_pixels,
             pose_sequence_3d=raw_pose_sequence_3d,
             overlay_variant="pose3d_raw",
-            merged_quality=merged_quality,
+            merged_quality=merged_quality
         )
         pose3d_stabilized_debug_overlay_path = _render_pose3d_debug_overlay(
             video_path=str(video_path),
-            output_path=resolve_debug_overlay_variant_path(
-                output_dir,
-                variant="pose3d_stabilized",
-                enabled=True,
-            ),
+            output_path=resolve_debug_overlay_variant_path(pose3d_output_dir, variant="pose3d_stabilized", enabled=True),
             pose_sequence_2d=pose2d_result["pose_sequence"],
             clean_keypoints_xy=clean_keypoints_xy_pixels,
             pose_sequence_3d=stabilized_pose_sequence_3d,
             overlay_variant="pose3d_stabilized",
-            merged_quality=merged_quality,
+            merged_quality=merged_quality
         )
         pose3d_imugpt22_debug_overlay_path = _render_pose3d_debug_overlay(
             video_path=str(video_path),
-            output_path=resolve_debug_overlay_variant_path(
-                output_dir,
-                variant="pose3d_imugpt22",
-                enabled=True,
-            ),
+            output_path=resolve_debug_overlay_variant_path(pose3d_output_dir, variant="pose3d_imugpt22", enabled=True),
             pose_sequence_2d=pose2d_result["pose_sequence"],
             clean_keypoints_xy=clean_keypoints_xy_pixels,
             pose_sequence_3d=metric_pose_sequence_3d,
             overlay_variant="pose3d_imugpt22",
-            merged_quality=merged_quality,
+            merged_quality=merged_quality
         )
-    write_json_file(merged_quality, output_dir / "quality_report.json")
+    # Save the merged reports and artifact map for downstream stages.
+    write_json_file(merged_quality, pose3d_output_dir / "quality_report.json")
 
     artifacts = dict(pose2d_result["artifacts"])
     artifacts.update(lifter_result["artifacts"])
     artifacts["pose3d_motionbert17_npz_path"] = str(raw_motionbert_pose3d_path.resolve())
     artifacts["pose3d_motionbert17_stabilized_npz_path"] = str(stabilized_motionbert_pose3d_path.resolve())
     artifacts["pose3d_metric_local_npz_path"] = str(metric_pose_sequence_path.resolve())
-    artifacts["pose3d_npz_path"] = str((output_dir / "pose3d.npz").resolve())
-    artifacts["pose3d_metric_keypoints_path"] = str((output_dir / "3d_keypoints_metric.npy").resolve())
-    artifacts["root_translation_npy_path"] = str((output_dir / "root_translation.npy").resolve())
+    artifacts["pose3d_npz_path"] = str((pose3d_output_dir / "pose3d.npz").resolve())
+    artifacts["pose3d_metric_keypoints_path"] = str((pose3d_output_dir / "3d_keypoints_metric.npy").resolve())
+    artifacts["root_translation_npy_path"] = str((pose3d_output_dir / "root_translation.npy").resolve())
     artifacts["pose3d_bvh_path"] = str(Path(bvh_artifacts["pose3d_bvh_path"]).resolve())
-    artifacts["quality_report_json_path"] = str((output_dir / "quality_report.json").resolve())
-    artifacts["lower_limb_stabilizer_report_json_path"] = str(
-        (output_dir / "lower_limb_stabilizer_report.json").resolve()
-    )
-    artifacts["debug_overlay_pose3d_raw_path"] = (
-        None if pose3d_debug_overlay_path is None else str(pose3d_debug_overlay_path)
-    )
-    artifacts["debug_overlay_pose3d_stabilized_path"] = (
-        None if pose3d_stabilized_debug_overlay_path is None else str(pose3d_stabilized_debug_overlay_path)
-    )
-    artifacts["debug_overlay_pose3d_imugpt22_path"] = (
-        None if pose3d_imugpt22_debug_overlay_path is None else str(pose3d_imugpt22_debug_overlay_path)
-    )
+    artifacts["quality_report_json_path"] = str((pose3d_output_dir / "quality_report.json").resolve())
+    artifacts["lower_limb_stabilizer_report_json_path"] = str((pose3d_output_dir / "lower_limb_stabilizer_report.json").resolve())
+    artifacts["debug_overlay_pose3d_raw_path"] = (None if pose3d_debug_overlay_path is None else str(pose3d_debug_overlay_path))
+    artifacts["debug_overlay_pose3d_stabilized_path"] = (None if pose3d_stabilized_debug_overlay_path is None else str(pose3d_stabilized_debug_overlay_path))
+    artifacts["debug_overlay_pose3d_imugpt22_path"] = (None if pose3d_imugpt22_debug_overlay_path is None else str(pose3d_imugpt22_debug_overlay_path))
 
     return {
         "clip_id": str(clip_id),
@@ -433,16 +390,23 @@ def run_virtual_imu_pipeline(
     estimate_sensor_frame: bool = False,
     estimate_sensor_names: Sequence[str] | None = None,
 ) -> Dict[str, Any]:
+    
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
+    ik_output_dir = _resolve_stage_output_dir(output_dir, "ik")
+    virtual_imu_output_dir = _resolve_stage_output_dir(output_dir, "virtual_imu")
+    geometric_alignment_output_dir = _resolve_stage_output_dir(virtual_imu_output_dir, "geometric_alignment")
+    sensor_frame_output_dir = _resolve_stage_output_dir(virtual_imu_output_dir, "sensor_frame")
     geometric_alignment_settings = load_alignment_runtime_settings(None)
     has_real_imu_reference = real_imu_reference_path not in (None, "")
     defer_real_imu_calibration = bool(defer_real_imu_calibration and has_real_imu_reference)
+    
     postpone_real_imu_calibration_until_after_alignment = bool(
         has_real_imu_reference
         and not defer_real_imu_calibration
         and geometric_alignment_settings.get("enable", False)
     )
+    
     imusim_real_imu_reference_path = (
         None
         if defer_real_imu_calibration or postpone_real_imu_calibration_until_after_alignment
@@ -472,14 +436,14 @@ def run_virtual_imu_pipeline(
         allow_motionbert_fallback_backend=bool(allow_motionbert_fallback_backend),
     )
 
-    ik_result = run_ik(
-        pose3d_result["pose_sequence"],
-        output_dir=output_dir,
-    )
+    # Solve a kinematic body sequence from the final 3D pose.
+    ik_result = run_ik(pose3d_result["pose_sequence"], output_dir=ik_output_dir)
+    
+    # Synthesize virtual IMU signals from the solved motion.
     imusim_result = run_imusim(
         ik_result["ik_sequence"],
         sensor_layout_path=DEFAULT_SENSOR_LAYOUT_PATH if sensor_layout_path is None else sensor_layout_path,
-        output_dir=output_dir,
+        output_dir=virtual_imu_output_dir,
         acc_noise_std_m_s2=imu_acc_noise_std_m_s2,
         gyro_noise_std_rad_s=imu_gyro_noise_std_rad_s,
         random_seed=int(imu_random_seed),
@@ -489,11 +453,14 @@ def run_virtual_imu_pipeline(
         real_imu_percentile_resolution=int(real_imu_percentile_resolution),
         real_imu_per_class_calibration=bool(real_imu_per_class_calibration),
     )
+    
     resolved_real_imu_npz_path = _resolve_real_imu_npz_path(output_dir=output_dir)
+    
+    # Optionally align the synthetic signals to a real IMU reference.
     if bool(geometric_alignment_settings.get("enable", False)):
         geometric_alignment_result = _run_optional_geometric_alignment(
             raw_virtual_imu_sequence=imusim_result["raw_virtual_imu_sequence"],
-            output_dir=output_dir,
+            output_dir=geometric_alignment_output_dir,
             real_imu_npz_path=resolved_real_imu_npz_path,
         )
     else:
@@ -504,12 +471,10 @@ def run_virtual_imu_pipeline(
     post_geometric_virtual_imu_sequence = geometric_alignment_result["aligned_virtual_imu_sequence"]
     final_virtual_imu_sequence = imusim_result["virtual_imu_sequence"]
     final_virtual_imu_calibration_report = imusim_result["calibration_report"]
-    pre_calibration_virtual_imu_sequence = (
-        imusim_result["raw_virtual_imu_sequence"]
-        if final_virtual_imu_calibration_report is not None
-        else None
-    )
+    
+    pre_calibration_virtual_imu_sequence = (imusim_result["raw_virtual_imu_sequence"] if final_virtual_imu_calibration_report is not None else None)
 
+    # Calibrate amplitudes after alignment when a real reference is available.
     if postpone_real_imu_calibration_until_after_alignment:
         calibration_result = calibrate_virtual_imu_sequence(
             post_geometric_virtual_imu_sequence,
@@ -519,20 +484,23 @@ def run_virtual_imu_pipeline(
             percentile_resolution=int(real_imu_percentile_resolution),
             per_class=bool(real_imu_per_class_calibration),
         )
+        
         final_virtual_imu_sequence = calibration_result["virtual_imu_sequence"]
         final_virtual_imu_calibration_report = dict(calibration_result["calibration_report"])
         pre_calibration_virtual_imu_sequence = post_geometric_virtual_imu_sequence
+        
     elif bool(geometric_alignment_result.get("enabled")) or bool(defer_real_imu_calibration):
         final_virtual_imu_sequence = post_geometric_virtual_imu_sequence
 
     final_virtual_imu_quality_report = _sync_virtual_imu_pipeline_outputs(
-        output_dir=output_dir,
+        output_dir=virtual_imu_output_dir,
         imusim_result=imusim_result,
         virtual_imu_sequence=final_virtual_imu_sequence,
         calibration_report=final_virtual_imu_calibration_report,
         pre_calibration_virtual_imu_sequence=pre_calibration_virtual_imu_sequence,
     )
 
+    # Optionally estimate sensor-frame corrections against real IMU data.
     frame_alignment_result = _build_disabled_sensor_frame_estimation_result(
         raw_virtual_imu_sequence=final_virtual_imu_sequence,
         target_sensor_names=DEFAULT_TARGET_SENSOR_NAMES if estimate_sensor_names is None else estimate_sensor_names,
@@ -544,23 +512,24 @@ def run_virtual_imu_pipeline(
             if estimate_sensor_names is None
             else estimate_sensor_names,
             real_imu_npz_path=resolved_real_imu_npz_path,
-            output_dir=output_dir,
+            output_dir=sensor_frame_output_dir,
         )
-    merged_quality = merge_stage510_quality_reports(
+    merged_quality = merge_virtual_imu_quality_reports(
         pose3d_quality=pose3d_result["quality_report"],
         ik_quality=ik_result["quality_report"],
         virtual_imu_quality=final_virtual_imu_quality_report,
         geometric_alignment_quality=geometric_alignment_result["quality_report"],
         frame_alignment_quality=frame_alignment_result["quality_report"],
     )
-    write_json_file(merged_quality, output_dir / "quality_report.json")
+    # Save the consolidated reports and expose all generated artifacts.
+    write_json_file(merged_quality, virtual_imu_output_dir / "quality_report.json")
 
     artifacts = dict(pose3d_result["artifacts"])
     artifacts.update(ik_result["artifacts"])
     artifacts.update(imusim_result["artifacts"])
     artifacts.update(geometric_alignment_result["artifacts"])
     artifacts.update(frame_alignment_result["artifacts"])
-    artifacts["quality_report_json_path"] = str((output_dir / "quality_report.json").resolve())
+    artifacts["quality_report_json_path"] = str((virtual_imu_output_dir / "quality_report.json").resolve())
 
     return {
         "clip_id": str(clip_id),
@@ -586,7 +555,6 @@ def run_virtual_imu_pipeline(
         "artifacts": artifacts,
     }
 
-
 def _sync_virtual_imu_pipeline_outputs(
     *,
     output_dir: Path,
@@ -595,6 +563,7 @@ def _sync_virtual_imu_pipeline_outputs(
     calibration_report: Mapping[str, Any] | None,
     pre_calibration_virtual_imu_sequence: VirtualIMUSequence | None,
 ) -> Dict[str, Any]:
+    
     original_quality = dict(imusim_result.get("quality_report", {}))
     quality_report = _build_virtual_imu_quality_report(
         imu_sequence=virtual_imu_sequence,
@@ -730,18 +699,23 @@ def _build_motionbert_backend_input_sequence(pose2d_result: Mapping[str, Any]) -
 
 
 def _resolve_real_imu_npz_path(*, output_dir: Path) -> str | None:
-    for candidate in (output_dir.parent / "imu.npz", output_dir / "imu.npz"):
+    for candidate in (
+        output_dir / "imu.npz",
+        output_dir.parent / "imu.npz",
+        output_dir.parent.parent / "imu.npz",
+    ):
         if candidate.exists():
             return str(candidate.resolve())
     return None
 
 
-def _run_optional_geometric_alignment(
-    *,
-    raw_virtual_imu_sequence: VirtualIMUSequence,
-    output_dir: Path,
-    real_imu_npz_path: str | None,
-) -> Dict[str, Any]:
+def _resolve_stage_output_dir(base_dir: Path, stage_name: str) -> Path:
+    stage_output_dir = Path(base_dir) / str(stage_name)
+    stage_output_dir.mkdir(parents=True, exist_ok=True)
+    return stage_output_dir
+
+
+def _run_optional_geometric_alignment(*, raw_virtual_imu_sequence: VirtualIMUSequence, output_dir: Path, real_imu_npz_path: str | None) -> Dict[str, Any]:
     try:
         return run_geometric_alignment(
             virtual_imu_sequence=raw_virtual_imu_sequence,
@@ -757,13 +731,7 @@ def _run_optional_geometric_alignment(
         )
 
 
-def _run_optional_sensor_frame_estimation(
-    *,
-    raw_virtual_imu_sequence: VirtualIMUSequence,
-    target_sensor_names: Sequence[str],
-    real_imu_npz_path: str | None,
-    output_dir: Path,
-) -> Dict[str, Any]:
+def _run_optional_sensor_frame_estimation(*, raw_virtual_imu_sequence: VirtualIMUSequence, target_sensor_names: Sequence[str], real_imu_npz_path: str | None, output_dir: Path) -> Dict[str, Any]:
     try:
         return estimate_sensor_frame_alignment(
             raw_virtual_imu_sequence,
@@ -781,11 +749,7 @@ def _run_optional_sensor_frame_estimation(
         )
 
 
-def _build_disabled_sensor_frame_estimation_result(
-    *,
-    raw_virtual_imu_sequence: VirtualIMUSequence,
-    target_sensor_names: Sequence[str],
-) -> Dict[str, Any]:
+def _build_disabled_sensor_frame_estimation_result(*, raw_virtual_imu_sequence: VirtualIMUSequence, target_sensor_names: Sequence[str]) -> Dict[str, Any]:
     del raw_virtual_imu_sequence
     return {
         "status": "not_requested",
@@ -812,11 +776,7 @@ def _build_disabled_sensor_frame_estimation_result(
     }
 
 
-def _build_disabled_geometric_alignment_result(
-    *,
-    raw_virtual_imu_sequence: VirtualIMUSequence,
-    config_path: str | None,
-) -> Dict[str, Any]:
+def _build_disabled_geometric_alignment_result(*, raw_virtual_imu_sequence: VirtualIMUSequence, config_path: str | None) -> Dict[str, Any]:
     return {
         "status": "not_enabled",
         "enabled": False,
@@ -856,13 +816,7 @@ def _build_disabled_geometric_alignment_result(
     }
 
 
-def _build_failed_geometric_alignment_result(
-    *,
-    raw_virtual_imu_sequence: VirtualIMUSequence,
-    output_dir: Path,
-    error: str,
-    real_imu_npz_path: str | None,
-) -> Dict[str, Any]:
+def _build_failed_geometric_alignment_result(*, raw_virtual_imu_sequence: VirtualIMUSequence, output_dir: Path, error: str, real_imu_npz_path: str | None) -> Dict[str, Any]:
     del output_dir
     aligned_virtual_imu_sequence = VirtualIMUSequence(
         clip_id=str(raw_virtual_imu_sequence.clip_id),
@@ -906,14 +860,7 @@ def _build_failed_geometric_alignment_result(
     }
 
 
-def _build_failed_sensor_frame_estimation_result(
-    *,
-    raw_virtual_imu_sequence: VirtualIMUSequence,
-    target_sensor_names: Sequence[str],
-    output_dir: Path,
-    error: str,
-    real_imu_npz_path: str | None,
-) -> Dict[str, Any]:
+def _build_failed_sensor_frame_estimation_result(*, raw_virtual_imu_sequence: VirtualIMUSequence, target_sensor_names: Sequence[str], output_dir: Path, error: str, real_imu_npz_path: str | None) -> Dict[str, Any]:
     aligned_virtual_imu_sequence = VirtualIMUSequence(
         clip_id=str(raw_virtual_imu_sequence.clip_id),
         fps=None if raw_virtual_imu_sequence.fps is None else float(raw_virtual_imu_sequence.fps),
@@ -978,15 +925,7 @@ def _build_failed_sensor_frame_estimation_result(
     }
 
 
-def _render_debug_overlay_variant(
-    *,
-    video_path: str,
-    output_path: Path | None,
-    pose_sequence: Any,
-    keypoints_xy: np.ndarray,
-    overlay_variant: str,
-    merged_quality: Dict[str, Any],
-) -> Path | None:
+def _render_debug_overlay_variant(*, video_path: str, output_path: Path | None, pose_sequence: Any, keypoints_xy: np.ndarray, overlay_variant: str, merged_quality: Dict[str, Any]) -> Path | None:
     if output_path is None:
         return None
     try:
@@ -1010,16 +949,7 @@ def _render_debug_overlay_variant(
         return None
 
 
-def _render_pose3d_debug_overlay(
-    *,
-    video_path: str,
-    output_path: Path | None,
-    pose_sequence_2d: Any,
-    clean_keypoints_xy: np.ndarray,
-    pose_sequence_3d: Any,
-    overlay_variant: str,
-    merged_quality: Dict[str, Any],
-) -> Path | None:
+def _render_pose3d_debug_overlay(*, video_path: str, output_path: Path | None, pose_sequence_2d: Any, clean_keypoints_xy: np.ndarray, pose_sequence_3d: Any, overlay_variant: str, merged_quality: Dict[str, Any]) -> Path | None:
     if output_path is None:
         return None
     try:
