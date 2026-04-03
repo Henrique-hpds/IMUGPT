@@ -25,181 +25,165 @@ PARTICIPANTS_BY_DOMAIN: dict[str, dict[int, dict[str, Any]]] = {
 PROTOCOL_ROWS: list[dict[str, Any]] = [
     {
         "emotion": "Neutrality",
-        "action": "Standing",
-        "stimulus": "N.A.",
-        "stimulus_details": "N.A.",
+        "modality": "Standing",
+        "stimulus": "None",
+        "stimulus_details": "None",
         "tag_30ms": 1,
-        "tag_10ms": 1,
-        "notes": "",
+        "tag_10ms": 1
     },
+    
     {
         "emotion": "Neutrality",
-        "action": "Sitting",
-        "stimulus": "N.A.",
-        "stimulus_details": "N.A.",
+        "modality": "Sitting",
+        "stimulus": "None",
+        "stimulus_details": "None",
         "tag_30ms": 2,
-        "tag_10ms": 2,
-        "notes": "",
+        "tag_10ms": 2
     },
+    
     {
         "emotion": "Neutrality",
-        "action": "Walking + arms outstretched",
-        "stimulus": "N.A.",
-        "stimulus_details": "N.A.",
+        "modality": "Walking",
+        "stimulus": "None",
+        "stimulus_details": "None",
         "tag_30ms": 14,
-        "tag_10ms": 3,
-        "notes": "",
+        "tag_10ms": 3
     },
+    
     {
         "emotion": "Sadness",
-        "action": "Slow walking + free arm movement",
-        "stimulus": "AUDIO",
+        "modality": "Walking",
+        "stimulus": "Music",
         "stimulus_details": "Have the participant choose a sad song",
         "tag_30ms": 15,
-        "tag_10ms": 4,
-        "notes": "",
+        "tag_10ms": 4  
     },
+
     {
         "emotion": "Sadness",
-        "action": "Sitting + free arm movement",
-        "stimulus": "VISUAL",
+        "modality": "Sitting",
+        "stimulus": "Visual methods",
         "stimulus_details": "Show/have the participant choose sad video clips",
         "tag_30ms": 7,
-        "tag_10ms": 5,
-        "notes": "",
+        "tag_10ms": 5  
     },
+    
     {
         "emotion": "Sadness",
-        "action": "Free arm movement + sitting",
-        "stimulus": "AUTOBIOGRAPHICAL RECALL",
+        "modality": "Sitting",
+        "stimulus": "Autobiographical recall",
         "stimulus_details": "Ask the participant to remember a sad episode",
         "tag_30ms": 8,
-        "tag_10ms": 6,
-        "notes": "",
+        "tag_10ms": 6  
     },
+    
     {
         "emotion": "Sadness",
-        "action": "Free arm movement + standing",
-        "stimulus": "AUTOBIOGRAPHICAL RECALL",
+        "modality": "Standing",
+        "stimulus": "Autobiographical recall",
         "stimulus_details": "Ask the participant to remember a sad episode",
         "tag_30ms": 17,
-        "tag_10ms": 7,
-        "notes": "",
+        "tag_10ms": 7  
     },
+
     {
         "emotion": "Happiness",
-        "action": "Fast walking + free arm movement",
-        "stimulus": "AUDIO",
+        "modality": "Walking",
+        "stimulus": "Music",
         "stimulus_details": "Have the participant choose a song they like",
         "tag_30ms": 16,
-        "tag_10ms": 8,
-        "notes": "",
+        "tag_10ms": 8  
     },
+    
     {
         "emotion": "Happiness",
-        "action": "Sitting + free arm movement",
-        "stimulus": "VISUAL",
+        "modality": "Sitting",
+        "stimulus": "Visual methods",
         "stimulus_details": "Show/have the participant choose happy video clips",
         "tag_30ms": 5,
-        "tag_10ms": 9,
-        "notes": "",
+        "tag_10ms": 9  
     },
+    
     {
         "emotion": "Happiness",
-        "action": "Gesturing with arms raised + sitting",
-        "stimulus": "AUTOBIOGRAPHICAL RECALL / SIMULATING A CONVERSATION",
+        "modality": "Sitting",
+        "stimulus": "Autobiographical recall",
         "stimulus_details": "Ask the participant to recall a happy episode/funny anecdote",
         "tag_30ms": 3,
-        "tag_10ms": 10,
-        "notes": "",
+        "tag_10ms": 10  
     },
+    
     {
         "emotion": "Happiness",
-        "action": "Gesturing with arms raised + raised",
-        "stimulus": "AUTOBIOGRAPHICAL RECALL / SIMULATING A CONVERSATION",
+        "modality": "Standing",
+        "stimulus": "Autobiographical recall",
         "stimulus_details": "Ask the participant to imagine a happy episode/funny anecdote",
         "tag_30ms": 4,
-        "tag_10ms": 11,
-        "notes": "",
+        "tag_10ms": 11  
     },
-    {
+    
+        {
         "emotion": "Anger",
-        "action": "Standing + free arm movement",
-        "stimulus": "AUTOBIOGRAPHICAL RECALL / SIMULATING AN UNPLEASANT CONVERSATION",
-        "stimulus_details": (
-            "Ask the participant to imagine an unfair episode towards him/her/"
-            "a moment of argument"
-        ),
+        "modality": "Standing",
+        "stimulus": "Autobiographical recall",
+        "stimulus_details": "Ask the participant to imagine an unfair episode towards him/her/a moment of argument",
         "tag_30ms": 18,
-        "tag_10ms": 12,
-        "notes": "",
-    },
+        "tag_10ms": 12  
+    },    
+        
     {
         "emotion": "Fear",
-        "action": "Bounce + free arm movement",
-        "stimulus": "AUDIOVISUAL/ SIMULATION",
-        "stimulus_details": (
-            "Show the participant an unexpected, scary video/"
-            "Ask the participant to simulate the action"
-        ),
+        "modality": "Sitting",
+        "stimulus": "Simulation",
+        "stimulus_details": "Show the participant an unexpected, scary video/Ask the participant to simulate the action",
         "tag_30ms": 9,
-        "tag_10ms": 14,
-        "notes": "30ms table indicates '9 - sitting'",
-    },
+        "tag_10ms": None
+    },    
+    
     {
         "emotion": "Fear",
-        "action": "Escape",
-        "stimulus": "SIMULATION",
-        "stimulus_details": (
-            "Ask the participant to simulate a dangerous situation in which he turns "
-            "and runs away"
-        ),
+        "modality": "Running",
+        "stimulus": "Simulation",
+        "stimulus_details": "Ask the participant to simulate a dangerous situation in which he turns and runs away",
         "tag_30ms": 13,
-        "tag_10ms": 15,
-        "notes": "",
-    },
+        "tag_10ms": 15  
+    },    
+    
     {
         "emotion": "Boredom",
-        "action": "Sitting + free arm movement",
-        "stimulus": "AUDIOVISUAL/ SIMULATION",
-        "stimulus_details": (
-            "Show the participant a video that is not interesting to him/her/"
-            "Ask the participant to simulate a moment of boredom"
-        ),
+        "modality": "Sitting",
+        "stimulus": "Visual methods",
+        "stimulus_details": "Show the participant a video that is not interesting to him/her/Ask the participant to simulate a moment of boredom",
         "tag_30ms": 6,
-        "tag_10ms": 16,
-        "notes": "",
-    },
+        "tag_10ms": 16  
+    },    
+    
     {
         "emotion": "Boredom",
-        "action": "Standing + free arm movement",
-        "stimulus": "AUDIOVISUAL/ SIMULATION",
-        "stimulus_details": (
-            "Show the participant a video that is not interesting to him/her/"
-            "Ask the participant to simulate a moment of boredom"
-        ),
+        "modality": "Standing",
+        "stimulus": "Visual methods",
+        "stimulus_details": "Show the participant a video that is not interesting to him/her/Ask the participant to simulate a moment of boredom",
         "tag_30ms": 12,
-        "tag_10ms": 17,
-        "notes": "",
-    },
+        "tag_10ms": 17  
+    },    
+    
     {
         "emotion": "Curiosity",
-        "action": "Free movement of the still body",
-        "stimulus": "SIMULATION",
+        "modality": "Standing",
+        "stimulus": "Simulation",
         "stimulus_details": "Ask the participant to find a hidden object",
         "tag_30ms": 10,
-        "tag_10ms": 18,
-        "notes": "",
-    },
+        "tag_10ms": 18  
+    },    
+    
     {
         "emotion": "Curiosity",
-        "action": "Free body movement + walking",
-        "stimulus": "SIMULATION",
+        "modality": "Standing",
+        "stimulus": "Simulation",
         "stimulus_details": "Ask the participant to find a hidden object",
         "tag_30ms": 11,
-        "tag_10ms": 19,
-        "notes": "",
-    },
+        "tag_10ms": 19  
+    }
 ]
 
 PROTOCOL_BY_TAG: dict[str, dict[int, dict[str, Any]]] = {"10ms": {}, "30ms": {}}
