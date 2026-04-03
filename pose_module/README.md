@@ -231,8 +231,7 @@ O comando abaixo fecha o pipeline com `IK` e `IMUSim`, preservando tambem os art
 .venv/bin/python -m pose_module.robot_emotions \
   export-virtual-imu \
   --dataset-root data/RobotEmotions \
-  --output-dir output/robot_emotions_virtual_imu_rotated_scale_g \
-  --clip-id robot_emotions_10ms_u02_tag01 \
+  --output-dir output/robot_emotions_virtual_imu_v2_all_dataset \
   --env-name openmmlab \
   --no-debug-2d --no-debug-3d
 ```  
