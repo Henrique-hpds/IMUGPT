@@ -6,6 +6,7 @@ from typing import Any, Iterable, Sequence
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+from matplotlib.lines import Line2D
 from scipy.fft import rfft, rfftfreq
 from scipy.signal import resample, resample_poly
 from sklearn.manifold import TSNE
@@ -23,6 +24,9 @@ SIGNAL_GROUP_TO_VIRTUAL_KEY = {"acc": "acc", "gyro": "gyro"}
 DOMAIN_TO_LABEL = {"real": 0, "synthetic": 1}
 LABEL_TO_DOMAIN = {0: "real", 1: "synthetic"}
 DOMAIN_COLORS = {"real": "tab:blue", "synthetic": "tab:orange"}
+CLASS_HIGHLIGHT_DOMAIN_COLORS = {"real": "tab:blue", "synthetic": "tab:red"}
+CLASS_HIGHLIGHT_BACKGROUND_COLORS = {"real": "#9ecae1", "synthetic": "#fcbba1"}
+CLASS_HIGHLIGHT_MARKER = "o"
 
 
 def _normalize_string_list(values: Iterable[str]) -> list[str]:
@@ -769,6 +773,145 @@ def plot_tsne_embedding(
     return ax
 
 
+def _ordered_non_null_category_values(series: pd.Series) -> list[str]:
+    non_null_series = series[series.notna()]
+    if non_null_series.empty:
+        return []
+    return [str(value) for value in pd.unique(non_null_series.astype(str))]
+
+
+def _resolve_subplot_grid(num_panels: int, *, max_columns: int = 3) -> tuple[int, int]:
+    if int(num_panels) <= 0:
+        raise ValueError("num_panels must be greater than 0.")
+    if int(max_columns) <= 0:
+        raise ValueError("max_columns must be greater than 0.")
+    num_columns = min(int(max_columns), int(num_panels))
+    num_rows = int(np.ceil(int(num_panels) / num_columns))
+    return num_rows, num_columns
+
+
+def plot_tsne_class_highlight_grid(
+    embedding_df: pd.DataFrame,
+    *,
+    category: str,
+    title: str | None = None,
+    point_size: float = 18.0,
+    background_alpha: float = 0.18,
+    highlight_alpha: float = 0.9,
+    max_columns: int = 3,
+    subplot_size: tuple[float, float] = (4.8, 4.1),
+) -> tuple[plt.Figure, np.ndarray]:
+    if category not in embedding_df.columns:
+        raise ValueError(f"Category column '{category}' is not available in embedding_df.")
+    if "domain" not in embedding_df.columns:
+        raise ValueError("embedding_df must include a 'domain' column for class/domain comparison plots.")
+    if embedding_df.empty:
+        raise ValueError("embedding_df cannot be empty.")
+
+    category_values = _ordered_non_null_category_values(embedding_df[category])
+    if len(category_values) == 0:
+        raise ValueError(f"Category column '{category}' does not contain any non-null class value.")
+
+    num_rows, num_columns = _resolve_subplot_grid(len(category_values), max_columns=max_columns)
+    figure, axes = plt.subplots(
+        num_rows,
+        num_columns,
+        figsize=(subplot_size[0] * num_columns, subplot_size[1] * num_rows),
+        squeeze=False,
+        sharex=True,
+        sharey=True,
+    )
+    axes_flat = axes.ravel()
+
+    x_values = embedding_df["tsne_1"].to_numpy(dtype=np.float32)
+    y_values = embedding_df["tsne_2"].to_numpy(dtype=np.float32)
+    x_padding = max(1e-6, float(x_values.max() - x_values.min()) * 0.05)
+    y_padding = max(1e-6, float(y_values.max() - y_values.min()) * 0.05)
+    x_limits = (float(x_values.min() - x_padding), float(x_values.max() + x_padding))
+    y_limits = (float(y_values.min() - y_padding), float(y_values.max() + y_padding))
+    normalized_category = embedding_df[category].astype(object)
+    highlightable_mask = normalized_category.notna()
+    normalized_category = normalized_category.where(~highlightable_mask, normalized_category.astype(str))
+    domain_series = embedding_df["domain"].astype(str)
+
+    for class_index, class_name in enumerate(category_values):
+        axis = axes_flat[class_index]
+        highlight_mask = highlightable_mask & (normalized_category == class_name)
+        background_mask = ~highlight_mask
+        real_background_mask = background_mask & (domain_series == "real")
+        synthetic_background_mask = background_mask & (domain_series == "synthetic")
+        real_highlight_mask = highlight_mask & (domain_series == "real")
+        synthetic_highlight_mask = highlight_mask & (domain_series == "synthetic")
+
+        for domain_name, domain_mask in (
+            ("real", real_background_mask),
+            ("synthetic", synthetic_background_mask),
+        ):
+            axis.scatter(
+                embedding_df.loc[domain_mask, "tsne_1"],
+                embedding_df.loc[domain_mask, "tsne_2"],
+                c=CLASS_HIGHLIGHT_BACKGROUND_COLORS[domain_name],
+                alpha=float(background_alpha),
+                s=float(point_size),
+                linewidths=0.0,
+                marker=CLASS_HIGHLIGHT_MARKER,
+            )
+
+        for domain_name, domain_mask in (
+            ("real", real_highlight_mask),
+            ("synthetic", synthetic_highlight_mask),
+        ):
+            axis.scatter(
+                embedding_df.loc[domain_mask, "tsne_1"],
+                embedding_df.loc[domain_mask, "tsne_2"],
+                c=CLASS_HIGHLIGHT_DOMAIN_COLORS[domain_name],
+                alpha=float(highlight_alpha),
+                s=float(point_size),
+                linewidths=0.0,
+                marker=CLASS_HIGHLIGHT_MARKER,
+            )
+
+        axis.set_title(
+            f"{class_name} (real={int(real_highlight_mask.sum())}, "
+            f"synthetic={int(synthetic_highlight_mask.sum())})"
+        )
+        axis.set_xlim(*x_limits)
+        axis.set_ylim(*y_limits)
+        axis.set_xlabel("t-SNE 1")
+        axis.set_ylabel("t-SNE 2")
+
+    for axis in axes_flat[len(category_values) :]:
+        axis.set_visible(False)
+
+    legend_handles = [
+        Line2D(
+            [0],
+            [0],
+            marker=CLASS_HIGHLIGHT_MARKER,
+            linestyle="",
+            markerfacecolor=CLASS_HIGHLIGHT_DOMAIN_COLORS["real"],
+            markeredgecolor=CLASS_HIGHLIGHT_DOMAIN_COLORS["real"],
+            markersize=8,
+            label="real",
+        ),
+        Line2D(
+            [0],
+            [0],
+            marker=CLASS_HIGHLIGHT_MARKER,
+            linestyle="",
+            markerfacecolor=CLASS_HIGHLIGHT_DOMAIN_COLORS["synthetic"],
+            markeredgecolor=CLASS_HIGHLIGHT_DOMAIN_COLORS["synthetic"],
+            markersize=8,
+            label="synthetic",
+        ),
+    ]
+
+    figure.suptitle(title or f"2D t-SNE real vs synthetic by {category}")
+    figure.legend(handles=legend_handles, loc="upper center", ncol=2, frameon=False, bbox_to_anchor=(0.5, 0.97))
+    figure.tight_layout(rect=(0.0, 0.0, 1.0, 0.93))
+    return figure, axes
+
+
 def summarize_windows(
     *,
     window_type: str,
@@ -1070,8 +1213,19 @@ def run_frequency_domain_tsne_all_captures(
             "capture_domain": str(capture_result["capture_row"]["domain"]),
             "user_id": int(capture_result["capture_row"]["user_id"]),
             "tag_number": int(capture_result["capture_row"]["tag_number"]),
-            "take_id": None if pd.isna(capture_result["capture_row"].get("take_id")) else str(capture_result["capture_row"].get("take_id")),
+            "take_id": None
+            if pd.isna(capture_result["capture_row"].get("take_id"))
+            else str(capture_result["capture_row"].get("take_id")),
             "clip_id": str(capture_result["capture_row"]["clip_id"]),
+            "emotion": None
+            if pd.isna(capture_result["capture_row"].get("emotion"))
+            else str(capture_result["capture_row"].get("emotion")),
+            "modality": None
+            if pd.isna(capture_result["capture_row"].get("modality"))
+            else str(capture_result["capture_row"].get("modality")),
+            "stimulus": None
+            if pd.isna(capture_result["capture_row"].get("stimulus"))
+            else str(capture_result["capture_row"].get("stimulus")),
         }
         metadata_frames.extend(
             [
@@ -1153,6 +1307,26 @@ def run_frequency_domain_tsne_all_captures(
     if show:
         plt.show()
 
+    class_highlight_figures: dict[str, plt.Figure] = {}
+    class_highlight_axes: dict[str, np.ndarray] = {}
+    for category_name in ("emotion", "modality", "stimulus"):
+        if category_name not in embedding_df.columns:
+            continue
+        category_values = _ordered_non_null_category_values(embedding_df[category_name])
+        if len(category_values) == 0:
+            continue
+
+        class_figure, class_axes = plot_tsne_class_highlight_grid(
+            embedding_df,
+            category=category_name,
+            title=f"2D t-SNE real vs synthetic by {category_name}",
+            point_size=18.0,
+        )
+        class_highlight_figures[category_name] = class_figure
+        class_highlight_axes[category_name] = class_axes
+        if show:
+            plt.show()
+
     capture_summary_df = pd.DataFrame(capture_summary_rows)
     failed_capture_df = pd.DataFrame(failed_capture_rows)
     aggregate_summary_df = pd.DataFrame(
@@ -1186,6 +1360,8 @@ def run_frequency_domain_tsne_all_captures(
         "frequencies_hz": reference_frequencies_hz,
         "figure": figure,
         "axis": axis,
+        "class_highlight_figures": class_highlight_figures,
+        "class_highlight_axes": class_highlight_axes,
         "selected_capture_df": capture_frame,
     }
 
