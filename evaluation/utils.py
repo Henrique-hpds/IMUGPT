@@ -243,7 +243,7 @@ def plot_real_virtual_capture(
 	configure_capture_table_display()
  
 	if signal_group not in CHANNEL_GROUP_TO_LABELS:
-		raise ValueError("SIGNAL_GROUP deve ser 'acc' ou 'gyro'.")
+		raise ValueError("SIGNAL_GROUP must be 'acc' or 'gyro'.")
 
 	capture_row = select_capture_row(captures_df, domain=domain, user_id=user_id, tag_number=tag_number, take_id=take_id)
 
@@ -284,11 +284,7 @@ def plot_real_virtual_capture(
 		frequency_summary = real_plot_bundle["summary"]
 		real_plot_title = "Real IMU undersampled"
 
-	capture_metadata = resolve_capture_metadata(
-		domain=str(capture_row["domain"]),
-		user_id=int(capture_row["user_id"]),
-		tag_number=int(capture_row["tag_number"]),
-	)
+	capture_metadata = resolve_capture_metadata(domain=str(capture_row["domain"]), user_id=int(capture_row["user_id"]), tag_number=int(capture_row["tag_number"]))
 	summary_row = {
 		"clip_id": capture_row["clip_id"],
 		"domain": capture_row["domain"],
@@ -383,9 +379,9 @@ def plot_real_virtual_capture(
 			)
    
 			axes[2, component_index].set_ylim(y_min, y_max)
-			axes[2, component_index].set_xlabel("Tempo (s)")
+			axes[2, component_index].set_xlabel("Time (s)")
 		else:
-			axes[1, component_index].set_xlabel("Tempo (s)")
+			axes[1, component_index].set_xlabel("Time (s)")
 
 	if show:
 		plt.show()
@@ -393,110 +389,93 @@ def plot_real_virtual_capture(
 	return summary_df, fig
 
 
-def listar_opcoes(dataset_root: Path | str) -> dict[str, dict[int, list[int]]]:
+def list_capture_options(dataset_root: Path | str) -> dict[str, dict[int, list[int]]]:
 	dataset_root = Path(dataset_root)
-	dominios = sorted([p.name for p in dataset_root.iterdir() if p.is_dir()])
-	opcoes: dict[str, dict[int, list[int]]] = {}
-	for dominio in dominios:
-		dominio_dir = dataset_root / dominio
-		users = sorted(
-			int(m.group(1))
-			for p in dominio_dir.iterdir()
-			if p.is_dir() and (m := re.match(r"^User(\d+)$", p.name, flags=re.IGNORECASE))
-		)
-		opcoes[dominio] = {}
+	domains = sorted([path.name for path in dataset_root.iterdir() if path.is_dir()])
+	options: dict[str, dict[int, list[int]]] = {}
+	for domain in domains:
+		domain_dir = dataset_root / domain
+		users = sorted(int(match.group(1)) for path in domain_dir.iterdir() if path.is_dir() and (match := re.match(r"^User(\d+)$", path.name, flags=re.IGNORECASE)))
+		options[domain] = {}
 		for user in users:
-			user_dir = dominio_dir / f"User{user}"
-			tags = sorted(
-				int(m.group(1))
-				for p in user_dir.iterdir()
-				if p.is_dir() and (m := re.match(r"^Tag(\d+)$", p.name, flags=re.IGNORECASE))
-			)
-			opcoes[dominio][user] = tags
-	return opcoes
+			user_dir = domain_dir / f"User{user}"
+			tags = sorted(int(match.group(1)) for path in user_dir.iterdir() if path.is_dir() and (match := re.match(r"^Tag(\d+)$", path.name, flags=re.IGNORECASE)))
+			options[domain][user] = tags
+	return options
 
 
-def caminho_csv(dataset_root: Path | str, dominio: str, user: int, tag: int) -> Path:
+def resolve_csv_path(dataset_root: Path | str, domain: str, user: int, tag: int) -> Path:
 	dataset_root = Path(dataset_root)
-	tag_dir = dataset_root / dominio / f"User{user}" / f"Tag{tag}"
-	esperado = tag_dir / f"ESP_{user}_{tag}.csv"
-	if esperado.exists():
-		return esperado
+	tag_dir = dataset_root / domain / f"User{user}" / f"Tag{tag}"
+	expected_path = tag_dir / f"ESP_{user}_{tag}.csv"
+	if expected_path.exists():
+		return expected_path
 
-	candidatos = sorted(tag_dir.glob("ESP*.csv"))
-	if not candidatos:
-		raise FileNotFoundError(f"Nenhum CSV encontrado em: {tag_dir}")
-	return candidatos[0]
+	candidate_paths = sorted(tag_dir.glob("ESP*.csv"))
+	if not candidate_paths:
+		raise FileNotFoundError(f"No CSV found in: {tag_dir}")
+	return candidate_paths[0]
 
 
-def prepare_robotemotions_capture(
-	csv_path: Path | str,
-	*,
-	sensor_order: Sequence[str],
-	selected_sensors: Sequence[str],
-	start_idx: int = 0,
-	end_idx: Optional[int] = None,
-) -> dict[str, Any]:
+def prepare_robotemotions_capture(csv_path: Path | str, sensor_order: Sequence[str], selected_sensors: Sequence[str], start_idx: int = 0, end_idx: Optional[int] = None) -> dict[str, Any]:
 	df = pd.read_csv(csv_path)
 
 	timestamp_cols = [c for c in df.columns if c.lower().startswith("timestamp")]
 	if not timestamp_cols:
-		raise ValueError("Nao encontrei coluna de timestamp no CSV.")
+		raise ValueError("No timestamp column found in the CSV.")
 
-	t = pd.to_numeric(df[timestamp_cols[0]], errors="coerce")
-	t = (t - t.iloc[0]) / 1000.0
+	timestamps_sec = pd.to_numeric(df[timestamp_cols[0]], errors="coerce")
+	timestamps_sec = (timestamps_sec - timestamps_sec.iloc[0]) / 1000.0
 
-	sensor_to_idx = {nome: i + 1 for i, nome in enumerate(sensor_order)}
-	invalidos = [s for s in selected_sensors if s not in sensor_to_idx]
-	if invalidos:
-		raise ValueError(
-			f"Sensores invalidos: {invalidos}. Validos: {list(sensor_to_idx.keys())}"
-		)
+	sensor_to_index = {sensor_name: index + 1 for index, sensor_name in enumerate(sensor_order)}
+	invalid_sensors = [sensor_name for sensor_name in selected_sensors if sensor_name not in sensor_to_index]
+	if invalid_sensors:
+		raise ValueError(f"Invalid sensors: {invalid_sensors}. Valid options: {list(sensor_to_index.keys())}")
 
 	if end_idx is None:
-		view = slice(start_idx, None)
+		sample_slice = slice(start_idx, None)
 	else:
-		view = slice(start_idx, end_idx)
+		sample_slice = slice(start_idx, end_idx)
 
 	return {
 		"df": df,
-		"t": t,
-		"view": view,
-		"sensor_to_idx": sensor_to_idx,
+		"timestamps_sec": timestamps_sec,
+		"sample_slice": sample_slice,
+		"sensor_to_index": sensor_to_index,
 	}
 
 
 def plot_robotemotions_imus_csv(
 	*,
 	dataset_root: Path | str,
-	dominio: str,
+	domain: str,
 	user: int,
 	tag: int,
 	sensor_order: Sequence[str],
-	sensores_selecionados: Sequence[str],
-	modalidades: Sequence[str] = ("acc", "gyro"),
+	selected_sensors: Sequence[str],
+	modalities: Sequence[str] = ("acc", "gyro"),
 	start_idx: int = 0,
 	end_idx: Optional[int] = None,
 	show: bool = True,
 ) -> tuple[Path, pd.DataFrame, plt.Figure]:
-	csv_path = caminho_csv(dataset_root, dominio, user, tag)
+	csv_path = resolve_csv_path(dataset_root, domain, user, tag)
 	prepared = prepare_robotemotions_capture(
 		csv_path,
 		sensor_order=sensor_order,
-		selected_sensors=sensores_selecionados,
+		selected_sensors=selected_sensors,
 		start_idx=start_idx,
 		end_idx=end_idx,
 	)
 
 	df = prepared["df"]
-	t = prepared["t"]
-	view = prepared["view"]
-	sensor_to_idx = prepared["sensor_to_idx"]
+	timestamps_sec = prepared["timestamps_sec"]
+	sample_slice = prepared["sample_slice"]
+	sensor_to_index = prepared["sensor_to_index"]
 
-	modalidades_validas = {"acc": ("X", "Y", "Z"), "gyro": ("X", "Y", "Z")}
+	valid_modalities = {"acc": ("X", "Y", "Z"), "gyro": ("X", "Y", "Z")}
 
-	n_rows = len(sensores_selecionados)
-	n_cols = len(modalidades)
+	n_rows = len(selected_sensors)
+	n_cols = len(modalities)
 	fig, axes = plt.subplots(
 		n_rows,
 		n_cols,
@@ -504,34 +483,39 @@ def plot_robotemotions_imus_csv(
 		squeeze=False,
 	)
 
-	for i, sensor_nome in enumerate(sensores_selecionados):
-		sensor_idx = sensor_to_idx[sensor_nome]
+	for row_index, sensor_name in enumerate(selected_sensors):
+		sensor_idx = sensor_to_index[sensor_name]
 
-		for j, mod in enumerate(modalidades):
-			ax = axes[i, j]
-			if mod not in modalidades_validas:
-				ax.set_title(f"{sensor_nome} | invalid modality: {mod}")
+		for column_index, modality in enumerate(modalities):
+			ax = axes[row_index, column_index]
+			if modality not in valid_modalities:
+				ax.set_title(f"{sensor_name} | invalid modality: {modality}")
 				ax.axis("off")
 				continue
 
-			axes_names = modalidades_validas[mod]
+			axis_labels = valid_modalities[modality]
 			plotted = False
-			for eixo in axes_names:
-				col = f"{mod}_{eixo}_{sensor_idx}"
-				if col in df.columns:
-					y = pd.to_numeric(df[col], errors="coerce")
-					ax.plot(t.iloc[view], y.iloc[view], label=f"{mod}_{eixo}", linewidth=1.0)
+			for axis_label in axis_labels:
+				column_name = f"{modality}_{axis_label}_{sensor_idx}"
+				if column_name in df.columns:
+					signal_values = pd.to_numeric(df[column_name], errors="coerce")
+					ax.plot(
+						timestamps_sec.iloc[sample_slice],
+						signal_values.iloc[sample_slice],
+						label=f"{modality}_{axis_label}",
+						linewidth=1.0,
+					)
 					plotted = True
 
-			ax.set_title(f"{sensor_nome} (idx={sensor_idx}) | {mod}")
-			ax.set_xlabel("tempo (s)")
-			ax.set_ylabel("valor bruto")
+			ax.set_title(f"{sensor_name} (idx={sensor_idx}) | {modality}")
+			ax.set_xlabel("time (s)")
+			ax.set_ylabel("raw value")
 			ax.grid(alpha=0.25)
 
 			if plotted:
 				ax.legend(loc="upper right", ncol=3, fontsize=8)
 			else:
-				ax.text(0.5, 0.5, "Sem colunas para este sensor/modalidade", ha="center", va="center")
+				ax.text(0.5, 0.5, "No columns found for this sensor/modality", ha="center", va="center")
 
 	plt.tight_layout()
 	if show:
