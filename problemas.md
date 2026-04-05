@@ -49,6 +49,6 @@
     - Gyro está ruim em muitas capturas
         - Bug do pipeline ou limitação do método?
         - Será que a regulação de alinhamento de gravidade não está sufocando o gyro?
-        - Na hotra de treinar o classificador, não usar gyro, calcular angulo de Eurer, como mostra a tese
+        - Na hora de treinar o classificador, não usar gyro, calcular angulo de Euler, como mostra a tese
     - O modelo físico não parece capturar muito bem movimentos muito rápidos
     - Na hora de medir métricas, calcular melhor, pior, média e desvio padrão 
