@@ -30,7 +30,6 @@ from pose_module.processing.quality import merge_virtual_imu_quality_reports
 from .extractor import (
     RobotEmotionsClipRecord,
     RobotEmotionsExtractor,
-    resolve_clip_output_dir,
     resolve_pose_output_dir,
 )
 
@@ -441,9 +440,9 @@ def _resolve_record_real_imu_npz_path(
     output_root: Path,
 ) -> Path:
     artifact_path = dict(manifest_entry.get("artifacts", {})).get("imu_npz_path")
-    if artifact_path not in (None, ""):
-        return Path(str(artifact_path))
-    return resolve_clip_output_dir(output_root, record) / "imu.npz"
+    if artifact_path in (None, ""):
+        raise ValueError(f"Missing input artifact imu_npz_path for clip {record.clip_id}")
+    return Path(str(artifact_path))
 
 
 def _resolve_subject_transform_path(output_root: Path, record: RobotEmotionsClipRecord) -> Path:
@@ -464,6 +463,7 @@ def _build_virtual_imu_manifest_entry(
     virtual_imu_sequence = pipeline_result["virtual_imu_sequence"]
     quality_report = dict(pipeline_result["quality_report"])
     artifacts = dict(pipeline_result["artifacts"])
+    input_artifacts = dict(manifest_entry.get("artifacts", {}))
     return {
         "clip_id": str(record.clip_id),
         "dataset": "RobotEmotions",
@@ -475,7 +475,7 @@ def _build_virtual_imu_manifest_entry(
         "labels": dict(manifest_entry.get("labels", {})),
         "source": dict(manifest_entry.get("source", {})),
         "video": dict(manifest_entry.get("video", {})),
-        "input_artifacts": dict(manifest_entry.get("artifacts", {})),
+        "input_artifacts": input_artifacts,
         "pose3d": {
             "fps": None if pose_sequence_3d.fps is None else float(pose_sequence_3d.fps),
             "fps_original": (

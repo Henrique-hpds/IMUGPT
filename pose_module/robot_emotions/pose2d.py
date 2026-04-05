@@ -102,6 +102,7 @@ def _build_pose_manifest_entry(
     pose_sequence = pipeline_result["pose_sequence"]
     quality_report = dict(pipeline_result["quality_report"])
     artifacts = dict(pipeline_result["artifacts"])
+    input_artifacts = dict(manifest_entry.get("artifacts", {}))
     return {
         "clip_id": str(record.clip_id),
         "dataset": "RobotEmotions",
@@ -113,7 +114,7 @@ def _build_pose_manifest_entry(
         "labels": dict(manifest_entry.get("labels", {})),
         "source": dict(manifest_entry.get("source", {})),
         "video": dict(manifest_entry.get("video", {})),
-        "input_artifacts": dict(manifest_entry.get("artifacts", {})),
+        "input_artifacts": input_artifacts,
         "pose2d": {
             "fps": None if pose_sequence.fps is None else float(pose_sequence.fps),
             "fps_original": None if pose_sequence.fps_original is None else float(pose_sequence.fps_original),

@@ -188,8 +188,13 @@ PROTOCOL_ROWS: list[dict[str, Any]] = [
 
 PROTOCOL_BY_TAG: dict[str, dict[int, dict[str, Any]]] = {"10ms": {}, "30ms": {}}
 for _entry in PROTOCOL_ROWS:
-    PROTOCOL_BY_TAG["10ms"][int(_entry["tag_10ms"])] = _entry
-    PROTOCOL_BY_TAG["30ms"][int(_entry["tag_30ms"])] = _entry
+    tag_10ms = _entry.get("tag_10ms")
+    if tag_10ms is not None:
+        PROTOCOL_BY_TAG["10ms"][int(tag_10ms)] = _entry
+
+    tag_30ms = _entry.get("tag_30ms")
+    if tag_30ms is not None:
+        PROTOCOL_BY_TAG["30ms"][int(tag_30ms)] = _entry
 del _entry
 
 CHANNEL_AXIS_ORDER: tuple[str, ...] = ("ax", "ay", "az", "gx", "gy", "gz")
