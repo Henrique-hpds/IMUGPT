@@ -8,6 +8,11 @@ import pandas as pd
 from sklearn.model_selection import GroupKFold, GroupShuffleSplit
 
 try:
+    from tqdm.auto import tqdm
+except ImportError:  # pragma: no cover - optional dependency guard
+    tqdm = None
+
+try:
     from sklearn.model_selection import StratifiedGroupKFold
 except ImportError:  # pragma: no cover - depends on sklearn version
     StratifiedGroupKFold = None
@@ -455,6 +460,7 @@ def run_experiment_suite(
 ) -> dict[str, Any]:
     selected_experiments = list(EXPERIMENT_SPECS.keys()) if experiment_names is None else [str(name) for name in experiment_names]
     resolved_split_config = SplitConfig() if split_config is None else split_config
+    resolved_training_config = TrainingConfig() if training_config is None else training_config
     splits = build_subject_group_splits(dataset_bundle["metadata"], config=resolved_split_config)
     support_report = build_support_report(
         dataset_bundle["metadata"],
@@ -464,18 +470,32 @@ def run_experiment_suite(
     )
     scored_class_ids = build_scored_class_ids(support_report, head_names=PRIMARY_HEADS)
     results = []
-    for experiment_name in selected_experiments:
-        for split in splits:
-            results.append(
-                run_single_experiment(
-                    dataset_bundle,
-                    experiment_name=experiment_name,
-                    split=split,
-                    model_config=model_config,
-                    training_config=training_config,
-                    scored_class_ids=scored_class_ids,
+    total_runs = int(len(selected_experiments) * len(splits))
+    suite_progress = None
+    if bool(resolved_training_config.show_progress) and tqdm is not None:
+        suite_progress = tqdm(total=total_runs, desc="Experiment suite", unit="fold")
+
+    try:
+        for experiment_name in selected_experiments:
+            for split in splits:
+                if suite_progress is not None:
+                    current_fold = int(split.get("split_id", 0)) + 1
+                    suite_progress.set_postfix(experiment=experiment_name, fold=f"{current_fold}/{len(splits)}")
+                results.append(
+                    run_single_experiment(
+                        dataset_bundle,
+                        experiment_name=experiment_name,
+                        split=split,
+                        model_config=model_config,
+                        training_config=resolved_training_config,
+                        scored_class_ids=scored_class_ids,
+                    )
                 )
-            )
+                if suite_progress is not None:
+                    suite_progress.update(1)
+    finally:
+        if suite_progress is not None:
+            suite_progress.close()
 
     results_frame = suite_results_frame(results)
     oof_reports = {

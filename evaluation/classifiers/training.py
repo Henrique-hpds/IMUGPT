@@ -9,6 +9,11 @@ import numpy as np
 import pandas as pd
 from sklearn.utils.class_weight import compute_class_weight
 
+try:
+    from tqdm.auto import tqdm
+except ImportError:  # pragma: no cover - optional dependency guard
+    tqdm = None
+
 from .metrics import compute_multitask_metrics
 from .model import MultitaskFusionClassifier, ensure_torch_available
 
@@ -79,6 +84,7 @@ class TrainingConfig:
     selection_head: str = "emotion"
     sampler_power: float = 1.0
     num_workers: int = 0
+    show_progress: bool = True
 
 
 class WindowTensorDataset(Dataset):
@@ -510,13 +516,28 @@ def train_multitask_model(
     best_metric = -np.inf
     history: list[dict[str, Any]] = []
 
-    for epoch_index in range(int(training_config.max_epochs)):
+    epoch_indices = range(int(training_config.max_epochs))
+    epoch_iterator = epoch_indices
+    if bool(training_config.show_progress) and tqdm is not None:
+        epoch_iterator = tqdm(epoch_indices, total=len(epoch_indices), desc="Training", unit="epoch")
+
+    for epoch_index in epoch_iterator:
         model.train()
         running_loss = 0.0
         num_batches = 0
         domain_iterator = None if domain_loader is None else cycle(domain_loader)
         focal_heads = {str(head_name) for head_name in training_config.cb_focal_heads}
-        for classification_batch in classification_loader:
+        batch_iterator = classification_loader
+        if bool(training_config.show_progress) and tqdm is not None:
+            batch_iterator = tqdm(
+                classification_loader,
+                total=len(classification_loader),
+                desc=f"Epoch {int(epoch_index) + 1}/{int(training_config.max_epochs)}",
+                unit="batch",
+                leave=False,
+            )
+
+        for classification_batch in batch_iterator:
             prepared = _prepare_batch(classification_batch, device)
             optimizer.zero_grad(set_to_none=True)
             outputs = model(
@@ -578,6 +599,11 @@ def train_multitask_model(
 
             running_loss += float(loss.item())
             num_batches += 1
+            if bool(training_config.show_progress) and tqdm is not None:
+                batch_iterator.set_postfix(train_loss=f"{running_loss / max(1, num_batches):.4f}")
+
+        if bool(training_config.show_progress) and tqdm is not None:
+            batch_iterator.close()
 
         val_report = _gather_predictions(
             model,
@@ -604,6 +630,14 @@ def train_multitask_model(
                 "val_global_score_macro_f1_mean": float(val_report["metrics"].get("global_score_macro_f1_mean") or 0.0),
             }
         )
+        if bool(training_config.show_progress) and tqdm is not None:
+            epoch_iterator.set_postfix(
+                train_loss=f"{running_loss / max(1, num_batches):.4f}",
+                val_metric=f"{float(val_metric_value):.4f}",
+            )
+
+    if bool(training_config.show_progress) and tqdm is not None:
+        epoch_iterator.close()
 
     model.load_state_dict(best_state)
     final_train_report = _gather_predictions(
