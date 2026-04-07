@@ -5,7 +5,6 @@ from .cleaner2d import clean_pose_sequence2d
 from .lower_limb_stabilizer import run_lower_limb_stabilizer
 from .metric_normalizer import run_metric_normalizer
 from .root_estimator import run_root_trajectory_estimator
-from .sensor_frame_estimation import estimate_sensor_frame_alignment
 from .quality import (
     merge_metric_pose_quality_reports,
     merge_motionbert_quality_reports,
@@ -15,6 +14,11 @@ from .quality import (
     merge_virtual_imu_quality_reports,
 )
 from .skeleton_mapper import map_pose_sequence_to_imugpt22
+
+try:  # pragma: no cover - depends on optional scipy dependency
+    from .sensor_frame_estimation import estimate_sensor_frame_alignment
+except ImportError:  # pragma: no cover - keep lightweight modules importable without scipy
+    estimate_sensor_frame_alignment = None  # type: ignore[assignment]
 
 __all__ = [
     "clean_pose_sequence2d",
@@ -31,3 +35,6 @@ __all__ = [
     "merge_pose3d_quality_reports",
     "merge_virtual_imu_quality_reports",
 ]
+
+if estimate_sensor_frame_alignment is not None:
+    __all__.append("estimate_sensor_frame_alignment")

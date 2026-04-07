@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 import copy
+from itertools import cycle
 from typing import Any, Mapping, Sequence
 
 import numpy as np
@@ -58,19 +59,24 @@ class ModelConfig:
 @dataclass(frozen=True)
 class TrainingConfig:
     batch_size: int = 32
+    classification_batch_size: int | None = None
+    domain_batch_size: int | None = None
     max_epochs: int = 20
     learning_rate: float = 1e-3
     weight_decay: float = 1e-4
     label_smoothing: float = 0.05
     grad_clip_norm: float = 1.0
     use_cb_focal: bool = False
+    cb_focal_heads: tuple[str, ...] = ("emotion", "stimulus")
     focal_gamma: float = 2.0
     device: str = "auto"
+    grl_lambda: float = 1.0
     domain_loss_weight: float = 0.1
-    flat_tag_loss_weight: float = 0.1
+    flat_tag_loss_weight: float = 0.0
     emotion_loss_weight: float = 1.0
-    modality_loss_weight: float = 1.0
+    modality_loss_weight: float = 0.5
     stimulus_loss_weight: float = 1.0
+    selection_head: str = "emotion"
     sampler_power: float = 1.0
     num_workers: int = 0
 
@@ -135,14 +141,13 @@ def _compute_class_weights(labels: np.ndarray, num_classes: int) -> torch.Tensor
     return torch.tensor(weights, dtype=torch.float32)
 
 
-def _balanced_sample_weights(flat_labels: np.ndarray, classification_mask: np.ndarray, *, power: float = 1.0) -> np.ndarray:
-    labels = np.asarray(flat_labels, dtype=np.int64)
-    supervised_mask = np.asarray(classification_mask, dtype=np.float32) > 0.0
-    counts = pd.Series(labels[supervised_mask]).value_counts().to_dict() if int(np.count_nonzero(supervised_mask)) > 0 else {}
-    weights = np.ones(labels.shape[0], dtype=np.float32)
-    for sample_index, label in enumerate(labels.tolist()):
-        if not supervised_mask[sample_index]:
-            continue
+def _balanced_sample_weights(labels: np.ndarray, *, power: float = 1.0) -> np.ndarray:
+    label_array = np.asarray(labels, dtype=np.int64)
+    if label_array.size == 0:
+        return np.zeros(0, dtype=np.float32)
+    counts = pd.Series(label_array).value_counts().to_dict()
+    weights = np.ones(label_array.shape[0], dtype=np.float32)
+    for sample_index, label in enumerate(label_array.tolist()):
         label_count = max(1, int(counts.get(int(label), 1)))
         weights[sample_index] = float((1.0 / label_count) ** float(power))
     return weights
@@ -221,6 +226,26 @@ def infer_model_shapes(arrays: Mapping[str, Any]) -> dict[str, int]:
     }
 
 
+def _slice_arrays(arrays: Mapping[str, Any], indices: np.ndarray) -> dict[str, Any]:
+    index_array = np.asarray(indices, dtype=np.int64)
+    return {
+        "pose": np.asarray(arrays["pose"], dtype=np.float32)[index_array],
+        "imu": np.asarray(arrays["imu"], dtype=np.float32)[index_array],
+        "quality": np.asarray(arrays["quality"], dtype=np.float32)[index_array],
+        "domain": np.asarray(arrays["domain"], dtype=np.int64)[index_array],
+        "classification_mask": np.asarray(arrays["classification_mask"], dtype=np.float32)[index_array],
+        "targets": {
+            head_name: np.asarray(values, dtype=np.int64)[index_array]
+            for head_name, values in dict(arrays["targets"]).items()
+        },
+        "metadata": (
+            arrays["metadata"].iloc[index_array].reset_index(drop=True)
+            if "metadata" in arrays and arrays["metadata"] is not None
+            else None
+        ),
+    }
+
+
 def build_model(
     *,
     arrays: Mapping[str, Any],
@@ -251,14 +276,63 @@ def build_model(
     )
 
 
-def _build_sampler(arrays: Mapping[str, Any], training_config: TrainingConfig) -> WeightedRandomSampler:
+def _build_sampler(labels: np.ndarray, *, power: float) -> WeightedRandomSampler:
     ensure_training_dependencies()
-    weights = _balanced_sample_weights(
-        np.asarray(arrays["targets"]["flat_tag"], dtype=np.int64),
-        np.asarray(arrays["classification_mask"], dtype=np.float32),
+    weights = _balanced_sample_weights(np.asarray(labels, dtype=np.int64), power=float(power))
+    return WeightedRandomSampler(torch.from_numpy(weights), num_samples=len(weights), replacement=True)
+
+
+def _build_classification_arrays(arrays: Mapping[str, Any]) -> dict[str, Any]:
+    supervised_indices = np.flatnonzero(np.asarray(arrays["classification_mask"], dtype=np.float32) > 0.0)
+    if supervised_indices.size == 0:
+        raise ValueError("Classification training requires at least one supervised sample.")
+    return _slice_arrays(arrays, supervised_indices)
+
+
+def _build_classification_loader(
+    arrays: Mapping[str, Any],
+    training_config: TrainingConfig,
+) -> tuple[dict[str, Any], DataLoader]:
+    classification_arrays = _build_classification_arrays(arrays)
+    dataset = WindowTensorDataset(classification_arrays)
+    sampler = _build_sampler(
+        np.asarray(classification_arrays["targets"]["flat_tag"], dtype=np.int64),
         power=float(training_config.sampler_power),
     )
-    return WeightedRandomSampler(torch.from_numpy(weights), num_samples=len(weights), replacement=True)
+    batch_size = int(
+        training_config.batch_size
+        if training_config.classification_batch_size is None
+        else training_config.classification_batch_size
+    )
+    loader = DataLoader(
+        dataset,
+        batch_size=batch_size,
+        sampler=sampler,
+        num_workers=int(training_config.num_workers),
+    )
+    return classification_arrays, loader
+
+
+def _build_domain_loader(
+    arrays: Mapping[str, Any],
+    training_config: TrainingConfig,
+) -> DataLoader:
+    dataset = WindowTensorDataset(arrays)
+    sampler = _build_sampler(
+        np.asarray(arrays["domain"], dtype=np.int64),
+        power=float(training_config.sampler_power),
+    )
+    batch_size = int(
+        training_config.batch_size
+        if training_config.domain_batch_size is None
+        else training_config.domain_batch_size
+    )
+    return DataLoader(
+        dataset,
+        batch_size=batch_size,
+        sampler=sampler,
+        num_workers=int(training_config.num_workers),
+    )
 
 
 def _prepare_batch(batch: Mapping[str, torch.Tensor], device: torch.device) -> dict[str, torch.Tensor]:
@@ -275,6 +349,8 @@ def _gather_predictions(
     *,
     batch_size: int,
     device: torch.device,
+    scored_class_ids: Mapping[str, Sequence[int]] | None = None,
+    filter_unsupervised: bool = True,
 ) -> dict[str, Any]:
     ensure_training_dependencies()
     dataset = WindowTensorDataset(arrays)
@@ -315,15 +391,37 @@ def _gather_predictions(
         for head_name, head_blocks in probabilities.items()
         if len(head_blocks) > 0
     }
+    supervised_mask = np.asarray(arrays["classification_mask"], dtype=np.float32) > 0.0
+    evaluation_mask = supervised_mask if bool(filter_unsupervised) else np.ones_like(supervised_mask, dtype=bool)
+    filtered_targets = {
+        head_name: values[evaluation_mask]
+        for head_name, values in targets.items()
+        if head_name in merged_predictions
+    }
+    filtered_predictions = {
+        head_name: values[evaluation_mask]
+        for head_name, values in merged_predictions.items()
+    }
+    filtered_probabilities = {
+        head_name: values[evaluation_mask]
+        for head_name, values in merged_probabilities.items()
+    }
     return {
-        "targets": targets,
-        "predictions": merged_predictions,
-        "probabilities": merged_probabilities,
+        "targets": filtered_targets,
+        "predictions": filtered_predictions,
+        "probabilities": filtered_probabilities,
+        "metadata": (
+            arrays["metadata"].iloc[np.flatnonzero(evaluation_mask)].reset_index(drop=True)
+            if "metadata" in arrays and arrays["metadata"] is not None
+            else None
+        ),
+        "classification_mask": evaluation_mask.astype(bool),
         "metrics": compute_multitask_metrics(
-            y_true=targets,
-            y_pred=merged_predictions,
-            probabilities=merged_probabilities,
+            y_true=filtered_targets,
+            y_pred=filtered_predictions,
+            probabilities=filtered_probabilities,
             label_encoders=label_encoders,
+            scored_class_ids=scored_class_ids,
         ),
     }
 
@@ -335,6 +433,8 @@ def evaluate_multitask_model(
     *,
     batch_size: int,
     device: torch.device,
+    scored_class_ids: Mapping[str, Sequence[int]] | None = None,
+    filter_unsupervised: bool = True,
 ) -> dict[str, Any]:
     ensure_training_dependencies()
     return _gather_predictions(
@@ -343,7 +443,23 @@ def evaluate_multitask_model(
         label_encoders,
         batch_size=batch_size,
         device=device,
+        scored_class_ids=scored_class_ids,
+        filter_unsupervised=filter_unsupervised,
     )
+
+
+def _resolve_selection_metric(
+    report: Mapping[str, Any],
+    *,
+    selection_head: str,
+) -> float:
+    metrics = dict(report.get("metrics", {}))
+    per_head = dict(metrics.get("per_head", {}))
+    if selection_head in per_head:
+        head_metrics = per_head[selection_head]
+        return float(head_metrics.get("supported_macro_f1", head_metrics.get("macro_f1", 0.0)))
+    global_metric = metrics.get("global_score_macro_f1_mean")
+    return 0.0 if global_metric is None else float(global_metric)
 
 
 def train_multitask_model(
@@ -356,6 +472,7 @@ def train_multitask_model(
     use_pose_branch: bool,
     use_imu_branch: bool,
     use_domain_head: bool,
+    scored_class_ids: Mapping[str, Sequence[int]] | None = None,
 ) -> dict[str, Any]:
     ensure_training_dependencies()
     device = _resolve_device(training_config.device)
@@ -368,27 +485,21 @@ def train_multitask_model(
         use_domain_head=use_domain_head,
     ).to(device)
 
-    train_dataset = WindowTensorDataset(train_arrays)
-    train_loader = DataLoader(
-        train_dataset,
-        batch_size=int(training_config.batch_size),
-        sampler=_build_sampler(train_arrays, training_config),
-        num_workers=int(training_config.num_workers),
-    )
+    classification_train_arrays, classification_loader = _build_classification_loader(train_arrays, training_config)
+    domain_loader = _build_domain_loader(train_arrays, training_config) if bool(use_domain_head) else None
     optimizer = torch.optim.AdamW(
         model.parameters(),
         lr=float(training_config.learning_rate),
         weight_decay=float(training_config.weight_decay),
     )
 
-    supervised_mask = np.asarray(train_arrays["classification_mask"], dtype=np.float32) > 0.0
     class_weights = {
         head_name: _compute_class_weights(
-            np.asarray(train_arrays["targets"][head_name], dtype=np.int64)[supervised_mask],
+            np.asarray(classification_train_arrays["targets"][head_name], dtype=np.int64),
             len(label_encoders[head_name]["class_names"]),
         ).to(device)
         for head_name in ("emotion", "modality", "stimulus", "flat_tag")
-        if head_name in train_arrays["targets"]
+        if head_name in classification_train_arrays["targets"]
     }
     domain_class_weights = _compute_class_weights(
         np.asarray(train_arrays["domain"], dtype=np.int64),
@@ -403,51 +514,57 @@ def train_multitask_model(
         model.train()
         running_loss = 0.0
         num_batches = 0
-        for batch in train_loader:
-            prepared = _prepare_batch(batch, device)
+        domain_iterator = None if domain_loader is None else cycle(domain_loader)
+        focal_heads = {str(head_name) for head_name in training_config.cb_focal_heads}
+        for classification_batch in classification_loader:
+            prepared = _prepare_batch(classification_batch, device)
             optimizer.zero_grad(set_to_none=True)
             outputs = model(
                 pose_inputs=prepared["pose"],
                 imu_inputs=prepared["imu"],
                 quality_inputs=prepared["quality"],
-                domain_lambda=float(training_config.domain_loss_weight),
+                domain_lambda=0.0,
             )
 
-            classification_mask = prepared["classification_mask"] > 0.0
             loss = torch.zeros((), device=device)
-            if bool(torch.any(classification_mask)):
-                for head_name, head_weight in (
-                    ("emotion", training_config.emotion_loss_weight),
-                    ("modality", training_config.modality_loss_weight),
-                    ("stimulus", training_config.stimulus_loss_weight),
-                ):
-                    masked_logits = outputs[HEAD_TO_LOGIT_KEY[head_name]][classification_mask]
-                    masked_targets = prepared[f"{head_name}_target"][classification_mask]
-                    loss = loss + float(head_weight) * _head_loss(
-                        masked_logits,
-                        masked_targets,
-                        class_weights=class_weights[head_name],
-                        label_smoothing=float(training_config.label_smoothing),
-                        use_cb_focal=bool(training_config.use_cb_focal),
-                        focal_gamma=float(training_config.focal_gamma),
-                    )
+            for head_name, head_weight in (
+                ("emotion", training_config.emotion_loss_weight),
+                ("modality", training_config.modality_loss_weight),
+                ("stimulus", training_config.stimulus_loss_weight),
+            ):
+                if float(head_weight) <= 0.0:
+                    continue
+                loss = loss + float(head_weight) * _head_loss(
+                    outputs[HEAD_TO_LOGIT_KEY[head_name]],
+                    prepared[f"{head_name}_target"],
+                    class_weights=class_weights[head_name],
+                    label_smoothing=float(training_config.label_smoothing),
+                    use_cb_focal=bool(training_config.use_cb_focal and head_name in focal_heads),
+                    focal_gamma=float(training_config.focal_gamma),
+                )
 
-                if "flat_tag_logits" in outputs and "flat_tag" in class_weights:
-                    masked_logits = outputs["flat_tag_logits"][classification_mask]
-                    masked_targets = prepared["flat_tag_target"][classification_mask]
-                    loss = loss + float(training_config.flat_tag_loss_weight) * _head_loss(
-                        masked_logits,
-                        masked_targets,
-                        class_weights=class_weights["flat_tag"],
-                        label_smoothing=float(training_config.label_smoothing),
-                        use_cb_focal=bool(training_config.use_cb_focal),
-                        focal_gamma=float(training_config.focal_gamma),
-                    )
+            if "flat_tag_logits" in outputs and "flat_tag" in class_weights and float(training_config.flat_tag_loss_weight) > 0.0:
+                loss = loss + float(training_config.flat_tag_loss_weight) * _head_loss(
+                    outputs["flat_tag_logits"],
+                    prepared["flat_tag_target"],
+                    class_weights=class_weights["flat_tag"],
+                    label_smoothing=float(training_config.label_smoothing),
+                    use_cb_focal=bool(training_config.use_cb_focal and "flat_tag" in focal_heads),
+                    focal_gamma=float(training_config.focal_gamma),
+                )
 
-            if bool(use_domain_head) and "domain_logits" in outputs:
+            if bool(use_domain_head) and domain_iterator is not None:
+                domain_batch = next(domain_iterator)
+                prepared_domain = _prepare_batch(domain_batch, device)
+                domain_outputs = model(
+                    pose_inputs=prepared_domain["pose"],
+                    imu_inputs=prepared_domain["imu"],
+                    quality_inputs=prepared_domain["quality"],
+                    domain_lambda=float(training_config.grl_lambda),
+                )
                 loss = loss + float(training_config.domain_loss_weight) * _head_loss(
-                    outputs["domain_logits"],
-                    prepared["domain"],
+                    domain_outputs["domain_logits"],
+                    prepared_domain["domain"],
                     class_weights=domain_class_weights,
                     label_smoothing=0.0,
                     use_cb_focal=False,
@@ -468,9 +585,13 @@ def train_multitask_model(
             label_encoders,
             batch_size=int(training_config.batch_size),
             device=device,
+            scored_class_ids=scored_class_ids,
+            filter_unsupervised=True,
         )
-        val_metric = val_report["metrics"].get("global_score_macro_f1_mean")
-        val_metric_value = -np.inf if val_metric is None else float(val_metric)
+        val_metric_value = _resolve_selection_metric(
+            val_report,
+            selection_head=str(training_config.selection_head),
+        )
         if val_metric_value > best_metric:
             best_metric = val_metric_value
             best_state = copy.deepcopy(model.state_dict())
@@ -479,7 +600,8 @@ def train_multitask_model(
             {
                 "epoch": int(epoch_index + 1),
                 "train_loss": float(running_loss / max(1, num_batches)),
-                "val_global_score_macro_f1_mean": None if val_metric is None else float(val_metric),
+                "val_selection_metric": float(val_metric_value),
+                "val_global_score_macro_f1_mean": float(val_report["metrics"].get("global_score_macro_f1_mean") or 0.0),
             }
         )
 
@@ -490,6 +612,8 @@ def train_multitask_model(
         label_encoders,
         batch_size=int(training_config.batch_size),
         device=device,
+        scored_class_ids=scored_class_ids,
+        filter_unsupervised=True,
     )
     final_val_report = _gather_predictions(
         model,
@@ -497,12 +621,14 @@ def train_multitask_model(
         label_encoders,
         batch_size=int(training_config.batch_size),
         device=device,
+        scored_class_ids=scored_class_ids,
+        filter_unsupervised=True,
     )
     return {
         "model": model,
         "history": history,
         "train_report": final_train_report,
         "val_report": final_val_report,
-        "best_val_global_score_macro_f1_mean": None if best_metric == -np.inf else float(best_metric),
+        "best_val_selection_metric": None if best_metric == -np.inf else float(best_metric),
         "device": str(device),
     }

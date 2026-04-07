@@ -3,7 +3,30 @@ from __future__ import annotations
 from typing import Any
 
 import numpy as np
-from scipy.signal import correlate, correlation_lags
+try:
+    from scipy.signal import correlate, correlation_lags
+except ImportError:  # pragma: no cover - exercised when scipy is unavailable
+    def correlate(
+        in1: np.ndarray,
+        in2: np.ndarray,
+        *,
+        mode: str = "full",
+        method: str = "auto",
+    ) -> np.ndarray:
+        if mode != "full":
+            raise ValueError("NumPy fallback only supports mode='full'.")
+        del method
+        return np.correlate(in1, in2, mode="full")
+
+    def correlation_lags(
+        in1_len: int,
+        in2_len: int,
+        *,
+        mode: str = "full",
+    ) -> np.ndarray:
+        if mode != "full":
+            raise ValueError("NumPy fallback only supports mode='full'.")
+        return np.arange(-(int(in2_len) - 1), int(in1_len), dtype=np.int64)
 
 from pose_module.processing.frequency_alignment import estimate_sampling_frequency_hz
 

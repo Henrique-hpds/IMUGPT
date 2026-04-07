@@ -1,49 +1,37 @@
 from __future__ import annotations
 
-from .alignment import align_target_to_reference, estimate_lag_cross_correlation, resample_values_to_reference
-from .data import (
-    ALL_CAPTURE_BLACKLIST,
-    WindowedDatasetConfig,
-    apply_capture_blacklist,
-    build_classifier_capture_table,
-    build_windowed_multimodal_dataset,
-    load_capture_modalities,
-    normalize_capture_blacklist,
-    prepare_capture_windows,
-)
-from .metrics import compute_domain_gap_summary, compute_multitask_metrics, plot_confusion_matrices
+from importlib import import_module
 
-__all__ = [
-    "WindowedDatasetConfig",
-    "ALL_CAPTURE_BLACKLIST",
-    "align_target_to_reference",
-    "apply_capture_blacklist",
-    "build_classifier_capture_table",
-    "build_windowed_multimodal_dataset",
-    "compute_domain_gap_summary",
-    "compute_multitask_metrics",
-    "estimate_lag_cross_correlation",
-    "load_capture_modalities",
-    "normalize_capture_blacklist",
-    "plot_confusion_matrices",
-    "prepare_capture_windows",
-    "resample_values_to_reference",
-]
+_EXPORT_MAP = {
+    "ALL_CAPTURE_BLACKLIST": (".data", "ALL_CAPTURE_BLACKLIST"),
+    "EXPERIMENT_SPECS": (".experiments", "EXPERIMENT_SPECS"),
+    "ModelConfig": (".training", "ModelConfig"),
+    "SplitConfig": (".experiments", "SplitConfig"),
+    "TrainingConfig": (".training", "TrainingConfig"),
+    "WindowedDatasetConfig": (".data", "WindowedDatasetConfig"),
+    "align_target_to_reference": (".alignment", "align_target_to_reference"),
+    "apply_capture_blacklist": (".data", "apply_capture_blacklist"),
+    "build_classifier_capture_table": (".data", "build_classifier_capture_table"),
+    "build_subject_group_splits": (".experiments", "build_subject_group_splits"),
+    "build_windowed_multimodal_dataset": (".data", "build_windowed_multimodal_dataset"),
+    "compute_domain_gap_summary": (".metrics", "compute_domain_gap_summary"),
+    "compute_multitask_metrics": (".metrics", "compute_multitask_metrics"),
+    "estimate_lag_cross_correlation": (".alignment", "estimate_lag_cross_correlation"),
+    "load_capture_modalities": (".data", "load_capture_modalities"),
+    "normalize_capture_blacklist": (".data", "normalize_capture_blacklist"),
+    "plot_confusion_matrices": (".metrics", "plot_confusion_matrices"),
+    "prepare_capture_windows": (".data", "prepare_capture_windows"),
+    "resample_values_to_reference": (".alignment", "resample_values_to_reference"),
+    "run_experiment_suite": (".experiments", "run_experiment_suite"),
+    "run_single_experiment": (".experiments", "run_single_experiment"),
+}
 
-try:  # pragma: no cover - depends on optional torch dependency
-    from .experiments import EXPERIMENT_SPECS, SplitConfig, build_subject_group_splits, run_experiment_suite, run_single_experiment
-    from .training import ModelConfig, TrainingConfig
+__all__ = sorted(_EXPORT_MAP)
 
-    __all__.extend(
-        [
-            "EXPERIMENT_SPECS",
-            "ModelConfig",
-            "SplitConfig",
-            "TrainingConfig",
-            "build_subject_group_splits",
-            "run_experiment_suite",
-            "run_single_experiment",
-        ]
-    )
-except ImportError:
-    pass
+
+def __getattr__(name: str):
+    if name not in _EXPORT_MAP:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    module_name, attribute_name = _EXPORT_MAP[name]
+    module = import_module(module_name, __name__)
+    return getattr(module, attribute_name)

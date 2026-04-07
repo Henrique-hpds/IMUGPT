@@ -9,13 +9,11 @@ pyyaml
 ipython
 ipykernel
 umap-learn
+scikit-learn
 
-# Backend OpenMMLab (ViTPose + MotionBERT)
-# torch
-# mmengine
-# mmpose
-# mmdet
-# mmpretrain
+# Classificadores multimodais e encoder ST-GCN
+torch
+torchvision
 
 # Dependencias de sistema (instalar fora do pip):
 # - ffmpeg

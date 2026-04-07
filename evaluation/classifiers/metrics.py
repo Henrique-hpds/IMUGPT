@@ -7,7 +7,6 @@ import numpy as np
 import pandas as pd
 from sklearn.metrics import (
     average_precision_score,
-    balanced_accuracy_score,
     brier_score_loss,
     confusion_matrix,
     f1_score,
@@ -17,6 +16,41 @@ from sklearn.metrics import (
 )
 
 PRIMARY_HEADS = ("emotion", "modality", "stimulus")
+
+
+def _resolve_scored_labels(
+    num_classes: int,
+    scored_class_ids: Sequence[int] | None,
+) -> np.ndarray:
+    if num_classes <= 0:
+        return np.zeros(0, dtype=np.int64)
+
+    if scored_class_ids is None:
+        return np.arange(num_classes, dtype=np.int64)
+
+    labels = np.asarray(list(scored_class_ids), dtype=np.int64)
+    labels = labels[(labels >= 0) & (labels < num_classes)]
+    labels = np.unique(labels)
+    if labels.size == 0:
+        return np.arange(num_classes, dtype=np.int64)
+    return labels
+
+
+def _balanced_accuracy_from_labels(
+    y_true: np.ndarray,
+    y_pred: np.ndarray,
+    *,
+    labels: np.ndarray,
+) -> float:
+    confusion = confusion_matrix(y_true, y_pred, labels=labels).astype(np.float64)
+    supports = confusion.sum(axis=1)
+    recalls = np.divide(
+        np.diag(confusion),
+        supports,
+        out=np.zeros_like(supports, dtype=np.float64),
+        where=supports > 0,
+    )
+    return float(recalls.mean()) if recalls.size > 0 else 0.0
 
 
 def expected_calibration_error(
@@ -70,18 +104,43 @@ def compute_head_metrics(
     *,
     probabilities: np.ndarray | None,
     class_names: Sequence[str],
+    scored_class_ids: Sequence[int] | None = None,
 ) -> dict[str, Any]:
     truth = np.asarray(y_true, dtype=np.int64)
     pred = np.asarray(y_pred, dtype=np.int64)
     labels = np.arange(len(class_names), dtype=np.int64)
+    supported_labels = _resolve_scored_labels(len(class_names), scored_class_ids)
+
+    if truth.size == 0:
+        zero_confusion = np.zeros((len(class_names), len(class_names)), dtype=int).tolist()
+        return {
+            "macro_f1": 0.0,
+            "balanced_accuracy": 0.0,
+            "weighted_f1": 0.0,
+            "macro_precision": 0.0,
+            "macro_recall": 0.0,
+            "per_class_f1": {str(class_name): 0.0 for class_name in class_names},
+            "confusion_matrix": zero_confusion,
+            "ece": None,
+            "brier_score": None,
+            "auroc_ovr": None,
+            "auprc_ovr": None,
+            "supported_class_ids": supported_labels.astype(int).tolist(),
+            "supported_class_names": [str(class_names[class_id]) for class_id in supported_labels.tolist()],
+            "supported_macro_f1": 0.0,
+            "supported_balanced_accuracy": 0.0,
+            "supported_weighted_f1": 0.0,
+            "supported_macro_precision": 0.0,
+            "supported_macro_recall": 0.0,
+        }
 
     per_class_f1_values = f1_score(truth, pred, labels=labels, average=None, zero_division=0)
     output = {
-        "macro_f1": float(f1_score(truth, pred, average="macro", zero_division=0)),
-        "balanced_accuracy": float(balanced_accuracy_score(truth, pred)),
-        "weighted_f1": float(f1_score(truth, pred, average="weighted", zero_division=0)),
-        "macro_precision": float(precision_score(truth, pred, average="macro", zero_division=0)),
-        "macro_recall": float(recall_score(truth, pred, average="macro", zero_division=0)),
+        "macro_f1": float(f1_score(truth, pred, labels=labels, average="macro", zero_division=0)),
+        "balanced_accuracy": _balanced_accuracy_from_labels(truth, pred, labels=labels),
+        "weighted_f1": float(f1_score(truth, pred, labels=labels, average="weighted", zero_division=0)),
+        "macro_precision": float(precision_score(truth, pred, labels=labels, average="macro", zero_division=0)),
+        "macro_recall": float(recall_score(truth, pred, labels=labels, average="macro", zero_division=0)),
         "per_class_f1": {
             str(class_name): float(per_class_f1_values[class_index])
             for class_index, class_name in enumerate(class_names)
@@ -91,6 +150,21 @@ def compute_head_metrics(
         "brier_score": None,
         "auroc_ovr": None,
         "auprc_ovr": None,
+        "supported_class_ids": supported_labels.astype(int).tolist(),
+        "supported_class_names": [str(class_names[class_id]) for class_id in supported_labels.tolist()],
+        "supported_macro_f1": float(
+            f1_score(truth, pred, labels=supported_labels, average="macro", zero_division=0)
+        ),
+        "supported_balanced_accuracy": _balanced_accuracy_from_labels(truth, pred, labels=supported_labels),
+        "supported_weighted_f1": float(
+            f1_score(truth, pred, labels=supported_labels, average="weighted", zero_division=0)
+        ),
+        "supported_macro_precision": float(
+            precision_score(truth, pred, labels=supported_labels, average="macro", zero_division=0)
+        ),
+        "supported_macro_recall": float(
+            recall_score(truth, pred, labels=supported_labels, average="macro", zero_division=0)
+        ),
     }
     if probabilities is None:
         return output
@@ -101,6 +175,9 @@ def compute_head_metrics(
 
     output["ece"] = expected_calibration_error(truth, probs)
     output["brier_score"] = multiclass_brier_score(truth, probs)
+
+    if np.unique(truth).size < 2:
+        return output
 
     try:
         if len(class_names) == 2:
@@ -121,6 +198,7 @@ def compute_multitask_metrics(
     y_pred: Mapping[str, np.ndarray],
     probabilities: Mapping[str, np.ndarray] | None,
     label_encoders: Mapping[str, Mapping[str, Any]],
+    scored_class_ids: Mapping[str, Sequence[int]] | None = None,
 ) -> dict[str, Any]:
     head_metrics = {}
     for head_name in label_encoders.keys():
@@ -132,16 +210,28 @@ def compute_multitask_metrics(
             y_pred=np.asarray(y_pred[head_name]),
             probabilities=head_probabilities,
             class_names=label_encoders[head_name]["class_names"],
+            scored_class_ids=(None if scored_class_ids is None else scored_class_ids.get(head_name)),
         )
 
-    primary_scores = [
+    primary_scores_supported = [
+        float(head_metrics[head_name]["supported_macro_f1"])
+        for head_name in PRIMARY_HEADS
+        if head_name in head_metrics
+    ]
+    primary_scores_all = [
         float(head_metrics[head_name]["macro_f1"])
         for head_name in PRIMARY_HEADS
         if head_name in head_metrics
     ]
     weighted_primary_score = None
+    weighted_primary_score_all = None
     if all(head_name in head_metrics for head_name in PRIMARY_HEADS):
         weighted_primary_score = (
+            0.5 * float(head_metrics["emotion"]["supported_macro_f1"])
+            + 0.25 * float(head_metrics["modality"]["supported_macro_f1"])
+            + 0.25 * float(head_metrics["stimulus"]["supported_macro_f1"])
+        )
+        weighted_primary_score_all = (
             0.5 * float(head_metrics["emotion"]["macro_f1"])
             + 0.25 * float(head_metrics["modality"]["macro_f1"])
             + 0.25 * float(head_metrics["stimulus"]["macro_f1"])
@@ -149,9 +239,87 @@ def compute_multitask_metrics(
 
     return {
         "per_head": head_metrics,
-        "global_score_macro_f1_mean": None if len(primary_scores) == 0 else float(np.mean(primary_scores)),
+        "global_score_macro_f1_mean": None if len(primary_scores_supported) == 0 else float(np.mean(primary_scores_supported)),
         "global_score_weighted_macro_f1": weighted_primary_score,
+        "global_score_macro_f1_mean_all": None if len(primary_scores_all) == 0 else float(np.mean(primary_scores_all)),
+        "global_score_weighted_macro_f1_all": weighted_primary_score_all,
     }
+
+
+def build_support_report(
+    metadata: pd.DataFrame,
+    label_encoders: Mapping[str, Mapping[str, Any]],
+    *,
+    group_column: str = "subject_group",
+    min_subject_groups: int = 2,
+) -> pd.DataFrame:
+    rows = []
+    for head_name, encoder in label_encoders.items():
+        label_column = f"{head_name}_id"
+        if label_column not in metadata.columns:
+            continue
+        frame = metadata[[label_column, group_column]].copy()
+        sample_counts = frame[label_column].value_counts().to_dict()
+        group_counts = frame.groupby(label_column)[group_column].nunique().to_dict()
+        for class_id, class_name in enumerate(encoder["class_names"]):
+            num_samples = int(sample_counts.get(class_id, 0))
+            num_subject_groups = int(group_counts.get(class_id, 0))
+            is_supported = bool(num_subject_groups >= int(min_subject_groups))
+            rows.append(
+                {
+                    "head_name": str(head_name),
+                    "class_id": int(class_id),
+                    "class_name": str(class_name),
+                    "num_samples": num_samples,
+                    "num_subject_groups": num_subject_groups,
+                    "min_subject_groups_required": int(min_subject_groups),
+                    "is_supported": is_supported,
+                    "support_status": "supported" if is_supported else "unsupported",
+                }
+            )
+    return pd.DataFrame(rows)
+
+
+def build_scored_class_ids(
+    support_report: pd.DataFrame,
+    *,
+    head_names: Sequence[str] | None = None,
+) -> dict[str, list[int]]:
+    if support_report.empty:
+        return {}
+
+    selected_heads = set(PRIMARY_HEADS if head_names is None else [str(head_name) for head_name in head_names])
+    scored_class_ids: dict[str, list[int]] = {}
+    for head_name in sorted(selected_heads):
+        head_rows = support_report.loc[support_report["head_name"] == head_name]
+        supported_ids = head_rows.loc[head_rows["is_supported"], "class_id"].astype(int).tolist()
+        if supported_ids:
+            scored_class_ids[head_name] = supported_ids
+    return scored_class_ids
+
+
+def summarize_unsupported_classes(
+    support_report: pd.DataFrame,
+    *,
+    head_names: Sequence[str] | None = None,
+) -> str:
+    if support_report.empty:
+        return ""
+
+    selected_heads = PRIMARY_HEADS if head_names is None else tuple(str(head_name) for head_name in head_names)
+    chunks = []
+    for head_name in selected_heads:
+        unsupported = (
+            support_report.loc[
+                (support_report["head_name"] == head_name) & (~support_report["is_supported"]),
+                "class_name",
+            ]
+            .astype(str)
+            .tolist()
+        )
+        if unsupported:
+            chunks.append(f"{head_name}: {', '.join(unsupported)}")
+    return "; ".join(chunks)
 
 
 def suite_results_frame(experiment_results: Sequence[Mapping[str, Any]]) -> pd.DataFrame:
@@ -162,20 +330,32 @@ def suite_results_frame(experiment_results: Sequence[Mapping[str, Any]]) -> pd.D
         rows.append(
             {
                 "experiment_name": result.get("experiment_name"),
+                "split_id": result.get("split_id"),
                 "global_score_macro_f1_mean": metrics.get("global_score_macro_f1_mean"),
                 "global_score_weighted_macro_f1": metrics.get("global_score_weighted_macro_f1"),
-                "emotion_macro_f1": None if "emotion" not in per_head else per_head["emotion"]["macro_f1"],
-                "modality_macro_f1": None if "modality" not in per_head else per_head["modality"]["macro_f1"],
-                "stimulus_macro_f1": None if "stimulus" not in per_head else per_head["stimulus"]["macro_f1"],
+                "global_score_macro_f1_mean_all": metrics.get("global_score_macro_f1_mean_all"),
+                "global_score_weighted_macro_f1_all": metrics.get("global_score_weighted_macro_f1_all"),
+                "emotion_macro_f1": None if "emotion" not in per_head else per_head["emotion"]["supported_macro_f1"],
+                "emotion_macro_f1_all": None if "emotion" not in per_head else per_head["emotion"]["macro_f1"],
+                "modality_macro_f1": None if "modality" not in per_head else per_head["modality"]["supported_macro_f1"],
+                "modality_macro_f1_all": None if "modality" not in per_head else per_head["modality"]["macro_f1"],
+                "stimulus_macro_f1": None if "stimulus" not in per_head else per_head["stimulus"]["supported_macro_f1"],
+                "stimulus_macro_f1_all": None if "stimulus" not in per_head else per_head["stimulus"]["macro_f1"],
             }
         )
     return pd.DataFrame(rows)
 
 
-def compute_domain_gap_summary(experiment_results: Sequence[Mapping[str, Any]]) -> pd.DataFrame:
-    frame = suite_results_frame(experiment_results)
+def compute_domain_gap_summary(experiment_results: Sequence[Mapping[str, Any]] | pd.DataFrame) -> pd.DataFrame:
+    frame = experiment_results.copy() if isinstance(experiment_results, pd.DataFrame) else suite_results_frame(experiment_results)
     if frame.empty:
         return frame
+
+    if "experiment_name" not in frame.columns:
+        raise ValueError("compute_domain_gap_summary expects an experiment summary with an 'experiment_name' column.")
+
+    if "global_score_macro_f1_mean" not in frame.columns:
+        raise ValueError("compute_domain_gap_summary expects a 'global_score_macro_f1_mean' column.")
 
     score_by_experiment = {
         str(row["experiment_name"]): float(row["global_score_macro_f1_mean"])
