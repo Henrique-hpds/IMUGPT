@@ -22,11 +22,19 @@ from pose_module.export.imusim_adapter import (
 
 from pose_module.export.debug_video import render_pose_overlay_video, render_pose3d_side_by_side_video, resolve_debug_overlay_variant_path
 from pose_module.imu_alignment import load_alignment_runtime_settings, run_geometric_alignment
-from pose_module.interfaces import Pose2DJob, PoseSequence2D, VirtualIMUSequence
+from pose_module.interfaces import Pose2DJob, PoseSequence2D, PoseSequence3D, VirtualIMUSequence
 from pose_module.io.cache import write_json_file
 
 from pose_module.motionbert.adapter import write_pose_sequence3d_npz
 from pose_module.motionbert.lifter import MotionBERTPredictor, run_motionbert_lifter
+from pose_module.prompt_source import (
+    LegacyT2MGPTBackend,
+    PromptMotionBackend,
+    build_prompt_adapter_quality_report,
+    build_prompt_metadata,
+    build_prompt_pose_quality_report,
+    build_prompt_pose_sequence3d,
+)
 
 from pose_module.io.video_loader import frame_indices_to_timestamps, select_frame_indices
 from pose_module.processing.cleaner2d import clean_pose_sequence2d
@@ -355,6 +363,169 @@ def run_pose3d_pipeline(
     }
 
 
+def run_pose3d_from_prompt(
+    *,
+    prompt_id: str,
+    prompt_text: str,
+    output_dir: str | Path,
+    sample_id: Optional[str] = None,
+    labels: Optional[Mapping[str, Any]] = None,
+    seed: int = 0,
+    fps: float = 20.0,
+    duration_hint_sec: Optional[float] = None,
+    action_detail: Optional[str] = None,
+    stimulus_type: Optional[str] = None,
+    reference_clip_id: Optional[str] = None,
+    group_id: Optional[str] = None,
+    notes: Optional[str] = None,
+    source_metadata: Optional[Mapping[str, Any]] = None,
+    prompt_backend: Optional[PromptMotionBackend] = None,
+    export_bvh: bool = True,
+) -> Dict[str, Any]:
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    clip_id = str(prompt_id if sample_id in (None, "") else sample_id)
+    labels_dict = {} if labels is None else dict(labels)
+    source_metadata_dict = {} if source_metadata is None else dict(source_metadata)
+
+    backend = LegacyT2MGPTBackend() if prompt_backend is None else prompt_backend
+    generation_result = backend.generate(
+        prompt_text=str(prompt_text),
+        seed=int(seed),
+        fps=float(fps),
+        duration_hint_sec=duration_hint_sec,
+        output_dir=output_dir,
+    )
+    generation_backend = str(generation_result.get("generation_backend", "t2mgpt"))
+    backend_report = dict(generation_result.get("backend_report", {}))
+
+    raw_pose_sequence_3d = build_prompt_pose_sequence3d(
+        prompt_id=str(prompt_id),
+        clip_id=str(clip_id),
+        joint_positions_xyz=generation_result["joint_positions_xyz"],
+        fps=float(fps),
+        source=f"{generation_backend}_prompt",
+    )
+    raw_pose_path = output_dir / "pose3d_prompt_raw.npz"
+    write_pose_sequence3d_npz(raw_pose_sequence_3d, raw_pose_path)
+
+    prompt_metadata = build_prompt_metadata(
+        sample_id=str(clip_id),
+        prompt_id=str(prompt_id),
+        prompt_text=str(prompt_text),
+        labels=labels_dict,
+        seed=int(seed),
+        fps=float(fps),
+        num_generated_frames=int(raw_pose_sequence_3d.num_frames),
+        generation_backend=generation_backend,
+        action_detail=action_detail,
+        stimulus_type=stimulus_type,
+        reference_clip_id=reference_clip_id,
+        duration_hint_sec=duration_hint_sec,
+        notes=notes,
+        group_id=group_id,
+        source_metadata=source_metadata_dict,
+    )
+    prompt_metadata_path = output_dir / "prompt_metadata.json"
+    write_json_file(prompt_metadata, prompt_metadata_path)
+    if backend_report:
+        backend_report_path = output_dir / "prompt_backend_report.json"
+        write_json_file(backend_report, backend_report_path)
+    else:
+        backend_report_path = None
+
+    adapter_quality = build_prompt_adapter_quality_report(
+        pose_sequence=raw_pose_sequence_3d,
+        generation_backend=generation_backend,
+    )
+    metric_normalizer_result = run_metric_normalizer(raw_pose_sequence_3d)
+    metric_pose_sequence_3d = metric_normalizer_result["pose_sequence"]
+    metric_normalization = metric_normalizer_result["normalization_result"]
+    metric_quality = metric_normalizer_result["quality_report"]
+    metric_artifacts = metric_normalizer_result["artifacts"]
+    metric_pose_path = output_dir / "pose3d_metric_local.npz"
+    write_pose_sequence3d_npz(metric_pose_sequence_3d, metric_pose_path)
+    np.save(
+        output_dir / "3d_keypoints_metric.npy",
+        np.asarray(metric_normalization["joint_positions_smoothed"], dtype=np.float32),
+    )
+
+    root_result = run_root_trajectory_estimator(
+        metric_pose_sequence_3d,
+        normalization_result=metric_normalization,
+    )
+    root_pose_sequence_3d = root_result["pose_sequence"]
+    final_pose_path = output_dir / "pose3d.npz"
+    write_pose_sequence3d_npz(root_pose_sequence_3d, final_pose_path)
+    np.save(
+        output_dir / "root_translation.npy",
+        np.asarray(root_result["root_translation_m"], dtype=np.float32),
+    )
+
+    bvh_artifacts = {"pose3d_bvh_path": None}
+    if bool(export_bvh):
+        bvh_artifacts = export_pose_sequence3d_to_bvh(root_pose_sequence_3d, output_dir / "pose3d.bvh")
+
+    prompt_source_quality = build_prompt_pose_quality_report(
+        root_pose_sequence_3d,
+        generation_backend=generation_backend,
+    )
+    merged_quality = _build_prompt_pose3d_quality_report(
+        pose_sequence=root_pose_sequence_3d,
+        generation_backend=generation_backend,
+        adapter_quality=adapter_quality,
+        prompt_source_quality=prompt_source_quality,
+        metric_quality=metric_quality,
+        root_quality=root_result["quality_report"],
+    )
+    quality_report_path = output_dir / "quality_report.json"
+    write_json_file(merged_quality, quality_report_path)
+
+    artifacts = {
+        "prompt_metadata_json_path": str(prompt_metadata_path.resolve()),
+        "prompt_backend_report_json_path": (
+            None if backend_report_path is None else str(backend_report_path.resolve())
+        ),
+        "pose3d_prompt_raw_npz_path": str(raw_pose_path.resolve()),
+        "pose3d_metric_local_npz_path": str(metric_pose_path.resolve()),
+        "pose3d_npz_path": str(final_pose_path.resolve()),
+        "pose3d_metric_keypoints_path": str((output_dir / "3d_keypoints_metric.npy").resolve()),
+        "root_translation_npy_path": str((output_dir / "root_translation.npy").resolve()),
+        "pose3d_bvh_path": (
+            None
+            if bvh_artifacts.get("pose3d_bvh_path") is None
+            else str(Path(bvh_artifacts["pose3d_bvh_path"]).resolve())
+        ),
+        "quality_report_json_path": str(quality_report_path.resolve()),
+    }
+    artifacts.update(
+        {
+            key: value
+            for key, value in dict(generation_result.get("artifacts", {})).items()
+            if key not in artifacts
+        }
+    )
+    return {
+        "clip_id": str(clip_id),
+        "pose_sequence": root_pose_sequence_3d,
+        "metric_pose_sequence": metric_pose_sequence_3d,
+        "prompt_pose_sequence": raw_pose_sequence_3d,
+        "root_translation_m": root_result["root_translation_m"],
+        "quality_report": merged_quality,
+        "prompt_adapter_quality_report": adapter_quality,
+        "prompt_source_quality_report": prompt_source_quality,
+        "metric_normalization_quality_report": metric_quality,
+        "root_trajectory_quality_report": root_result["quality_report"],
+        "prompt_metadata": prompt_metadata,
+        "backend_report": backend_report,
+        "metric_normalization_result": metric_normalization,
+        "metric_normalization_artifacts": metric_artifacts,
+        "root_trajectory_result": root_result["trajectory_result"],
+        "root_trajectory_artifacts": root_result["artifacts"],
+        "artifacts": artifacts,
+    }
+
+
 def run_virtual_imu_pipeline(
     *,
     clip_id: str,
@@ -636,6 +807,85 @@ def generate_virtual_imu_from_video(
         fps_target=int(fps_target),
     )
     return result["virtual_imu_sequence"]
+
+
+def generate_pose_from_prompt(
+    prompt_text: str,
+    prompt_id: str,
+    *,
+    seed: int = 0,
+    fps: float = 20.0,
+    output_dir: str | Path | None = None,
+    prompt_backend: Optional[PromptMotionBackend] = None,
+) -> PoseSequence3D:
+    resolved_output_dir = (
+        Path("output") / "synthetic" / str(prompt_id) / "pose"
+        if output_dir is None
+        else Path(output_dir)
+    )
+    result = run_pose3d_from_prompt(
+        prompt_id=str(prompt_id),
+        prompt_text=str(prompt_text),
+        output_dir=resolved_output_dir,
+        seed=int(seed),
+        fps=float(fps),
+        prompt_backend=prompt_backend,
+    )
+    return result["pose_sequence"]
+
+
+def run_pose3d_from_video(**kwargs: Any) -> Dict[str, Any]:
+    return run_pose3d_pipeline(**kwargs)
+
+
+def _build_prompt_pose3d_quality_report(
+    *,
+    pose_sequence: PoseSequence3D,
+    generation_backend: str,
+    adapter_quality: Mapping[str, Any],
+    prompt_source_quality: Mapping[str, Any],
+    metric_quality: Mapping[str, Any],
+    root_quality: Mapping[str, Any],
+) -> Dict[str, Any]:
+    statuses = [
+        str(adapter_quality.get("status", "fail")),
+        str(prompt_source_quality.get("status", "fail")),
+        str(metric_quality.get("status", "fail")),
+        str(root_quality.get("status", "fail")),
+    ]
+    if "fail" in statuses:
+        status = "fail"
+    elif "warning" in statuses:
+        status = "warning"
+    else:
+        status = "ok"
+
+    notes: list[str] = []
+    for report in (adapter_quality, prompt_source_quality, metric_quality, root_quality):
+        for note in report.get("notes", []):
+            notes.append(str(note))
+    notes = list(dict.fromkeys(notes))
+
+    return {
+        "clip_id": str(pose_sequence.clip_id),
+        "status": str(status),
+        "source_kind": "prompt",
+        "modality_domain": "synthetic",
+        "generation_backend": str(generation_backend),
+        "fps": None if pose_sequence.fps is None else float(pose_sequence.fps),
+        "fps_original": None if pose_sequence.fps_original is None else float(pose_sequence.fps_original),
+        "num_frames": int(pose_sequence.num_frames),
+        "num_joints": int(pose_sequence.num_joints),
+        "coordinate_space": str(pose_sequence.coordinate_space),
+        "nan_ratio": float(prompt_source_quality.get("nan_ratio", 1.0)),
+        "bone_length_cv": float(prompt_source_quality.get("bone_length_cv", 0.0)),
+        "root_motion_energy": float(prompt_source_quality.get("root_motion_energy", 0.0)),
+        "foot_sliding_score": float(prompt_source_quality.get("foot_sliding_score", 0.0)),
+        "prompt_adapter_status": str(adapter_quality.get("status")),
+        "metric_normalizer_status": str(metric_quality.get("status")),
+        "root_trajectory_status": str(root_quality.get("status")),
+        "notes": list(notes),
+    }
 
 
 def _optional_float(raw_value: Any) -> Optional[float]:

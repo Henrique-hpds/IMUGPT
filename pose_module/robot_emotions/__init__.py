@@ -7,8 +7,10 @@ __all__ = [
     "RobotEmotionsClipRecord",
     "RobotEmotionsExtractedClip",
     "RobotEmotionsExtractor",
+    "build_robot_emotions_prompt_catalog",
     "run_robot_emotions_pose2d",
     "run_robot_emotions_pose3d",
+    "run_robot_emotions_prompt_pose3d",
     "run_robot_emotions_virtual_imu",
 ]
 
@@ -43,6 +45,14 @@ def __getattr__(name: str):
         from .pose3d import run_robot_emotions_pose3d
 
         return run_robot_emotions_pose3d
+    if name == "build_robot_emotions_prompt_catalog":
+        from .prompt_exports import build_robot_emotions_prompt_catalog
+
+        return build_robot_emotions_prompt_catalog
+    if name == "run_robot_emotions_prompt_pose3d":
+        from .prompt_exports import run_robot_emotions_prompt_pose3d
+
+        return run_robot_emotions_prompt_pose3d
     if name == "run_robot_emotions_virtual_imu":
         from .virtual_imu import run_robot_emotions_virtual_imu
 

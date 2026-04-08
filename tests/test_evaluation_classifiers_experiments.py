@@ -11,6 +11,8 @@ from evaluation.classifiers.training import (
     TrainingConfig,
     _build_classification_arrays,
     _gather_predictions,
+    _use_tqdm_progress,
+    resolve_progress_tqdm,
     train_multitask_model,
 )
 
@@ -98,6 +100,13 @@ def _make_suite_dataset_bundle() -> dict[str, object]:
 
 @unittest.skipIf(torch is None, "PyTorch is required for classifier experiment tests.")
 class EvaluationClassifierExperimentTests(unittest.TestCase):
+    def test_progress_backend_auto_enables_tqdm_when_available(self) -> None:
+        self.assertEqual(TrainingConfig().progress_backend, "auto")
+        self.assertIsNotNone(resolve_progress_tqdm())
+        self.assertTrue(_use_tqdm_progress(TrainingConfig(show_progress=True, progress_backend="auto")))
+        self.assertTrue(_use_tqdm_progress(TrainingConfig(show_progress=True, progress_backend="tqdm")))
+        self.assertFalse(_use_tqdm_progress(TrainingConfig(show_progress=True, progress_backend="plain")))
+
     def test_build_classification_arrays_excludes_unsupervised_rows(self) -> None:
         arrays = _make_small_arrays(classification_mask=np.asarray([1.0, 0.0, 1.0], dtype=np.float32))
 
