@@ -8,7 +8,11 @@ import numpy as np
 
 from robot_emotions_vlm.cli import describe_videos, main as robot_emotions_vlm_main
 from robot_emotions_vlm.dataset import RobotEmotionsDataset
-from robot_emotions_vlm.kimodo_generation import generate_kimodo_from_catalog, load_catalog_entries
+from robot_emotions_vlm.kimodo_generation import (
+    _save_smplx_amass_outputs,
+    generate_kimodo_from_catalog,
+    load_catalog_entries,
+)
 from robot_emotions_vlm.prompts import render_prompts
 from robot_emotions_vlm.qwen_backend import QwenGenerationConfig, QwenVideoBackend
 from robot_emotions_vlm.schemas import DescriptionValidationError, parse_model_response
@@ -120,6 +124,18 @@ class _FakeKimodoRuntime:
         npz_path.parent.mkdir(parents=True, exist_ok=True)
         npz_path.write_bytes(b"fake_npz")
         return {"kimodo_npz_path": str(npz_path.resolve())}
+
+
+class _FakeAMASSConverter:
+    saved_paths: list[str] = []
+
+    def __init__(self, skeleton, fps) -> None:
+        self.skeleton = skeleton
+        self.fps = fps
+
+    def convert_save_npz(self, output, path: str) -> None:
+        self.__class__.saved_paths.append(path)
+        Path(path).write_bytes(b"fake_amass")
 
 
 class RobotEmotionsVLMTests(unittest.TestCase):
@@ -338,6 +354,25 @@ class RobotEmotionsVLMTests(unittest.TestCase):
             self.assertEqual(manifest_entries[0]["clip_id"], "robot_emotions_10ms_u02_tag11")
             self.assertEqual(manifest_entries[0]["status"], "ok")
             self.assertIn("kimodo_npz_path", manifest_entries[0]["artifacts"])
+
+    def test_save_smplx_amass_outputs_writes_next_to_npz(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            _FakeAMASSConverter.saved_paths = []
+            npz_path = Path(tmp_dir) / "clip_a" / "motion_00.npz"
+            npz_path.parent.mkdir(parents=True, exist_ok=True)
+            npz_path.write_bytes(b"fake_npz")
+
+            amass_path = _save_smplx_amass_outputs(
+                output={"posed_joints": np.zeros((10, 3, 3), dtype=np.float32)},
+                output_path=npz_path,
+                skeleton=object(),
+                fps=20.0,
+                converter_factory=_FakeAMASSConverter,
+            )
+
+            self.assertEqual(Path(amass_path), npz_path.with_name("motion_00_amass.npz"))
+            self.assertTrue(Path(amass_path).exists())
+            self.assertEqual(_FakeAMASSConverter.saved_paths, [str(npz_path.with_name("motion_00_amass.npz"))])
 
     def test_cli_dispatches_generate_kimodo(self) -> None:
         with patch("robot_emotions_vlm.cli.generate_kimodo_from_catalog", return_value={"status": "ok"}) as mocked_runner:

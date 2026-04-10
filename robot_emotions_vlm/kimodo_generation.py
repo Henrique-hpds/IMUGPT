@@ -362,12 +362,12 @@ class _KimodoRuntime:
             artifacts["kimodo_npz_path"] = str(npz_path.resolve())
 
             if resolved_model == "kimodo-smplx-rp":
-                from kimodo.exports.smplx import AMASSConverter
-
-                amass_path = output_stem.parent / f"{output_stem.name}_amass.npz"
-                converter = AMASSConverter(skeleton=skeleton, fps=fps)
-                converter.convert_save_npz(output, str(amass_path))
-                artifacts["amass_npz_path"] = str(amass_path.resolve())
+                artifacts["amass_npz_path"] = _save_smplx_amass_outputs(
+                    output=output,
+                    output_path=npz_path,
+                    skeleton=skeleton,
+                    fps=fps,
+                )
 
             if resolved_model == "kimodo-g1-rp":
                 from kimodo.exports.mujoco import MujocoQposConverter
@@ -409,12 +409,18 @@ class _KimodoRuntime:
                 artifacts["g1_csv_path"] = str(csv_path.resolve())
 
             if resolved_model == "kimodo-smplx-rp":
-                from kimodo.exports.smplx import AMASSConverter
-
-                converter = AMASSConverter(skeleton=skeleton, fps=fps)
-                amass_path = motion_dir / "amass.npz"
-                converter.convert_save_npz(output, str(amass_path))
-                artifacts["amass_npz_path"] = str(amass_path.resolve())
+                amass_paths: list[str] = []
+                for sample_index, sample_npz_path in enumerate(npz_paths):
+                    sample_output = _slice_output_sample(output, sample_index, n_samples)
+                    amass_paths.append(
+                        _save_smplx_amass_outputs(
+                            output=sample_output,
+                            output_path=Path(sample_npz_path),
+                            skeleton=skeleton,
+                            fps=fps,
+                        )
+                    )
+                artifacts["amass_npz_paths"] = amass_paths
 
             if export_bvh:
                 bvh_paths: list[str] = []
@@ -445,6 +451,27 @@ def _slice_output_sample(output: dict[str, Any], sample_index: int, n_samples: i
         )
         for key, value in output.items()
     }
+
+
+def _save_smplx_amass_outputs(
+    *,
+    output: dict[str, Any],
+    output_path: Path,
+    skeleton: Any,
+    fps: float,
+    converter_factory: Any = None,
+) -> str:
+    """Save the SMPL-X AMASS export next to the generated Kimodo NPZ."""
+
+    if converter_factory is None:
+        from kimodo.exports.smplx import AMASSConverter
+
+        converter_factory = AMASSConverter
+
+    amass_path = output_path.with_name(f"{output_path.stem}_amass.npz")
+    converter = converter_factory(skeleton=skeleton, fps=fps)
+    converter.convert_save_npz(output, str(amass_path))
+    return str(amass_path.resolve())
 
 
 def _export_bvh_if_supported(
