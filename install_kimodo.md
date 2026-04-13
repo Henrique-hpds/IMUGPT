@@ -142,6 +142,8 @@ python -m robot_emotions_vlm generate-kimodo \
   --output-dir output/robot_emotions_kimodo
 ```
 
+O comando acima agora usa `Kimodo-SMPLX-RP-v1` por padrao para produzir tambem um arquivo AMASS ao lado de cada NPZ gerado.
+
 Exemplo para apenas um clipe:
 
 ```bash
@@ -162,7 +164,8 @@ Cada captura gerada recebe:
 - `prompt_entry.json`
 - `generation_config.json`
 - `motion.npz` ou pasta `motion/` para multiplas amostras
-- opcionalmente `motion.bvh`, `motion.csv` ou `motion_amass.npz`, dependendo do modelo Kimodo
+- `motion_amass.npz` ao lado de cada NPZ quando o modelo SMPL-X estiver em uso
+- opcionalmente `motion.bvh` ou `motion.csv`, dependendo do modelo Kimodo
 ## 10. Teste rapido do modulo
 
 ```bash

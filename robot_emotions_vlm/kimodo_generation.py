@@ -19,12 +19,16 @@ class CatalogPromptEntry:
     """Normalized prompt catalog row used for Kimodo generation."""
 
     prompt_id: str
+    window_id: str | None
     prompt_text: str
     labels: dict[str, Any]
     seed: int | None
     num_samples: int
     reference_clip_id: str | None
     duration_hint_sec: float | None
+    constraints_path: str | None
+    constraint_summary: dict[str, Any]
+    window: dict[str, Any]
     source_metadata: dict[str, Any]
     raw_entry: dict[str, Any]
 
@@ -80,12 +84,16 @@ def load_catalog_entries(catalog_path: str | Path) -> list[CatalogPromptEntry]:
         entries.append(
             CatalogPromptEntry(
                 prompt_id=prompt_id,
+                window_id=_optional_string(payload.get("window_id")),
                 prompt_text=prompt_text,
                 labels=dict(payload.get("labels") or {}),
                 seed=None if seed is None else int(seed),
                 num_samples=int(payload.get("num_samples", 1)),
                 reference_clip_id=_optional_string(payload.get("reference_clip_id")),
                 duration_hint_sec=_optional_float(payload.get("duration_hint_sec")),
+                constraints_path=_optional_string(payload.get("constraints_path")),
+                constraint_summary=dict(payload.get("constraint_summary") or {}),
+                window=dict(payload.get("window") or {}),
                 source_metadata=dict(payload.get("source_metadata") or {}),
                 raw_entry=dict(payload),
             )
@@ -97,17 +105,33 @@ def select_catalog_entries(
     entries: Sequence[CatalogPromptEntry],
     *,
     clip_ids: Sequence[str] | None = None,
+    prompt_ids: Sequence[str] | None = None,
+    window_ids: Sequence[str] | None = None,
 ) -> list[CatalogPromptEntry]:
     """Optionally filter catalog entries by clip id."""
 
-    if clip_ids is None:
-        return list(entries)
-    requested = {str(clip_id) for clip_id in clip_ids}
-    selected = [entry for entry in entries if entry.clip_id in requested]
-    found = {entry.clip_id for entry in selected}
-    missing = sorted(requested.difference(found))
-    if missing:
-        raise ValueError(f"Unknown clip_id values requested in catalog: {missing}")
+    selected = list(entries)
+    if clip_ids is not None:
+        requested = {str(clip_id) for clip_id in clip_ids}
+        selected = [entry for entry in selected if entry.clip_id in requested]
+        found = {entry.clip_id for entry in entries}
+        missing = sorted(requested.difference(found))
+        if missing:
+            raise ValueError(f"Unknown clip_id values requested in catalog: {missing}")
+    if prompt_ids is not None:
+        requested = {str(prompt_id) for prompt_id in prompt_ids}
+        selected = [entry for entry in selected if entry.prompt_id in requested]
+        found = {entry.prompt_id for entry in entries}
+        missing = sorted(requested.difference(found))
+        if missing:
+            raise ValueError(f"Unknown prompt_id values requested in catalog: {missing}")
+    if window_ids is not None:
+        requested = {str(window_id) for window_id in window_ids}
+        selected = [entry for entry in selected if (entry.window_id or entry.prompt_id) in requested]
+        found = {(entry.window_id or entry.prompt_id) for entry in entries}
+        missing = sorted(requested.difference(found))
+        if missing:
+            raise ValueError(f"Unknown window_id values requested in catalog: {missing}")
     return selected
 
 
@@ -116,6 +140,8 @@ def generate_kimodo_from_catalog(
     catalog_path: str | Path,
     output_dir: str | Path,
     clip_ids: Sequence[str] | None = None,
+    prompt_ids: Sequence[str] | None = None,
+    window_ids: Sequence[str] | None = None,
     model_name: str | None = DEFAULT_KIMODO_GENERATION_MODEL,
     duration_sec: float = 5.0,
     diffusion_steps: int = 100,
@@ -129,7 +155,12 @@ def generate_kimodo_from_catalog(
 ) -> dict[str, Any]:
     """Generate one Kimodo motion per catalog entry and save a batch manifest."""
 
-    entries = select_catalog_entries(load_catalog_entries(catalog_path), clip_ids=clip_ids)
+    entries = select_catalog_entries(
+        load_catalog_entries(catalog_path),
+        clip_ids=clip_ids,
+        prompt_ids=prompt_ids,
+        window_ids=window_ids,
+    )
     output_root = Path(output_dir)
     output_root.mkdir(parents=True, exist_ok=True)
 
@@ -163,13 +194,18 @@ def generate_kimodo_from_catalog(
     num_ok = 0
     num_warning = 0
     num_fail = 0
+    num_generated_samples = 0
 
     for entry in entries:
-        clip_output_dir = output_root / entry.clip_id
-        clip_output_dir.mkdir(parents=True, exist_ok=True)
+        prompt_output_dir = output_root / entry.prompt_id
+        prompt_output_dir.mkdir(parents=True, exist_ok=True)
 
         effective_seed = entry.seed if config.seed is None else config.seed
         effective_num_samples = entry.num_samples if config.num_samples is None else config.num_samples
+        if entry.constraints_path is not None and entry.duration_hint_sec is None:
+            raise ValueError(
+                f"Catalog entry {entry.prompt_id!r} must provide duration_hint_sec when constraints_path is set."
+            )
         effective_duration_sec = (
             float(entry.duration_hint_sec)
             if entry.duration_hint_sec is not None
@@ -178,13 +214,15 @@ def generate_kimodo_from_catalog(
         effective_num_frames = max(1, int(round(effective_duration_sec * float(model.fps))))
         warnings: list[str] = []
 
-        prompt_entry_path = clip_output_dir / "prompt_entry.json"
-        generation_config_path = clip_output_dir / "generation_config.json"
+        prompt_entry_path = prompt_output_dir / "prompt_entry.json"
+        generation_config_path = prompt_output_dir / "generation_config.json"
         write_json(prompt_entry_path, entry.raw_entry)
         write_json(
             generation_config_path,
             {
-                "clip_id": entry.clip_id,
+                "prompt_id": entry.prompt_id,
+                "window_id": entry.window_id,
+                "reference_clip_id": entry.reference_clip_id,
                 "resolved_model": resolved_model,
                 "model_display_name": model_display_name,
                 "runtime_config": config.to_dict(),
@@ -193,6 +231,7 @@ def generate_kimodo_from_catalog(
                 "effective_duration_sec": effective_duration_sec,
                 "effective_num_frames": effective_num_frames,
                 "fps": float(model.fps),
+                "constraints_path": entry.constraints_path,
             },
         )
 
@@ -202,11 +241,18 @@ def generate_kimodo_from_catalog(
 
             cfg_kwargs = _resolve_cfg_kwargs(config.cfg_type, config.cfg_weight)
             use_postprocess = False if "g1" in resolved_model else (not config.no_postprocess)
+            constraint_lst = []
+            if entry.constraints_path is not None:
+                constraint_lst = runtime.load_constraints(
+                    entry.constraints_path,
+                    skeleton=model.skeleton,
+                    device=device,
+                )
             output = model(
                 entry.prompt_text,
                 effective_num_frames,
                 num_denoising_steps=int(config.diffusion_steps),
-                constraint_lst=[],
+                constraint_lst=constraint_lst,
                 num_samples=int(effective_num_samples),
                 multi_prompt=False,
                 post_processing=use_postprocess,
@@ -215,7 +261,7 @@ def generate_kimodo_from_catalog(
             )
             artifacts = runtime.save_outputs(
                 output=output,
-                output_stem=clip_output_dir / "motion",
+                output_stem=prompt_output_dir / "motion",
                 resolved_model=resolved_model,
                 skeleton=model.skeleton,
                 fps=float(model.fps),
@@ -233,35 +279,61 @@ def generate_kimodo_from_catalog(
             error_text = f"{type(exc).__name__}: {exc}"
             artifacts = {}
             num_fail += 1
-            trace_path = clip_output_dir / "error_trace.txt"
+            trace_path = prompt_output_dir / "error_trace.txt"
             trace_path.write_text(traceback.format_exc(), encoding="utf-8")
             artifacts["error_trace_txt_path"] = str(trace_path.resolve())
 
-        manifest_entries.append(
-            {
-                "clip_id": entry.clip_id,
-                "prompt_id": entry.prompt_id,
-                "reference_clip_id": entry.reference_clip_id,
-                "status": status,
-                "error": error_text,
-                "prompt_text": entry.prompt_text,
-                "labels": dict(entry.labels),
-                "model_name": model_display_name,
-                "resolved_model": resolved_model,
-                "seed": effective_seed,
-                "num_samples": int(effective_num_samples),
-                "duration_sec": float(effective_duration_sec),
-                "num_frames": int(effective_num_frames),
-                "fps": float(model.fps),
-                "diffusion_steps": int(config.diffusion_steps),
-                "warnings": warnings,
-                "artifacts": {
-                    "prompt_entry_json_path": str(prompt_entry_path.resolve()),
-                    "generation_config_json_path": str(generation_config_path.resolve()),
-                    **artifacts,
-                },
-            }
+        base_artifacts = {
+            "prompt_entry_json_path": str(prompt_entry_path.resolve()),
+            "generation_config_json_path": str(generation_config_path.resolve()),
+        }
+        if status == "fail":
+            manifest_entries.append(
+                {
+                    "clip_id": entry.clip_id,
+                    "prompt_id": entry.prompt_id,
+                    "window_id": entry.window_id,
+                    "reference_clip_id": entry.reference_clip_id,
+                    "sample_index": None,
+                    "sample_id": None,
+                    "status": status,
+                    "error": error_text,
+                    "prompt_text": entry.prompt_text,
+                    "labels": dict(entry.labels),
+                    "model_name": model_display_name,
+                    "resolved_model": resolved_model,
+                    "seed": effective_seed,
+                    "num_samples_requested": int(effective_num_samples),
+                    "duration_sec": float(effective_duration_sec),
+                    "num_frames": int(effective_num_frames),
+                    "fps": float(model.fps),
+                    "diffusion_steps": int(config.diffusion_steps),
+                    "constraints_path": entry.constraints_path,
+                    "warnings": warnings,
+                    "artifacts": {
+                        **base_artifacts,
+                        **artifacts,
+                    },
+                }
+            )
+            continue
+
+        sample_entries = _build_sample_manifest_entries(
+            entry=entry,
+            model_display_name=model_display_name,
+            resolved_model=resolved_model,
+            effective_seed=effective_seed,
+            effective_num_samples=int(effective_num_samples),
+            effective_duration_sec=float(effective_duration_sec),
+            effective_num_frames=int(effective_num_frames),
+            fps=float(model.fps),
+            diffusion_steps=int(config.diffusion_steps),
+            warnings=warnings,
+            base_artifacts=base_artifacts,
+            output_artifacts=artifacts,
         )
+        manifest_entries.extend(sample_entries)
+        num_generated_samples += len(sample_entries)
 
     manifest_path = output_root / "kimodo_generation_manifest.jsonl"
     summary_path = output_root / "kimodo_generation_summary.json"
@@ -274,6 +346,8 @@ def generate_kimodo_from_catalog(
         "num_ok": int(num_ok),
         "num_warning": int(num_warning),
         "num_fail": int(num_fail),
+        "num_generated_samples": int(num_generated_samples),
+        "num_manifest_entries": int(len(manifest_entries)),
         "manifest_path": str(manifest_path.resolve()),
         "summary_path": str(summary_path.resolve()),
         "config": config.to_dict(),
@@ -321,6 +395,77 @@ def _resolve_cfg_kwargs(cfg_type: str | None, cfg_weight: Sequence[float] | None
     raise ValueError(f"Unsupported cfg combination: cfg_type={cfg_type!r}, cfg_weight={cfg_weight!r}")
 
 
+def _build_sample_manifest_entries(
+    *,
+    entry: CatalogPromptEntry,
+    model_display_name: str,
+    resolved_model: str,
+    effective_seed: int | None,
+    effective_num_samples: int,
+    effective_duration_sec: float,
+    effective_num_frames: int,
+    fps: float,
+    diffusion_steps: int,
+    warnings: Sequence[str],
+    base_artifacts: dict[str, Any],
+    output_artifacts: dict[str, Any],
+) -> list[dict[str, Any]]:
+    entries: list[dict[str, Any]] = []
+    for sample_index in range(int(effective_num_samples)):
+        sample_id = f"{entry.prompt_id}__s{sample_index:03d}"
+        sample_artifacts = dict(base_artifacts)
+        sample_artifacts.update(_select_sample_artifacts(output_artifacts, sample_index=sample_index))
+        entries.append(
+            {
+                "clip_id": entry.clip_id,
+                "prompt_id": entry.prompt_id,
+                "window_id": entry.window_id,
+                "reference_clip_id": entry.reference_clip_id,
+                "sample_index": int(sample_index),
+                "sample_id": sample_id,
+                "status": "warning" if warnings else "ok",
+                "error": None,
+                "prompt_text": entry.prompt_text,
+                "labels": dict(entry.labels),
+                "model_name": model_display_name,
+                "resolved_model": resolved_model,
+                "seed": effective_seed,
+                "num_samples_requested": int(effective_num_samples),
+                "duration_sec": float(effective_duration_sec),
+                "num_frames": int(effective_num_frames),
+                "fps": float(fps),
+                "diffusion_steps": int(diffusion_steps),
+                "constraints_path": entry.constraints_path,
+                "warnings": list(warnings),
+                "artifacts": sample_artifacts,
+            }
+        )
+    return entries
+
+
+def _select_sample_artifacts(output_artifacts: dict[str, Any], *, sample_index: int) -> dict[str, Any]:
+    artifacts: dict[str, Any] = {}
+    if "kimodo_npz_paths" in output_artifacts:
+        artifacts["kimodo_npz_path"] = str(output_artifacts["kimodo_npz_paths"][sample_index])
+    elif sample_index == 0 and "kimodo_npz_path" in output_artifacts:
+        artifacts["kimodo_npz_path"] = str(output_artifacts["kimodo_npz_path"])
+
+    if "amass_npz_paths" in output_artifacts:
+        artifacts["amass_npz_path"] = str(output_artifacts["amass_npz_paths"][sample_index])
+    elif sample_index == 0 and "amass_npz_path" in output_artifacts:
+        artifacts["amass_npz_path"] = str(output_artifacts["amass_npz_path"])
+
+    if "bvh_paths" in output_artifacts:
+        if sample_index < len(output_artifacts["bvh_paths"]):
+            artifacts["bvh_path"] = str(output_artifacts["bvh_paths"][sample_index])
+    elif sample_index == 0 and "bvh_path" in output_artifacts:
+        artifacts["bvh_path"] = str(output_artifacts["bvh_path"])
+
+    if "g1_csv_path" in output_artifacts:
+        artifacts["g1_csv_path"] = str(output_artifacts["g1_csv_path"])
+    return artifacts
+
+
 class _KimodoRuntime:
     """Minimal lazy bridge to the local Kimodo package."""
 
@@ -328,12 +473,14 @@ class _KimodoRuntime:
         kimodo_module = _import_kimodo_package()
         self._kimodo = kimodo_module
         from kimodo import DEFAULT_MODEL, load_model
+        from kimodo.constraints import load_constraints_lst
         from kimodo.exports.motion_io import save_kimodo_npz
         from kimodo.model.registry import get_model_info
         from kimodo.tools import seed_everything
 
         self.default_model = DEFAULT_MODEL
         self.load_model = load_model
+        self._load_constraints_lst = load_constraints_lst
         self.save_kimodo_npz = save_kimodo_npz
         self.get_model_info = get_model_info
         self.seed_everything = seed_everything
@@ -442,6 +589,9 @@ class _KimodoRuntime:
                     artifacts["bvh_paths"] = bvh_paths
 
         return artifacts
+
+    def load_constraints(self, path: str | Path, *, skeleton: Any, device: str) -> list[Any]:
+        return self._load_constraints_lst(str(path), skeleton, device=device)
 
 
 def _slice_output_sample(output: dict[str, Any], sample_index: int, n_samples: int) -> dict[str, Any]:

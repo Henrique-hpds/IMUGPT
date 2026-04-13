@@ -16,6 +16,7 @@ from .export import (
     write_json,
     write_root_outputs,
 )
+from .anchor_catalog import build_anchor_catalog
 from .kimodo_generation import generate_kimodo_from_catalog
 from .kimodo_generation import DEFAULT_KIMODO_GENERATION_MODEL
 from .prompts import (
@@ -25,6 +26,7 @@ from .prompts import (
 )
 from .qwen_backend import QwenGenerationConfig, QwenVideoBackend
 from .schemas import DescriptionValidationError, VideoDescription, parse_model_response
+from .window_descriptions import describe_windows
 
 
 def describe_videos(
@@ -234,10 +236,40 @@ def build_parser() -> argparse.ArgumentParser:
     describe_parser.add_argument("--seed", type=int, default=123)
     describe_parser.add_argument("--num-samples", type=int, default=1)
 
+    describe_windows_parser = subparsers.add_parser("describe-windows")
+    describe_windows_parser.add_argument("--pose3d-manifest-path", required=True)
+    describe_windows_parser.add_argument("--clip-id", action="append", dest="clip_ids")
+    describe_windows_parser.add_argument("--output-dir", default="output/robot_emotions_qwen_windows")
+    describe_windows_parser.add_argument("--window-sec", type=float, default=5.0)
+    describe_windows_parser.add_argument("--window-hop-sec", type=float, default=2.5)
+    describe_windows_parser.add_argument("--max-windows-per-clip", type=int)
+    describe_windows_parser.add_argument("--model-id", default="Qwen/Qwen3-VL-8B-Instruct")
+    describe_windows_parser.add_argument("--local-files-only", action="store_true")
+    describe_windows_parser.add_argument("--device-map", default="auto")
+    describe_windows_parser.add_argument("--torch-dtype", default="auto")
+    describe_windows_parser.add_argument("--attn-implementation", default="sdpa")
+    describe_windows_parser.add_argument("--num-video-frames", type=int, default=32)
+    describe_windows_parser.add_argument("--max-new-tokens", type=int, default=384)
+    describe_windows_parser.add_argument("--temperature", type=float, default=0.2)
+    describe_windows_parser.add_argument("--top-p", type=float, default=0.9)
+    describe_windows_parser.add_argument(
+        "--system-prompt-path",
+        default=str(DEFAULT_SYSTEM_PROMPT_PATH),
+    )
+    describe_windows_parser.add_argument(
+        "--user-prompt-path",
+        default=str(DEFAULT_USER_PROMPT_PATH),
+    )
+    describe_windows_parser.add_argument("--catalog-output-path")
+    describe_windows_parser.add_argument("--seed", type=int, default=123)
+    describe_windows_parser.add_argument("--num-samples", type=int, default=1)
+
     generate_parser = subparsers.add_parser("generate-kimodo")
     generate_parser.add_argument("--catalog-path", required=True)
     generate_parser.add_argument("--output-dir", default="output/robot_emotions_kimodo")
     generate_parser.add_argument("--clip-id", action="append", dest="clip_ids")
+    generate_parser.add_argument("--prompt-id", action="append", dest="prompt_ids")
+    generate_parser.add_argument("--window-id", action="append", dest="window_ids")
     generate_parser.add_argument("--model", default=DEFAULT_KIMODO_GENERATION_MODEL)
     generate_parser.add_argument("--duration-sec", type=float, default=5.0)
     generate_parser.add_argument("--diffusion-steps", type=int, default=100)
@@ -247,6 +279,13 @@ def build_parser() -> argparse.ArgumentParser:
     generate_parser.add_argument("--bvh", action="store_true")
     generate_parser.add_argument("--cfg-type", choices=("nocfg", "regular", "separated"))
     generate_parser.add_argument("--cfg-weight", type=float, nargs="*")
+
+    anchor_parser = subparsers.add_parser("build-anchor-catalog")
+    anchor_parser.add_argument("--pose3d-manifest-path", required=True)
+    anchor_parser.add_argument("--qwen-window-catalog-path", required=True)
+    anchor_parser.add_argument("--output-dir", required=True)
+    anchor_parser.add_argument("--model", default=DEFAULT_KIMODO_GENERATION_MODEL)
+    anchor_parser.add_argument("--clip-id", action="append", dest="clip_ids")
     return parser
 
 
@@ -256,11 +295,38 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     if args.command != "describe-videos":
+        if args.command == "describe-windows":
+            summary = describe_windows(
+                pose3d_manifest_path=args.pose3d_manifest_path,
+                output_dir=args.output_dir,
+                clip_ids=args.clip_ids,
+                window_sec=args.window_sec,
+                window_hop_sec=args.window_hop_sec,
+                max_windows_per_clip=args.max_windows_per_clip,
+                model_id=args.model_id,
+                local_files_only=args.local_files_only,
+                device_map=args.device_map,
+                torch_dtype=args.torch_dtype,
+                attn_implementation=args.attn_implementation,
+                num_video_frames=args.num_video_frames,
+                max_new_tokens=args.max_new_tokens,
+                temperature=args.temperature,
+                top_p=args.top_p,
+                system_prompt_path=args.system_prompt_path,
+                user_prompt_path=args.user_prompt_path,
+                catalog_output_path=args.catalog_output_path,
+                seed=args.seed,
+                num_samples=args.num_samples,
+            )
+            print(json.dumps(summary, indent=2, ensure_ascii=True))
+            return 0
         if args.command == "generate-kimodo":
             summary = generate_kimodo_from_catalog(
                 catalog_path=args.catalog_path,
                 output_dir=args.output_dir,
                 clip_ids=args.clip_ids,
+                prompt_ids=args.prompt_ids,
+                window_ids=args.window_ids,
                 model_name=args.model,
                 duration_sec=args.duration_sec,
                 diffusion_steps=args.diffusion_steps,
@@ -270,6 +336,16 @@ def main(argv: Sequence[str] | None = None) -> int:
                 bvh=args.bvh,
                 cfg_type=args.cfg_type,
                 cfg_weight=args.cfg_weight,
+            )
+            print(json.dumps(summary, indent=2, ensure_ascii=True))
+            return 0
+        if args.command == "build-anchor-catalog":
+            summary = build_anchor_catalog(
+                pose3d_manifest_path=args.pose3d_manifest_path,
+                qwen_window_catalog_path=args.qwen_window_catalog_path,
+                output_dir=args.output_dir,
+                model_name=args.model,
+                clip_ids=args.clip_ids,
             )
             print(json.dumps(summary, indent=2, ensure_ascii=True))
             return 0

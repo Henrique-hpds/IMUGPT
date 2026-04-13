@@ -217,7 +217,7 @@ Para gerar apenas o debug 3D, sem os videos 2D:
   --output-dir output/robot_emotions_pose3d \
   --clip-id robot_emotions_10ms_u02_tag01 \
   --env-name openmmlab \
-  --debug-2d \
+  --no-debug-2d \
   --debug-3d
 ```
 

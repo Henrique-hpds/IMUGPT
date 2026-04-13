@@ -2,7 +2,14 @@
 
 Standalone RobotEmotions video-description module powered by `Qwen/Qwen3-VL-8B-Instruct`.
 
-It scans `data/RobotEmotions`, generates one movement description per video capture, and exports a Kimodo-ready prompt catalog.
+It supports both full-clip descriptions and the main anchored pipeline based on short real video windows.
+
+For the anchored Kimodo flow, the main line is now window-level:
+
+1. export real `pose3d`
+2. run `describe-windows`
+3. run `build-anchor-catalog`
+4. run `generate-kimodo`
 
 ## Requirements
 
@@ -54,12 +61,33 @@ python -m robot_emotions_vlm describe-videos \
   --local-files-only
 ```
 
+Describe real windows from a `pose3d_manifest.jsonl`:
+
+```bash
+conda activate kimodo
+python -m robot_emotions_vlm describe-windows \
+  --pose3d-manifest-path output/robot_emotions_pose3d/pose3d_manifest.jsonl \
+  --output-dir output/robot_emotions_qwen_windows \
+  --window-sec 5.0 \
+  --window-hop-sec 2.5
+```
+
+Build the anchored Kimodo catalog from the window-level Qwen export:
+
+```bash
+conda activate kimodo
+python -m robot_emotions_vlm build-anchor-catalog \
+  --pose3d-manifest-path output/robot_emotions_pose3d/pose3d_manifest.jsonl \
+  --qwen-window-catalog-path output/robot_emotions_qwen_windows/kimodo_window_prompt_catalog.jsonl \
+  --output-dir output/robot_emotions_kimodo_anchors
+```
+
 Generate Kimodo motions for all catalog entries:
 
 ```bash
 conda activate kimodo
 python -m robot_emotions_vlm generate-kimodo \
-  --catalog-path output/robot_emotions_qwen/kimodo_prompt_catalog.jsonl \
+  --catalog-path output/robot_emotions_kimodo_anchors/kimodo_anchor_catalog.jsonl \
   --output-dir output/robot_emotions_kimodo
 ```
 
@@ -70,8 +98,8 @@ Generate only selected clips from the catalog:
 ```bash
 conda activate kimodo
 python -m robot_emotions_vlm generate-kimodo \
-  --catalog-path output/robot_emotions_qwen/kimodo_prompt_catalog.jsonl \
-  --clip-id robot_emotions_10ms_u02_tag11 \
+  --catalog-path output/robot_emotions_kimodo_anchors/kimodo_anchor_catalog.jsonl \
+  --prompt-id robot_emotions_10ms_u02_tag11__w000 \
   --output-dir output/robot_emotions_kimodo_single
 ```
 
@@ -85,6 +113,8 @@ python -m robot_emotions_vlm generate-kimodo \
 - `--system-prompt-path`: override the system prompt template
 - `--user-prompt-path`: override the user prompt template
 - `--catalog-output-path`: write the Kimodo catalog to a custom path
+- `describe-windows --window-sec`: window duration used by the Qwen step
+- `describe-windows --window-hop-sec`: hop used by the Qwen step
 - `generate-kimodo --duration-sec`: fallback duration when the catalog has no `duration_hint_sec`
 - `generate-kimodo --model`: choose the Kimodo model to run; default is `Kimodo-SMPLX-RP-v1`
 - `generate-kimodo --bvh`: also export BVH for SOMA models
@@ -96,6 +126,11 @@ Root files:
 - `video_description_manifest.jsonl`
 - `video_description_summary.json`
 - `kimodo_prompt_catalog.jsonl`
+- `window_description_manifest.jsonl`
+- `window_description_summary.json`
+- `kimodo_window_prompt_catalog.jsonl`
+- `kimodo_anchor_catalog.jsonl`
+- `kimodo_anchor_catalog.summary.json`
 - `kimodo_generation_manifest.jsonl`
 - `kimodo_generation_summary.json`
 
@@ -105,6 +140,7 @@ Per-clip files:
 - `raw_response.txt`
 - `prompt_context.json`
 - `quality_report.json`
+- `window.mp4` for `describe-windows`
 
 Per-generated clip:
 
