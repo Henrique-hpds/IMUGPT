@@ -24,5 +24,8 @@ Window metadata:
 Task:
 1. Read only the movement contained inside the provided {{analysis_scope}}.
 2. Describe the motion in detail for arms, trunk, head, and legs.
-3. Stay grounded in what is visibly observable.
-4. Produce a final prompt_text that is compatible with kimodo, starts with "A person", uses a single sentence, and chains details with commas.
+3. Stay grounded in what is visibly observable and ignore scene context unless it directly changes body motion.
+4. For `prompt_text`, describe only the dominant movement pattern in simple English that Kimodo can follow.
+5. Make `prompt_text` start with "A person", stay in one sentence, use 12 to 22 words, and use at most 4 short clauses separated by commas.
+6. Do not use "then", "while", "after", or "before" in `prompt_text`.
+7. Do not mention chairs, stools, couches, benches, wires, cables, cords, cameras, phones, earbuds, headsets, slippers, or similar artifacts in `prompt_text`.

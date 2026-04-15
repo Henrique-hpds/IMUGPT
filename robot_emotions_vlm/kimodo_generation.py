@@ -12,6 +12,7 @@ from typing import Any, Sequence
 from .export import write_json, write_jsonl
 
 DEFAULT_KIMODO_GENERATION_MODEL = "Kimodo-SMPLX-RP-v1"
+RICH_CONSTRAINT_TYPES = frozenset({"fullbody", "end-effector"})
 
 
 @dataclass(frozen=True)
@@ -189,6 +190,7 @@ def generate_kimodo_from_catalog(
     )
     model_info = runtime.get_model_info(resolved_model)
     model_display_name = resolved_model if model_info is None else model_info.display_name
+    target_skeleton = None if model_info is None else model_info.skeleton
 
     manifest_entries: list[dict[str, Any]] = []
     num_ok = 0
@@ -213,6 +215,17 @@ def generate_kimodo_from_catalog(
         )
         effective_num_frames = max(1, int(round(effective_duration_sec * float(model.fps))))
         warnings: list[str] = []
+        declared_constraint_types = _resolve_declared_constraint_types(entry)
+        if _uses_rich_constraints(declared_constraint_types) and not _is_smplx_generation_target(
+            model_display_name=model_display_name,
+            resolved_model=resolved_model,
+            target_skeleton=target_skeleton,
+            runtime_skeleton=getattr(model, "skeleton", None),
+        ):
+            raise ValueError(
+                "Rich constraints are only supported for SMPLX generation targets; "
+                f"got model={model_display_name!r}, skeleton={target_skeleton!r}."
+            )
 
         prompt_entry_path = prompt_output_dir / "prompt_entry.json"
         generation_config_path = prompt_output_dir / "generation_config.json"
@@ -232,6 +245,9 @@ def generate_kimodo_from_catalog(
                 "effective_num_frames": effective_num_frames,
                 "fps": float(model.fps),
                 "constraints_path": entry.constraints_path,
+                "constraint_summary": dict(entry.constraint_summary),
+                "declared_constraint_types": list(declared_constraint_types),
+                "target_skeleton": target_skeleton,
             },
         )
 
@@ -248,6 +264,7 @@ def generate_kimodo_from_catalog(
                     skeleton=model.skeleton,
                     device=device,
                 )
+            loaded_constraint_types = _describe_loaded_constraints(constraint_lst)
             output = model(
                 entry.prompt_text,
                 effective_num_frames,
@@ -278,6 +295,7 @@ def generate_kimodo_from_catalog(
             status = "fail"
             error_text = f"{type(exc).__name__}: {exc}"
             artifacts = {}
+            loaded_constraint_types = []
             num_fail += 1
             trace_path = prompt_output_dir / "error_trace.txt"
             trace_path.write_text(traceback.format_exc(), encoding="utf-8")
@@ -309,6 +327,10 @@ def generate_kimodo_from_catalog(
                     "fps": float(model.fps),
                     "diffusion_steps": int(config.diffusion_steps),
                     "constraints_path": entry.constraints_path,
+                    "constraint_summary": dict(entry.constraint_summary),
+                    "declared_constraint_types": list(declared_constraint_types),
+                    "loaded_constraint_types": list(loaded_constraint_types),
+                    "num_constraints_loaded": int(len(loaded_constraint_types)),
                     "warnings": warnings,
                     "artifacts": {
                         **base_artifacts,
@@ -329,6 +351,9 @@ def generate_kimodo_from_catalog(
             fps=float(model.fps),
             diffusion_steps=int(config.diffusion_steps),
             warnings=warnings,
+            constraint_summary=dict(entry.constraint_summary),
+            declared_constraint_types=declared_constraint_types,
+            loaded_constraint_types=loaded_constraint_types,
             base_artifacts=base_artifacts,
             output_artifacts=artifacts,
         )
@@ -370,6 +395,58 @@ def _optional_float(value: Any) -> float | None:
     return float(value)
 
 
+def _resolve_declared_constraint_types(entry: CatalogPromptEntry) -> tuple[str, ...]:
+    summary_types = entry.constraint_summary.get("constraint_types")
+    if isinstance(summary_types, list):
+        cleaned = [str(value).strip() for value in summary_types if str(value).strip()]
+        if cleaned:
+            return tuple(dict.fromkeys(cleaned))
+    if entry.constraints_path is None:
+        return ()
+    payload = json.loads(Path(entry.constraints_path).read_text(encoding="utf-8"))
+    if isinstance(payload, dict):
+        payload = [payload]
+    if not isinstance(payload, list):
+        raise ValueError(f"Constraint payload at {entry.constraints_path!r} must be a list or dict.")
+    types = [
+        str(item.get("type", "")).strip()
+        for item in payload
+        if isinstance(item, dict) and str(item.get("type", "")).strip()
+    ]
+    return tuple(dict.fromkeys(types))
+
+
+def _uses_rich_constraints(constraint_types: Sequence[str]) -> bool:
+    return any(constraint_type in RICH_CONSTRAINT_TYPES for constraint_type in constraint_types)
+
+
+def _is_smplx_generation_target(
+    *,
+    model_display_name: str,
+    resolved_model: str,
+    target_skeleton: Any,
+    runtime_skeleton: Any,
+) -> bool:
+    if str(target_skeleton or "").upper() == "SMPLX":
+        return True
+    if _is_smplx_model(model_display_name) or _is_smplx_model(resolved_model):
+        return True
+    return _is_smplx_model(getattr(runtime_skeleton, "name", ""))
+
+
+def _describe_loaded_constraints(constraint_lst: Sequence[Any]) -> list[str]:
+    types: list[str] = []
+    for constraint in constraint_lst:
+        if isinstance(constraint, dict):
+            name = constraint.get("type")
+        else:
+            name = getattr(constraint, "name", None) or type(constraint).__name__
+        text = str(name).strip()
+        if text:
+            types.append(text)
+    return list(dict.fromkeys(types))
+
+
 def _resolve_cfg_kwargs(cfg_type: str | None, cfg_weight: Sequence[float] | None) -> dict[str, Any]:
     if cfg_type is None and cfg_weight is None:
         return {}
@@ -407,6 +484,9 @@ def _build_sample_manifest_entries(
     fps: float,
     diffusion_steps: int,
     warnings: Sequence[str],
+    constraint_summary: dict[str, Any],
+    declared_constraint_types: Sequence[str],
+    loaded_constraint_types: Sequence[str],
     base_artifacts: dict[str, Any],
     output_artifacts: dict[str, Any],
 ) -> list[dict[str, Any]]:
@@ -436,6 +516,10 @@ def _build_sample_manifest_entries(
                 "fps": float(fps),
                 "diffusion_steps": int(diffusion_steps),
                 "constraints_path": entry.constraints_path,
+                "constraint_summary": dict(constraint_summary),
+                "declared_constraint_types": list(declared_constraint_types),
+                "loaded_constraint_types": list(loaded_constraint_types),
+                "num_constraints_loaded": int(len(loaded_constraint_types)),
                 "warnings": list(warnings),
                 "artifacts": sample_artifacts,
             }

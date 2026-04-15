@@ -14,8 +14,10 @@ from .metadata import get_protocol_info
 from .prompts import (
     DEFAULT_SYSTEM_PROMPT_PATH,
     DEFAULT_USER_PROMPT_PATH,
+    NON_DEGRADING_PROMPT_WARNINGS,
     build_prompt_placeholders_from_metadata,
     render_prompts_from_placeholders,
+    sanitize_kimodo_prompt_text,
 )
 from .qwen_backend import QwenGenerationConfig, QwenVideoBackend
 from .schemas import DescriptionValidationError, VideoDescription, parse_model_response
@@ -42,7 +44,7 @@ def describe_windows(
     device_map: str = "auto",
     torch_dtype: str = "auto",
     attn_implementation: str = "sdpa",
-    num_video_frames: int = 32,
+    num_video_frames: int = 48,
     max_new_tokens: int = 384,
     temperature: float = 0.2,
     top_p: float = 0.9,
@@ -168,6 +170,17 @@ def describe_windows(
                 parsed = parse_model_response(raw_response)
                 description = parsed.description
                 parsed_warnings.extend(parsed.warnings)
+                sanitized_prompt_text, sanitization_warnings = sanitize_kimodo_prompt_text(
+                    description.prompt_text,
+                    body_parts=description.body_parts.to_dict(),
+                )
+                parsed_warnings.extend(sanitization_warnings)
+                description = VideoDescription(
+                    prompt_text=sanitized_prompt_text,
+                    dominant_behaviors=description.dominant_behaviors,
+                    body_parts=description.body_parts,
+                    clip_notes=description.clip_notes,
+                )
             except DescriptionValidationError as exc:
                 errors.append(str(exc))
             except Exception as exc:  # pragma: no cover - covered in runtime rather than unit tests
@@ -179,7 +192,13 @@ def describe_windows(
             else:
                 if not bool(video_metadata.get("available", False)):
                     parsed_warnings.append("video_metadata_unavailable")
-                status = "warning" if len(parsed_warnings) > 0 else "ok"
+                unique_warnings = list(dict.fromkeys(parsed_warnings))
+                degrading_warnings = [
+                    warning
+                    for warning in unique_warnings
+                    if warning not in NON_DEGRADING_PROMPT_WARNINGS
+                ]
+                status = "warning" if degrading_warnings else "ok"
                 if status == "ok":
                     num_ok += 1
                 else:

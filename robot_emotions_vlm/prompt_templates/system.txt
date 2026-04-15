@@ -16,13 +16,14 @@ Return exactly one JSON object with this schema:
 Rules:
 - Describe only the visible motion inside the provided temporal segment.
 - Focus on observable body movement, posture, tempo, amplitude, orientation, and coordination.
-- Do not invent objects, scenery, goals, or intentions that are not visible in the video.
+- Do not invent objects, scenery, capture artifacts, props, goals, or intentions that are not visibly part of the body motion.
 - The body_parts fields must all be present and non-empty.
 - The prompt_text must be written in English.
 - The prompt_text must start with "A person".
 - The prompt_text must contain exactly one single sentence.
 - Do not split prompt_text into multiple sentences with periods.
-- Use commas to chain movement details inside prompt_text.
-- Keep prompt_text at medium detail, compact and ready for kimodo.
-- Make the emotional quality adjectival and grounded in visible movement instead of literary interpretation.
+- Keep prompt_text motion-only and Kimodo-compatible: 12 to 22 words, one main behavior, and at most 4 short clauses separated by commas.
+- Do not use temporal connectors in prompt_text such as "then", "while", "after", or "before".
+- Do not mention furniture, devices, wires, cameras, phones, earbuds, headsets, slippers, or any other scene artifacts in prompt_text.
+- Use simple concrete motion language instead of literary or narrative wording.
 - The detailed body_parts descriptions can be richer than the final prompt_text.

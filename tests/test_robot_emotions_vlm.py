@@ -9,9 +9,9 @@ from unittest.mock import patch
 
 import numpy as np
 
-from pose_module.interfaces import IMUGPT_22_JOINT_NAMES, IMUGPT_22_PARENT_INDICES, PoseSequence3D
+from pose_module.interfaces import IKSequence, IMUGPT_22_JOINT_NAMES, IMUGPT_22_PARENT_INDICES, PoseSequence3D
 from pose_module.motionbert.adapter import write_pose_sequence3d_npz
-from robot_emotions_vlm.anchor_catalog import build_anchor_catalog
+from robot_emotions_vlm.anchor_catalog import SMPLX22_JOINT_NAMES, build_anchor_catalog
 from robot_emotions_vlm.cli import describe_videos, main as robot_emotions_vlm_main
 from robot_emotions_vlm.dataset import RobotEmotionsDataset
 from robot_emotions_vlm.kimodo_generation import (
@@ -19,7 +19,7 @@ from robot_emotions_vlm.kimodo_generation import (
     generate_kimodo_from_catalog,
     load_catalog_entries,
 )
-from robot_emotions_vlm.prompts import render_prompts
+from robot_emotions_vlm.prompts import render_prompts, sanitize_kimodo_prompt_text
 from robot_emotions_vlm.qwen_backend import QwenGenerationConfig, QwenVideoBackend
 from robot_emotions_vlm.schemas import DescriptionValidationError, parse_model_response
 from robot_emotions_vlm.window_descriptions import _write_video_window_subclip, describe_windows
@@ -32,13 +32,13 @@ def _build_dataset_tree(root: Path) -> None:
     (clip_root / "TAG_6_7_2.mp4").write_bytes(b"")
 
 
-def _make_pose_sequence(clip_id: str) -> PoseSequence3D:
+def _make_pose_sequence(clip_id: str, *, x_step: float = 0.02, z_step: float = 0.03) -> PoseSequence3D:
     num_frames = 10
     num_joints = len(IMUGPT_22_JOINT_NAMES)
     joint_positions_xyz = np.zeros((num_frames, num_joints, 3), dtype=np.float32)
     root_translation = np.zeros((num_frames, 3), dtype=np.float32)
     for frame_index in range(num_frames):
-        root_translation[frame_index] = np.asarray([0.02 * frame_index, 0.0, 0.03 * frame_index], dtype=np.float32)
+        root_translation[frame_index] = np.asarray([x_step * frame_index, 0.0, z_step * frame_index], dtype=np.float32)
         joint_positions_xyz[frame_index, :, 0] = np.linspace(-0.4, 0.4, num_joints, dtype=np.float32)
         joint_positions_xyz[frame_index, :, 1] = np.linspace(1.0, 0.1, num_joints, dtype=np.float32)
         joint_positions_xyz[frame_index, :, 2] = root_translation[frame_index, 2]
@@ -56,6 +56,71 @@ def _make_pose_sequence(clip_id: str) -> PoseSequence3D:
         source="unit_test",
         coordinate_space="pseudo_global_metric",
         root_translation_m=root_translation,
+    )
+
+
+def _make_ik_sequence(sequence: PoseSequence3D) -> IKSequence:
+    num_frames = sequence.num_frames
+    num_joints = len(IMUGPT_22_JOINT_NAMES)
+    local_joint_rotations = np.zeros((num_frames, num_joints, 4), dtype=np.float32)
+    local_joint_rotations[..., 0] = 1.0
+    return IKSequence(
+        clip_id=sequence.clip_id,
+        fps=sequence.fps,
+        fps_original=sequence.fps_original,
+        joint_names_3d=list(IMUGPT_22_JOINT_NAMES),
+        local_joint_rotations=local_joint_rotations,
+        root_translation_m=np.asarray(sequence.root_translation_m, dtype=np.float32),
+        joint_offsets_m=np.zeros((num_joints, 3), dtype=np.float32),
+        skeleton_parents=list(IMUGPT_22_PARENT_INDICES),
+        frame_indices=np.asarray(sequence.frame_indices, dtype=np.int32),
+        timestamps_sec=np.asarray(sequence.timestamps_sec, dtype=np.float32),
+        source="unit_test_ik",
+    )
+
+
+def _write_ik_sequence_npz(sequence: IKSequence, path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    np.savez(path, **sequence.to_npz_payload())
+
+
+def _write_anchor_pose_manifest(path: Path, *, clip_id: str, pose_path: Path) -> None:
+    path.write_text(
+        json.dumps(
+            {
+                "clip_id": clip_id,
+                "status": "warning",
+                "domain": "10ms",
+                "user_id": 2,
+                "tag_number": 11,
+                "artifacts": {"pose3d_npz_path": str(pose_path.resolve())},
+            },
+            ensure_ascii=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+
+def _write_anchor_qwen_catalog(path: Path, *, prompt_id: str, reference_clip_id: str, window_payload: dict[str, object]) -> None:
+    path.write_text(
+        json.dumps(
+            {
+                "prompt_id": prompt_id,
+                "window_id": prompt_id,
+                "prompt_text": "A person stands with open posture, expressive arm motion, upright trunk alignment, lively head orientation, and stable leg support",
+                "labels": {"emotion": "happiness", "modality": "standing"},
+                "seed": 123,
+                "num_samples": 4,
+                "reference_clip_id": reference_clip_id,
+                "duration_hint_sec": float(window_payload["duration_sec"]),
+                "window": window_payload,
+                "source_metadata": {"dataset": "RobotEmotions"},
+            },
+            ensure_ascii=True,
+        )
+        + "\n",
+        encoding="utf-8",
     )
 
 
@@ -135,7 +200,7 @@ class _FakeKimodoModel:
 
 class _FakeKimodoRuntime:
     def __init__(self) -> None:
-        self.default_model = "Kimodo-SOMA-RP-v1"
+        self.default_model = "Kimodo-SMPLX-RP-v1"
         self.model = _FakeKimodoModel()
         self.seed_calls: list[int] = []
         self.save_calls: list[dict[str, object]] = []
@@ -147,10 +212,10 @@ class _FakeKimodoRuntime:
 
     def load_model(self, model_name, **kwargs):
         self.loaded_model_name = model_name
-        return self.model, "kimodo-soma-rp"
+        return self.model, "kimodo-smplx-rp"
 
     def get_model_info(self, resolved_model):
-        return type("Info", (), {"display_name": "Kimodo-SOMA-RP-v1"})()
+        return type("Info", (), {"display_name": "Kimodo-SMPLX-RP-v1", "skeleton": "SMPLX"})()
 
     def seed_everything(self, seed: int) -> None:
         self.seed_calls.append(seed)
@@ -163,7 +228,10 @@ class _FakeKimodoRuntime:
                 "device": device,
             }
         )
-        return [{"type": "root2d"}]
+        payload = json.loads(Path(path).read_text(encoding="utf-8"))
+        if isinstance(payload, dict):
+            payload = [payload]
+        return payload
 
     def save_outputs(self, **kwargs):
         self.save_calls.append(kwargs)
@@ -291,6 +359,25 @@ class RobotEmotionsVLMTests(unittest.TestCase):
 
         with self.assertRaises(DescriptionValidationError):
             parse_model_response(raw_response)
+
+    def test_sanitize_kimodo_prompt_text_removes_artifacts_and_temporal_tail(self) -> None:
+        sanitized, warnings = sanitize_kimodo_prompt_text(
+            "A person sits on a chair, raises one arm sharply, then turns toward the camera",
+            body_parts={
+                "arms": "The arms lift sharply away from the torso.",
+                "trunk": "The trunk stays compact and steady.",
+                "head": "The head remains forward and controlled.",
+                "legs": "The legs stay quiet and grounded.",
+            },
+        )
+
+        self.assertTrue(sanitized.startswith("A person"))
+        self.assertNotIn("chair", sanitized.lower())
+        self.assertNotIn("camera", sanitized.lower())
+        self.assertNotIn("then", sanitized.lower())
+        self.assertGreaterEqual(len(sanitized.split()), 12)
+        self.assertLessEqual(len(sanitized.split()), 22)
+        self.assertIn("prompt_text_temporal_tail_removed", warnings)
 
     def test_describe_videos_writes_manifest_and_kimodo_catalog(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -438,6 +525,12 @@ class RobotEmotionsVLMTests(unittest.TestCase):
                 json.dumps(
                     [
                         {
+                            "type": "fullbody",
+                            "frame_indices": [0, 2],
+                            "local_joints_rot": [[[0.0, 0.0, 0.0]] * len(IMUGPT_22_JOINT_NAMES)] * 2,
+                            "root_positions": [[0.0, 0.0, 0.0], [0.1, 0.0, 0.0]],
+                        },
+                        {
                             "type": "root2d",
                             "frame_indices": [0, 1, 2],
                             "smooth_root_2d": [[0.0, 0.0], [0.1, 0.0], [0.2, 0.0]],
@@ -461,6 +554,10 @@ class RobotEmotionsVLMTests(unittest.TestCase):
                                 "reference_clip_id": "robot_emotions_10ms_u02_tag11",
                                 "duration_hint_sec": 5.0,
                                 "constraints_path": str(constraints_path.resolve()),
+                                "constraint_summary": {
+                                    "constraint_types": ["fullbody", "root2d"],
+                                    "constraint_frame_counts": {"fullbody": 2, "root2d": 3},
+                                },
                             },
                             ensure_ascii=True,
                         ),
@@ -493,7 +590,10 @@ class RobotEmotionsVLMTests(unittest.TestCase):
             self.assertEqual(summary["num_ok"], 1)
             self.assertEqual(len(runtime.constraint_load_calls), 1)
             self.assertEqual(runtime.constraint_load_calls[0]["path"], str(constraints_path.resolve()))
-            self.assertEqual(runtime.model.calls[0]["constraint_lst"], [{"type": "root2d"}])
+            self.assertEqual(
+                [constraint["type"] for constraint in runtime.model.calls[0]["constraint_lst"]],
+                ["fullbody", "root2d"],
+            )
             manifest_entries = [
                 json.loads(line)
                 for line in Path(summary["manifest_path"]).read_text(encoding="utf-8").splitlines()
@@ -502,6 +602,8 @@ class RobotEmotionsVLMTests(unittest.TestCase):
             self.assertEqual(len(manifest_entries), 1)
             self.assertEqual(manifest_entries[0]["prompt_id"], "robot_emotions_10ms_u02_tag11__w000")
             self.assertEqual(manifest_entries[0]["constraints_path"], str(constraints_path.resolve()))
+            self.assertEqual(manifest_entries[0]["loaded_constraint_types"], ["fullbody", "root2d"])
+            self.assertEqual(manifest_entries[0]["num_constraints_loaded"], 2)
 
     def test_describe_windows_writes_window_catalog(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -592,6 +694,92 @@ class RobotEmotionsVLMTests(unittest.TestCase):
             self.assertEqual(catalog_entries[0]["window"]["prompt_id"], "robot_emotions_10ms_u02_tag11__w000")
             self.assertEqual(catalog_entries[0]["duration_hint_sec"], 0.2)
 
+    def test_describe_windows_keeps_cosmetic_prompt_warnings_as_ok(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            source_video_path = Path(tmp_dir) / "source.mp4"
+            source_video_path.write_bytes(b"fake_source")
+            pose_path = Path(tmp_dir) / "pose3d.npz"
+            sequence = _make_pose_sequence("robot_emotions_10ms_u02_tag11")
+            write_pose_sequence3d_npz(sequence, pose_path)
+            pose_manifest_path = Path(tmp_dir) / "pose3d_manifest.jsonl"
+            pose_manifest_path.write_text(
+                json.dumps(
+                    {
+                        "clip_id": "robot_emotions_10ms_u02_tag11",
+                        "status": "ok",
+                        "domain": "10ms",
+                        "user_id": 2,
+                        "tag_number": 11,
+                        "take_id": None,
+                        "labels": {"emotion": "neutrality"},
+                        "source": {
+                            "video_path": str(source_video_path.resolve()),
+                            "source_rel_dir": "10ms/User2/Tag11",
+                        },
+                        "video": {"fps": 20.0},
+                        "artifacts": {"pose3d_npz_path": str(pose_path.resolve())},
+                    },
+                    ensure_ascii=True,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            backend = _FakeBackend(
+                json.dumps(
+                    {
+                        "prompt_text": "A person stands with compact posture, measured arm motion, steady trunk alignment, attentive head orientation, and stable leg support.",
+                        "dominant_behaviors": ["measured standing"],
+                        "body_parts": {
+                            "arms": "Arms move with measured motion.",
+                            "trunk": "The trunk stays steady.",
+                            "head": "The head remains attentive.",
+                            "legs": "The legs provide stable support.",
+                        },
+                        "clip_notes": "",
+                    }
+                )
+            )
+
+            def _fake_write_subclip(*, source_video_path, output_path, start_sec, end_sec):
+                Path(output_path).write_bytes(b"fake_window_video")
+
+            fake_video_metadata = {
+                "available": True,
+                "video_path": str(source_video_path.resolve()),
+                "fps": 20.0,
+                "num_frames": 4,
+                "duration_sec": 0.2,
+                "width": 320,
+                "height": 240,
+            }
+            with patch(
+                "robot_emotions_vlm.window_descriptions._write_video_window_subclip",
+                side_effect=_fake_write_subclip,
+            ), patch(
+                "robot_emotions_vlm.window_descriptions.read_video_metadata",
+                return_value=fake_video_metadata,
+            ):
+                summary = describe_windows(
+                    pose3d_manifest_path=pose_manifest_path,
+                    output_dir=Path(tmp_dir) / "qwen_windows",
+                    window_sec=0.2,
+                    window_hop_sec=0.2,
+                    max_windows_per_clip=1,
+                    backend=backend,
+                )
+
+            self.assertEqual(summary["num_ok"], 1)
+            self.assertEqual(summary["num_warning"], 0)
+            quality_report = json.loads(
+                (
+                    Path(summary["output_dir"])
+                    / "robot_emotions_10ms_u02_tag11__w000"
+                    / "quality_report.json"
+                ).read_text(encoding="utf-8")
+            )
+            self.assertEqual(quality_report["status"], "ok")
+            self.assertIn("prompt_text_trailing_period_removed", quality_report["warnings"])
+
     def test_describe_windows_accepts_warning_pose_manifest_entries(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             source_video_path = Path(tmp_dir) / "source.mp4"
@@ -675,10 +863,13 @@ class RobotEmotionsVLMTests(unittest.TestCase):
 
     def test_write_video_window_subclip_passes_rational_rate_to_av(self) -> None:
         captured: dict[str, object] = {}
+        encoded_frames: list[object] = []
 
         class _FakeFrame:
             def __init__(self, time_value: float) -> None:
                 self.time = time_value
+                self.pts = None
+                self.time_base = None
 
             def reformat(self, **kwargs):
                 return self
@@ -713,6 +904,8 @@ class RobotEmotionsVLMTests(unittest.TestCase):
                 self.pix_fmt = None
 
             def encode(self, frame):
+                if frame is not None:
+                    encoded_frames.append(frame)
                 return []
 
         class _FakeOutputContainer:
@@ -746,64 +939,47 @@ class RobotEmotionsVLMTests(unittest.TestCase):
                 end_sec=0.03,
             )
 
-        self.assertEqual(captured["codec"], "mpeg4")
+        self.assertEqual(captured["codec"], "libx264")
         self.assertIsInstance(captured["rate"], Fraction)
+        self.assertEqual([frame.pts for frame in encoded_frames], [0, 1])
+        expected_time_base = Fraction(captured["rate"].denominator, captured["rate"].numerator)
+        self.assertTrue(all(frame.time_base == expected_time_base for frame in encoded_frames))
 
     def test_build_anchor_catalog_writes_window_catalog_and_constraints(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             pose_path = Path(tmp_dir) / "pose3d.npz"
             sequence = _make_pose_sequence("robot_emotions_10ms_u02_tag11")
             write_pose_sequence3d_npz(sequence, pose_path)
+            ik_path = Path(tmp_dir) / "ik_sequence.npz"
+            _write_ik_sequence_npz(_make_ik_sequence(sequence), ik_path)
             pose_manifest_path = Path(tmp_dir) / "pose3d_manifest.jsonl"
-            pose_manifest_path.write_text(
-                json.dumps(
-                    {
-                        "clip_id": "robot_emotions_10ms_u02_tag11",
-                        "status": "warning",
-                        "domain": "10ms",
-                        "user_id": 2,
-                        "tag_number": 11,
-                        "artifacts": {"pose3d_npz_path": str(pose_path.resolve())},
-                    },
-                    ensure_ascii=True,
-                )
-                + "\n",
-                encoding="utf-8",
+            _write_anchor_pose_manifest(
+                pose_manifest_path,
+                clip_id="robot_emotions_10ms_u02_tag11",
+                pose_path=pose_path,
             )
             qwen_catalog_path = Path(tmp_dir) / "kimodo_window_prompt_catalog.jsonl"
             window_payload = {
                 "window_index": 0,
                 "prompt_id": "robot_emotions_10ms_u02_tag11__w000",
                 "start_sec": 0.0,
-                "end_sec": 0.2,
-                "duration_sec": 0.2,
+                "end_sec": 0.4,
+                "duration_sec": 0.4,
                 "source_start_index": 0,
-                "source_end_index": 4,
+                "source_end_index": 8,
             }
-            qwen_catalog_path.write_text(
-                json.dumps(
-                    {
-                        "prompt_id": "robot_emotions_10ms_u02_tag11__w000",
-                        "window_id": "robot_emotions_10ms_u02_tag11__w000",
-                        "prompt_text": "A person stands with open posture, expressive arm motion, upright trunk alignment, lively head orientation, and stable leg support",
-                        "labels": {"emotion": "happiness", "modality": "standing"},
-                        "seed": 123,
-                        "num_samples": 4,
-                        "reference_clip_id": "robot_emotions_10ms_u02_tag11",
-                        "duration_hint_sec": 0.2,
-                        "window": window_payload,
-                        "source_metadata": {"dataset": "RobotEmotions"},
-                    },
-                    ensure_ascii=True,
-                )
-                + "\n",
-                encoding="utf-8",
+            _write_anchor_qwen_catalog(
+                qwen_catalog_path,
+                prompt_id="robot_emotions_10ms_u02_tag11__w000",
+                reference_clip_id="robot_emotions_10ms_u02_tag11",
+                window_payload=window_payload,
             )
 
             summary = build_anchor_catalog(
                 pose3d_manifest_path=pose_manifest_path,
                 qwen_window_catalog_path=qwen_catalog_path,
                 output_dir=Path(tmp_dir) / "anchors",
+                constraint_keyframes=5,
                 runtime=_FakeAnchorRuntime(fps=20.0),
             )
 
@@ -821,9 +997,273 @@ class RobotEmotionsVLMTests(unittest.TestCase):
             constraints_payload = json.loads(
                 Path(catalog_entries[0]["constraints_path"]).read_text(encoding="utf-8")
             )
-            self.assertEqual(constraints_payload[0]["type"], "root2d")
-            self.assertEqual(constraints_payload[0]["frame_indices"][0], 0)
-            self.assertEqual(catalog_entries[0]["constraint_summary"]["constraint_types"], ["root2d"])
+            self.assertEqual([constraint["type"] for constraint in constraints_payload], ["end-effector", "root2d"])
+            self.assertEqual(constraints_payload[0]["frame_indices"], [0, 2, 4, 5, 7])
+            self.assertEqual(len(constraints_payload[0]["root_positions"]), 5)
+            self.assertEqual(
+                constraints_payload[0]["joint_names"],
+                ["LeftFoot", "RightFoot", "LeftHand", "RightHand", "Hips"],
+            )
+            self.assertEqual(len(constraints_payload[1]["frame_indices"]), 8)
+            self.assertIn("global_root_heading", constraints_payload[1])
+            self.assertEqual(
+                catalog_entries[0]["constraint_summary"]["constraint_types"],
+                ["end-effector", "root2d"],
+            )
+            self.assertEqual(
+                catalog_entries[0]["constraint_summary"]["constraint_frame_counts"],
+                {"end-effector": 5, "root2d": 8},
+            )
+            self.assertTrue(catalog_entries[0]["constraint_summary"]["root2d_enabled"])
+            self.assertTrue(catalog_entries[0]["constraint_summary"]["heading_enabled"])
+            self.assertEqual(catalog_entries[0]["constraint_summary"]["ik_sequence_path"], str(ik_path.resolve()))
+
+    def test_build_anchor_catalog_grounds_fullbody_root_positions(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            pose_path = Path(tmp_dir) / "pose3d.npz"
+            sequence = _make_pose_sequence("robot_emotions_10ms_u02_tag11")
+            sequence.joint_positions_xyz[:, [7, 8, 10, 11], 1] = np.asarray(
+                [-0.5, -0.45, -0.55, -0.52],
+                dtype=np.float32,
+            )
+            write_pose_sequence3d_npz(sequence, pose_path)
+            _write_ik_sequence_npz(_make_ik_sequence(sequence), Path(tmp_dir) / "ik_sequence.npz")
+            pose_manifest_path = Path(tmp_dir) / "pose3d_manifest.jsonl"
+            _write_anchor_pose_manifest(
+                pose_manifest_path,
+                clip_id="robot_emotions_10ms_u02_tag11",
+                pose_path=pose_path,
+            )
+            qwen_catalog_path = Path(tmp_dir) / "kimodo_window_prompt_catalog.jsonl"
+            _write_anchor_qwen_catalog(
+                qwen_catalog_path,
+                prompt_id="robot_emotions_10ms_u02_tag11__w000",
+                reference_clip_id="robot_emotions_10ms_u02_tag11",
+                window_payload={
+                    "window_index": 0,
+                    "prompt_id": "robot_emotions_10ms_u02_tag11__w000",
+                    "start_sec": 0.0,
+                    "end_sec": 0.4,
+                    "duration_sec": 0.4,
+                    "source_start_index": 0,
+                    "source_end_index": 8,
+                },
+            )
+
+            summary = build_anchor_catalog(
+                pose3d_manifest_path=pose_manifest_path,
+                qwen_window_catalog_path=qwen_catalog_path,
+                output_dir=Path(tmp_dir) / "anchors",
+                constraint_keyframes=4,
+                runtime=_FakeAnchorRuntime(fps=20.0),
+            )
+
+            catalog_entry = json.loads(Path(summary["catalog_path"]).read_text(encoding="utf-8").strip())
+            constraints_payload = json.loads(Path(catalog_entry["constraints_path"]).read_text(encoding="utf-8"))
+            grounded_root_positions = np.asarray(constraints_payload[0]["root_positions"], dtype=np.float32)
+            self.assertTrue(np.allclose(grounded_root_positions[:, 1], 0.55, atol=1e-6))
+            self.assertTrue(np.all(grounded_root_positions[:, 1] > 0.0))
+
+    def test_build_anchor_catalog_retargets_fullbody_rotations_to_smplx_frame(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            pose_path = Path(tmp_dir) / "pose3d.npz"
+            sequence = _make_pose_sequence("robot_emotions_10ms_u02_tag11", x_step=0.0, z_step=0.0)
+            joint_index = {name: idx for idx, name in enumerate(IMUGPT_22_JOINT_NAMES)}
+            reference_offsets = {
+                "Pelvis": [0.0, 0.0, 0.0],
+                "Left_hip": [0.09, -0.03, 0.0],
+                "Right_hip": [-0.09, -0.03, 0.0],
+                "Spine1": [0.0, 0.18, 0.0],
+                "Left_knee": [0.09, -0.42, 0.02],
+                "Right_knee": [-0.09, -0.42, 0.02],
+                "Spine2": [0.0, 0.34, 0.0],
+                "Left_ankle": [0.09, -0.78, 0.04],
+                "Right_ankle": [-0.09, -0.78, 0.04],
+                "Spine3": [0.0, 0.52, 0.0],
+                "Left_foot": [0.09, -0.84, 0.16],
+                "Right_foot": [-0.09, -0.84, 0.16],
+                "Neck": [0.0, 0.68, 0.0],
+                "Left_collar": [0.08, 0.56, 0.0],
+                "Right_collar": [-0.08, 0.56, 0.0],
+                "Head": [0.0, 0.84, 0.02],
+                "Left_shoulder": [0.12, 0.49, 0.01],
+                "Right_shoulder": [-0.12, 0.49, 0.01],
+                "Left_elbow": [0.11, 0.27, 0.03],
+                "Right_elbow": [-0.11, 0.27, 0.03],
+                "Left_wrist": [0.08, 0.08, 0.05],
+                "Right_wrist": [-0.08, 0.08, 0.05],
+            }
+            for frame_index in range(sequence.num_frames):
+                root = np.asarray(sequence.root_translation_m[frame_index], dtype=np.float32)
+                for joint_name, offset in reference_offsets.items():
+                    sequence.joint_positions_xyz[frame_index, joint_index[joint_name]] = (
+                        root + np.asarray(offset, dtype=np.float32)
+                    )
+            write_pose_sequence3d_npz(sequence, pose_path)
+            _write_ik_sequence_npz(_make_ik_sequence(sequence), Path(tmp_dir) / "ik_sequence.npz")
+            pose_manifest_path = Path(tmp_dir) / "pose3d_manifest.jsonl"
+            _write_anchor_pose_manifest(
+                pose_manifest_path,
+                clip_id="robot_emotions_10ms_u02_tag11",
+                pose_path=pose_path,
+            )
+            qwen_catalog_path = Path(tmp_dir) / "kimodo_window_prompt_catalog.jsonl"
+            _write_anchor_qwen_catalog(
+                qwen_catalog_path,
+                prompt_id="robot_emotions_10ms_u02_tag11__w000",
+                reference_clip_id="robot_emotions_10ms_u02_tag11",
+                window_payload={
+                    "window_index": 0,
+                    "prompt_id": "robot_emotions_10ms_u02_tag11__w000",
+                    "start_sec": 0.0,
+                    "end_sec": 0.4,
+                    "duration_sec": 0.4,
+                    "source_start_index": 0,
+                    "source_end_index": 8,
+                },
+            )
+
+            summary = build_anchor_catalog(
+                pose3d_manifest_path=pose_manifest_path,
+                qwen_window_catalog_path=qwen_catalog_path,
+                output_dir=Path(tmp_dir) / "anchors",
+                constraint_keyframes=4,
+                runtime=_FakeAnchorRuntime(fps=20.0),
+            )
+
+            catalog_entry = json.loads(Path(summary["catalog_path"]).read_text(encoding="utf-8").strip())
+            constraints_payload = json.loads(Path(catalog_entry["constraints_path"]).read_text(encoding="utf-8"))
+            fullbody_local_rot = np.asarray(constraints_payload[0]["local_joints_rot"], dtype=np.float32)
+            arm_indices = [
+                int(SMPLX22_JOINT_NAMES.index("left_shoulder")),
+                int(SMPLX22_JOINT_NAMES.index("right_shoulder")),
+                int(SMPLX22_JOINT_NAMES.index("left_elbow")),
+                int(SMPLX22_JOINT_NAMES.index("right_elbow")),
+                int(SMPLX22_JOINT_NAMES.index("left_wrist")),
+                int(SMPLX22_JOINT_NAMES.index("right_wrist")),
+            ]
+            arm_rotation_norms = np.linalg.norm(fullbody_local_rot[:, arm_indices, :], axis=-1)
+            self.assertGreater(float(np.max(arm_rotation_norms)), 0.05)
+
+    def test_build_anchor_catalog_skips_root2d_for_small_displacement(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            pose_path = Path(tmp_dir) / "pose3d.npz"
+            sequence = _make_pose_sequence("robot_emotions_10ms_u02_tag11", x_step=0.004, z_step=0.0)
+            write_pose_sequence3d_npz(sequence, pose_path)
+            _write_ik_sequence_npz(_make_ik_sequence(sequence), Path(tmp_dir) / "ik_sequence.npz")
+            pose_manifest_path = Path(tmp_dir) / "pose3d_manifest.jsonl"
+            _write_anchor_pose_manifest(
+                pose_manifest_path,
+                clip_id="robot_emotions_10ms_u02_tag11",
+                pose_path=pose_path,
+            )
+            qwen_catalog_path = Path(tmp_dir) / "kimodo_window_prompt_catalog.jsonl"
+            _write_anchor_qwen_catalog(
+                qwen_catalog_path,
+                prompt_id="robot_emotions_10ms_u02_tag11__w000",
+                reference_clip_id="robot_emotions_10ms_u02_tag11",
+                window_payload={
+                    "window_index": 0,
+                    "prompt_id": "robot_emotions_10ms_u02_tag11__w000",
+                    "start_sec": 0.0,
+                    "end_sec": 0.4,
+                    "duration_sec": 0.4,
+                    "source_start_index": 0,
+                    "source_end_index": 8,
+                },
+            )
+
+            summary = build_anchor_catalog(
+                pose3d_manifest_path=pose_manifest_path,
+                qwen_window_catalog_path=qwen_catalog_path,
+                output_dir=Path(tmp_dir) / "anchors",
+                constraint_keyframes=4,
+                runtime=_FakeAnchorRuntime(fps=20.0),
+            )
+
+            catalog_entry = json.loads(Path(summary["catalog_path"]).read_text(encoding="utf-8").strip())
+            constraints_payload = json.loads(Path(catalog_entry["constraints_path"]).read_text(encoding="utf-8"))
+            self.assertEqual([constraint["type"] for constraint in constraints_payload], ["end-effector"])
+            self.assertFalse(catalog_entry["constraint_summary"]["root2d_enabled"])
+            self.assertFalse(catalog_entry["constraint_summary"]["heading_enabled"])
+
+    def test_build_anchor_catalog_emits_root2d_without_heading_for_mid_displacement(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            pose_path = Path(tmp_dir) / "pose3d.npz"
+            sequence = _make_pose_sequence("robot_emotions_10ms_u02_tag11", x_step=0.01, z_step=0.0)
+            write_pose_sequence3d_npz(sequence, pose_path)
+            _write_ik_sequence_npz(_make_ik_sequence(sequence), Path(tmp_dir) / "ik_sequence.npz")
+            pose_manifest_path = Path(tmp_dir) / "pose3d_manifest.jsonl"
+            _write_anchor_pose_manifest(
+                pose_manifest_path,
+                clip_id="robot_emotions_10ms_u02_tag11",
+                pose_path=pose_path,
+            )
+            qwen_catalog_path = Path(tmp_dir) / "kimodo_window_prompt_catalog.jsonl"
+            _write_anchor_qwen_catalog(
+                qwen_catalog_path,
+                prompt_id="robot_emotions_10ms_u02_tag11__w000",
+                reference_clip_id="robot_emotions_10ms_u02_tag11",
+                window_payload={
+                    "window_index": 0,
+                    "prompt_id": "robot_emotions_10ms_u02_tag11__w000",
+                    "start_sec": 0.0,
+                    "end_sec": 0.4,
+                    "duration_sec": 0.4,
+                    "source_start_index": 0,
+                    "source_end_index": 8,
+                },
+            )
+
+            summary = build_anchor_catalog(
+                pose3d_manifest_path=pose_manifest_path,
+                qwen_window_catalog_path=qwen_catalog_path,
+                output_dir=Path(tmp_dir) / "anchors",
+                constraint_keyframes=4,
+                runtime=_FakeAnchorRuntime(fps=20.0),
+            )
+
+            catalog_entry = json.loads(Path(summary["catalog_path"]).read_text(encoding="utf-8").strip())
+            constraints_payload = json.loads(Path(catalog_entry["constraints_path"]).read_text(encoding="utf-8"))
+            self.assertEqual([constraint["type"] for constraint in constraints_payload], ["end-effector", "root2d"])
+            self.assertNotIn("global_root_heading", constraints_payload[1])
+            self.assertTrue(catalog_entry["constraint_summary"]["root2d_enabled"])
+            self.assertFalse(catalog_entry["constraint_summary"]["heading_enabled"])
+
+    def test_build_anchor_catalog_requires_ik_sequence(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            pose_path = Path(tmp_dir) / "pose3d.npz"
+            sequence = _make_pose_sequence("robot_emotions_10ms_u02_tag11")
+            write_pose_sequence3d_npz(sequence, pose_path)
+            pose_manifest_path = Path(tmp_dir) / "pose3d_manifest.jsonl"
+            _write_anchor_pose_manifest(
+                pose_manifest_path,
+                clip_id="robot_emotions_10ms_u02_tag11",
+                pose_path=pose_path,
+            )
+            qwen_catalog_path = Path(tmp_dir) / "kimodo_window_prompt_catalog.jsonl"
+            _write_anchor_qwen_catalog(
+                qwen_catalog_path,
+                prompt_id="robot_emotions_10ms_u02_tag11__w000",
+                reference_clip_id="robot_emotions_10ms_u02_tag11",
+                window_payload={
+                    "window_index": 0,
+                    "prompt_id": "robot_emotions_10ms_u02_tag11__w000",
+                    "start_sec": 0.0,
+                    "end_sec": 0.4,
+                    "duration_sec": 0.4,
+                    "source_start_index": 0,
+                    "source_end_index": 8,
+                },
+            )
+
+            with self.assertRaisesRegex(ValueError, "ik_sequence.npz"):
+                build_anchor_catalog(
+                    pose3d_manifest_path=pose_manifest_path,
+                    qwen_window_catalog_path=qwen_catalog_path,
+                    output_dir=Path(tmp_dir) / "anchors",
+                    runtime=_FakeAnchorRuntime(fps=20.0),
+                )
 
     def test_save_smplx_amass_outputs_writes_next_to_npz(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -876,6 +1316,7 @@ class RobotEmotionsVLMTests(unittest.TestCase):
 
         self.assertEqual(exit_code, 0)
         mocked_runner.assert_called_once()
+        self.assertEqual(mocked_runner.call_args.kwargs["num_video_frames"], 48)
         mocked_print.assert_called_once()
 
     def test_cli_dispatches_build_anchor_catalog(self) -> None:
@@ -890,11 +1331,14 @@ class RobotEmotionsVLMTests(unittest.TestCase):
                         "/tmp/kimodo_window_prompt_catalog.jsonl",
                         "--output-dir",
                         "/tmp/anchors",
+                        "--constraint-keyframes",
+                        "6",
                     ]
                 )
 
         self.assertEqual(exit_code, 0)
         mocked_runner.assert_called_once()
+        self.assertEqual(mocked_runner.call_args.kwargs["constraint_keyframes"], 6)
         mocked_print.assert_called_once()
 
     def test_qwen_backend_passes_fps_none_with_num_frames(self) -> None:

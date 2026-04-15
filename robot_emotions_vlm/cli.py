@@ -248,7 +248,7 @@ def build_parser() -> argparse.ArgumentParser:
     describe_windows_parser.add_argument("--device-map", default="auto")
     describe_windows_parser.add_argument("--torch-dtype", default="auto")
     describe_windows_parser.add_argument("--attn-implementation", default="sdpa")
-    describe_windows_parser.add_argument("--num-video-frames", type=int, default=32)
+    describe_windows_parser.add_argument("--num-video-frames", type=int, default=48)
     describe_windows_parser.add_argument("--max-new-tokens", type=int, default=384)
     describe_windows_parser.add_argument("--temperature", type=float, default=0.2)
     describe_windows_parser.add_argument("--top-p", type=float, default=0.9)
@@ -286,6 +286,7 @@ def build_parser() -> argparse.ArgumentParser:
     anchor_parser.add_argument("--output-dir", required=True)
     anchor_parser.add_argument("--model", default=DEFAULT_KIMODO_GENERATION_MODEL)
     anchor_parser.add_argument("--clip-id", action="append", dest="clip_ids")
+    anchor_parser.add_argument("--constraint-keyframes", type=int, default=8)
     return parser
 
 
@@ -346,6 +347,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 output_dir=args.output_dir,
                 model_name=args.model,
                 clip_ids=args.clip_ids,
+                constraint_keyframes=args.constraint_keyframes,
             )
             print(json.dumps(summary, indent=2, ensure_ascii=True))
             return 0

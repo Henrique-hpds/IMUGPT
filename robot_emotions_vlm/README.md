@@ -82,6 +82,8 @@ python -m robot_emotions_vlm build-anchor-catalog \
   --output-dir output/robot_emotions_kimodo_anchors
 ```
 
+If the real pose export already contains `pose/ik_sequence.npz`, the anchor builder reuses it. Otherwise it derives and caches that IK export automatically next to `pose3d.npz`.
+
 Generate Kimodo motions for all catalog entries:
 
 ```bash
