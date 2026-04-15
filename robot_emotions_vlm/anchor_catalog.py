@@ -2,24 +2,19 @@
 
 from __future__ import annotations
 
-import importlib
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Sequence
 
 import numpy as np
+from scipy.spatial.transform import Rotation
 
-from pose_module.export.bvh import _build_children_list, _collect_depth_first_order
-from pose_module.export.ik_adapter import (
-    _estimate_local_rotation_matrices,
-    _rotation_matrices_to_wxyz_quaternions,
-    run_ik,
-)
+from pose_module.export.ik_adapter import run_ik
 from pose_module.interfaces import IKSequence, PoseSequence3D
 
 from .export import write_json, write_jsonl
 from .kimodo_generation import (
     DEFAULT_KIMODO_GENERATION_MODEL,
-    _import_kimodo_package,
     _load_kimodo_runtime,
     load_catalog_entries,
     select_catalog_entries,
@@ -35,6 +30,13 @@ from .windowing import (
 
 ROOT2D_MIN_DISPLACEMENT_M = 0.05
 HEADING_MIN_DISPLACEMENT_M = 0.10
+GROUND_HEIGHT_QUANTILE = 0.05
+ROOT_ALIGNMENT_TOLERANCE_M = 1e-3
+IK_ALIGNMENT_TOLERANCE_M = 1e-3
+TIMESTAMP_ALIGNMENT_TOLERANCE_SEC = 1e-4
+IK_SEQUENCE_FILENAME = "ik_sequence.npz"
+CONSTRAINT_MODE = "ik_sequence"
+
 SMPLX22_JOINT_NAMES = (
     "pelvis",
     "left_hip",
@@ -83,6 +85,20 @@ IMUGPT_TO_SMPLX_JOINT_MAP = (
     ("Left_wrist", "left_wrist"),
     ("Right_wrist", "right_wrist"),
 )
+SUPPORT_JOINT_NAMES = ("left_ankle", "right_ankle", "left_foot", "right_foot")
+
+
+@dataclass(frozen=True)
+class _CachedPoseClip:
+    sequence: PoseSequence3D
+    source_times: np.ndarray
+    smplx_source_indices: np.ndarray
+    root_translation_m: np.ndarray
+    root_alignment_max_error_m: float
+    ik_sequence: IKSequence
+    ik_path: Path
+    ik_smplx_source_indices: np.ndarray
+    ik_root_alignment_max_error_m: float
 
 
 def build_anchor_catalog(
@@ -133,9 +149,8 @@ def build_anchor_catalog(
             f"got model={model_display_name!r}, skeleton={target_skeleton!r}."
         )
     target_fps = float(model.fps)
-    constraint_skeleton = _resolve_smplx_constraint_skeleton(getattr(model, "skeleton", None))
 
-    cache: dict[str, tuple[PoseSequence3D, np.ndarray, np.ndarray, str, IKSequence, Path]] = {}
+    cache: dict[str, _CachedPoseClip] = {}
     catalog_entries: list[dict[str, Any]] = []
     trace_paths: list[str] = []
 
@@ -158,49 +173,54 @@ def build_anchor_catalog(
         window = WindowSpec.from_dict(qwen_entry.window, prompt_id=prompt_id)
         pose_entry = pose_by_clip[reference_clip_id]
         pose_path = Path(pose_entry.pose3d_npz_path)
+
         if reference_clip_id not in cache:
             sequence = load_pose_sequence3d(pose_path)
             source_times = resolve_source_times(sequence)
-            ik_path = _resolve_or_materialize_ik_sequence_path(
-                pose_path=pose_path,
-                sequence=sequence,
-            )
-            ik_sequence = _load_ik_sequence(ik_path)
-            _validate_ik_sequence_alignment(
+            smplx_source_indices = _resolve_smplx_source_indices(sequence.joint_names_3d)
+            root_translation_m = _require_root_translation(sequence, pose_path)
+            root_alignment_max_error_m = _validate_pose_sequence_for_constraints(
                 sequence=sequence,
                 source_times=source_times,
+                root_translation_m=root_translation_m,
+                smplx_source_indices=smplx_source_indices,
+                pose_path=pose_path,
+            )
+            ik_path = _resolve_or_materialize_ik_sequence_path(pose_path=pose_path, sequence=sequence)
+            ik_sequence = _load_ik_sequence(ik_path)
+            ik_smplx_source_indices = _resolve_smplx_source_indices(ik_sequence.joint_names_3d)
+            ik_root_alignment_max_error_m = _validate_ik_sequence_alignment(
+                sequence=sequence,
+                source_times=source_times,
+                root_translation_m=root_translation_m,
                 ik_sequence=ik_sequence,
                 pose_path=pose_path,
                 ik_path=ik_path,
             )
-            root_translation_xyz, root_source = _resolve_root_translation(ik_sequence)
-            cache[reference_clip_id] = (
-                sequence,
-                source_times,
-                root_translation_xyz,
-                root_source,
-                ik_sequence,
-                ik_path,
+            cache[reference_clip_id] = _CachedPoseClip(
+                sequence=sequence,
+                source_times=source_times,
+                smplx_source_indices=smplx_source_indices,
+                root_translation_m=root_translation_m,
+                root_alignment_max_error_m=root_alignment_max_error_m,
+                ik_sequence=ik_sequence,
+                ik_path=ik_path,
+                ik_smplx_source_indices=ik_smplx_source_indices,
+                ik_root_alignment_max_error_m=ik_root_alignment_max_error_m,
             )
-        sequence, source_times, root_translation_xyz, root_source, ik_sequence, ik_path = cache[reference_clip_id]
 
+        cached = cache[reference_clip_id]
         window_dir = output_root / prompt_id
         window_dir.mkdir(parents=True, exist_ok=True)
 
         constraints_payload, traceability = _build_window_constraints_payload(
-            sequence=sequence,
+            cached=cached,
             pose_path=pose_path,
-            source_times=source_times,
-            root_translation_xyz=root_translation_xyz,
-            root_source=root_source,
-            ik_sequence=ik_sequence,
-            ik_path=ik_path,
             window=window,
             target_fps=target_fps,
             target_model=model_display_name,
             target_skeleton=target_skeleton,
             constraint_keyframes=int(constraint_keyframes),
-            constraint_skeleton=constraint_skeleton,
         )
 
         constraints_path = window_dir / "constraints.json"
@@ -212,6 +232,7 @@ def build_anchor_catalog(
         entry_payload = dict(qwen_entry.raw_entry)
         entry_payload["constraints_path"] = str(constraints_path.resolve())
         entry_payload["constraint_summary"] = {
+            "constraint_mode": CONSTRAINT_MODE,
             "target_model": model_display_name,
             "target_skeleton": target_skeleton,
             "constraint_types": list(traceability["constraint_types"]),
@@ -224,7 +245,7 @@ def build_anchor_catalog(
             "target_keyframes": list(traceability["target_keyframes"]),
             "root2d_enabled": bool(traceability["root2d_enabled"]),
             "heading_enabled": bool(traceability["heading_enabled"]),
-            "ik_sequence_path": traceability["ik_sequence_path"],
+            "pose3d_source_path": traceability["source_pose3d_npz_path"],
             "root2d_min_displacement_m": float(traceability["root2d_min_displacement_m"]),
             "heading_min_displacement_m": float(traceability["heading_min_displacement_m"]),
         }
@@ -239,6 +260,7 @@ def build_anchor_catalog(
     write_jsonl(catalog_path, catalog_entries)
 
     summary = {
+        "constraint_mode": CONSTRAINT_MODE,
         "pose3d_manifest_path": str(Path(pose3d_manifest_path).resolve()),
         "qwen_window_catalog_path": str(Path(qwen_window_catalog_path).resolve()),
         "output_dir": str(output_root.resolve()),
@@ -250,6 +272,7 @@ def build_anchor_catalog(
         "constraint_keyframes": int(constraint_keyframes),
         "root2d_min_displacement_m": float(ROOT2D_MIN_DISPLACEMENT_M),
         "heading_min_displacement_m": float(HEADING_MIN_DISPLACEMENT_M),
+        "ground_height_quantile": float(GROUND_HEIGHT_QUANTILE),
         "num_input_clips": int(len(pose_entries)),
         "num_input_windows": int(len(qwen_entries)),
         "num_ok": int(len(catalog_entries)),
@@ -275,113 +298,225 @@ def _supports_smplx_rich_constraints(
     return "smplx" in str(getattr(model_skeleton, "name", "")).lower()
 
 
-def _resolve_or_materialize_ik_sequence_path(
-    *,
-    pose_path: Path,
-    sequence: PoseSequence3D,
-) -> Path:
-    ik_path = pose_path.with_name("ik_sequence.npz")
+def _resolve_smplx_source_indices(joint_names_3d: Sequence[str]) -> np.ndarray:
+    joint_names = [str(name) for name in joint_names_3d]
+    joint_to_index: dict[str, int] = {}
+    duplicates: set[str] = set()
+    for index, joint_name in enumerate(joint_names):
+        if joint_name in joint_to_index:
+            duplicates.add(joint_name)
+        joint_to_index[joint_name] = index
+    if duplicates:
+        raise ValueError(f"Joint source exposes duplicated joint names: {sorted(duplicates)}")
+
+    source_indices: list[int] = []
+    missing_source: list[str] = []
+    resolved_target_names: list[str] = []
+    for source_name, target_name in IMUGPT_TO_SMPLX_JOINT_MAP:
+        if source_name not in joint_to_index:
+            missing_source.append(source_name)
+            continue
+        source_indices.append(int(joint_to_index[source_name]))
+        resolved_target_names.append(target_name)
+
+    if missing_source:
+        raise ValueError(
+            "Joint source is missing IMUGPT22 joints required for SMPLX export: "
+            f"{sorted(missing_source)}"
+        )
+    if tuple(resolved_target_names) != SMPLX22_JOINT_NAMES:
+        raise ValueError(
+            "The fixed IMUGPT22 -> SMPLX22 mapping no longer matches the expected SMPLX joint order."
+        )
+    return np.asarray(source_indices, dtype=np.int32)
+
+
+def _require_root_translation(sequence: PoseSequence3D, pose_path: Path) -> np.ndarray:
+    root_translation_m = sequence.resolved_root_translation_m()
+    if root_translation_m is None:
+        raise ValueError(
+            f"Pose sequence {pose_path.resolve()} must expose root_translation_m for anchored constraints."
+        )
+    if not np.isfinite(root_translation_m).all():
+        raise ValueError(f"Pose sequence {pose_path.resolve()} root_translation_m contains NaN/Inf values.")
+    return root_translation_m.astype(np.float32, copy=False)
+
+
+def _resolve_or_materialize_ik_sequence_path(*, pose_path: Path, sequence: PoseSequence3D) -> Path:
+    ik_path = pose_path.with_name(IK_SEQUENCE_FILENAME)
     if ik_path.exists():
         return ik_path
 
-    run_ik(
+    result = run_ik(
         sequence,
         output_dir=pose_path.parent,
         write_bvh=False,
+        ik_sequence_filename=IK_SEQUENCE_FILENAME,
     )
+    artifacts = result.get("artifacts", {})
+    resolved_path = artifacts.get("ik_sequence_npz_path")
+    if resolved_path:
+        ik_path = Path(str(resolved_path))
     if not ik_path.exists():
-        raise ValueError(
-            f"Failed to materialize {ik_path.name} next to {pose_path.resolve()} from pose3d. "
-            "The anchor catalog requires an IK export compatible with the SMPLX constraint builder."
+        raise FileNotFoundError(
+            f"Unable to resolve IK sequence for {pose_path.resolve()}; expected {ik_path.resolve()}."
         )
     return ik_path
 
 
-def _load_ik_sequence(path: Path) -> IKSequence:
-    with np.load(path, allow_pickle=False) as payload:
-        return IKSequence.from_npz_payload(payload)
+def _load_ik_sequence(ik_path: Path) -> IKSequence:
+    with np.load(ik_path, allow_pickle=False) as payload:
+        return IKSequence.from_npz_payload({key: payload[key] for key in payload.files})
+
+
+def _validate_pose_sequence_for_constraints(
+    *,
+    sequence: PoseSequence3D,
+    source_times: np.ndarray,
+    root_translation_m: np.ndarray,
+    smplx_source_indices: np.ndarray,
+    pose_path: Path,
+) -> float:
+    if sequence.num_frames <= 0:
+        raise ValueError(f"Pose sequence {pose_path.resolve()} must contain at least one frame.")
+
+    joint_positions = np.asarray(sequence.joint_positions_xyz, dtype=np.float32)
+    if joint_positions.shape != (sequence.num_frames, len(sequence.joint_names_3d), 3):
+        raise ValueError(
+            f"Pose sequence {pose_path.resolve()} joint_positions_xyz has unexpected shape {joint_positions.shape}."
+        )
+    if not np.isfinite(joint_positions).all():
+        raise ValueError(f"Pose sequence {pose_path.resolve()} joint_positions_xyz contains NaN/Inf values.")
+
+    if source_times.shape != (sequence.num_frames,):
+        raise ValueError(
+            f"Pose sequence {pose_path.resolve()} timestamps must have shape [{sequence.num_frames}]."
+        )
+    if not np.isfinite(source_times).all():
+        raise ValueError(f"Pose sequence {pose_path.resolve()} timestamps contain NaN/Inf values.")
+
+    if root_translation_m.shape != (sequence.num_frames, 3):
+        raise ValueError(
+            f"Pose sequence {pose_path.resolve()} root_translation_m must have shape "
+            f"[{sequence.num_frames}, 3]."
+        )
+
+    pelvis_positions = joint_positions[:, int(smplx_source_indices[0]), :]
+    alignment_error = np.linalg.norm(pelvis_positions - root_translation_m, axis=1)
+    max_alignment_error_m = float(np.max(alignment_error))
+    if max_alignment_error_m > ROOT_ALIGNMENT_TOLERANCE_M:
+        raise ValueError(
+            f"Pose sequence {pose_path.resolve()} root_translation_m does not align with pelvis positions; "
+            f"max error is {max_alignment_error_m:.6f} m."
+        )
+    return max_alignment_error_m
 
 
 def _validate_ik_sequence_alignment(
     *,
     sequence: PoseSequence3D,
     source_times: np.ndarray,
+    root_translation_m: np.ndarray,
     ik_sequence: IKSequence,
     pose_path: Path,
     ik_path: Path,
-) -> None:
-    if str(ik_sequence.rotation_representation) != "quaternion_wxyz":
-        raise ValueError(
-            f"Unsupported IK rotation_representation {ik_sequence.rotation_representation!r} in {ik_path.resolve()}."
-        )
-
+) -> float:
     if ik_sequence.num_frames != sequence.num_frames:
         raise ValueError(
-            f"IK sequence {ik_path.resolve()} has {ik_sequence.num_frames} frames but "
-            f"{pose_path.resolve()} has {sequence.num_frames}."
+            f"IK sequence {ik_path.resolve()} frame count {ik_sequence.num_frames} does not match "
+            f"pose sequence {pose_path.resolve()} frame count {sequence.num_frames}."
         )
 
-    if np.asarray(ik_sequence.local_joint_rotations).shape != (ik_sequence.num_frames, len(IMUGPT_TO_SMPLX_JOINT_MAP), 4):
+    if np.asarray(ik_sequence.frame_indices, dtype=np.int32).shape != (sequence.num_frames,):
         raise ValueError(
-            f"IK sequence {ik_path.resolve()} must expose local_joint_rotations with shape "
-            f"[T, {len(IMUGPT_TO_SMPLX_JOINT_MAP)}, 4]."
+            f"IK sequence {ik_path.resolve()} frame_indices must have shape [{sequence.num_frames}]."
         )
-
-    root_translation = np.asarray(ik_sequence.root_translation_m, dtype=np.float32)
-    if root_translation.shape != (ik_sequence.num_frames, 3):
-        raise ValueError(f"IK root_translation_m in {ik_path.resolve()} must have shape [T, 3].")
-    if not np.isfinite(root_translation).all():
-        raise ValueError(f"IK root_translation_m in {ik_path.resolve()} contains NaN/Inf values.")
-
-    source_frame_ids = np.asarray(sequence.frame_indices, dtype=np.int32)
-    ik_frame_ids = np.asarray(ik_sequence.frame_indices, dtype=np.int32)
-    if source_frame_ids.shape != ik_frame_ids.shape or not np.array_equal(source_frame_ids, ik_frame_ids):
+    if not np.array_equal(
+        np.asarray(ik_sequence.frame_indices, dtype=np.int32),
+        np.asarray(sequence.frame_indices, dtype=np.int32),
+    ):
         raise ValueError(
-            f"IK frame_indices in {ik_path.resolve()} do not match pose frame_indices from {pose_path.resolve()}."
+            f"IK sequence {ik_path.resolve()} frame_indices do not align with {pose_path.resolve()}."
         )
 
-    ik_timestamps = np.asarray(ik_sequence.timestamps_sec, dtype=np.float32)
-    if ik_timestamps.shape != source_times.shape or not np.allclose(ik_timestamps, source_times, atol=1e-4):
+    timestamps_sec = np.asarray(ik_sequence.timestamps_sec, dtype=np.float32)
+    if timestamps_sec.shape != (sequence.num_frames,):
         raise ValueError(
-            f"IK timestamps in {ik_path.resolve()} do not align with pose timestamps from {pose_path.resolve()}."
+            f"IK sequence {ik_path.resolve()} timestamps must have shape [{sequence.num_frames}]."
+        )
+    if not np.isfinite(timestamps_sec).all():
+        raise ValueError(f"IK sequence {ik_path.resolve()} timestamps contain NaN/Inf values.")
+    if not np.allclose(
+        timestamps_sec,
+        source_times.astype(np.float32, copy=False),
+        atol=TIMESTAMP_ALIGNMENT_TOLERANCE_SEC,
+        rtol=0.0,
+    ):
+        raise ValueError(
+            f"IK sequence {ik_path.resolve()} timestamps do not align with {pose_path.resolve()}."
         )
 
-    _resolve_smplx_joint_indices(ik_sequence)
+    local_joint_rotations = np.asarray(ik_sequence.local_joint_rotations, dtype=np.float32)
+    if local_joint_rotations.ndim != 3:
+        raise ValueError(
+            f"IK sequence {ik_path.resolve()} local_joint_rotations must have shape [T, J, 4]."
+        )
+    if local_joint_rotations.shape[0] != sequence.num_frames:
+        raise ValueError(
+            f"IK sequence {ik_path.resolve()} local_joint_rotations must have {sequence.num_frames} frames."
+        )
+    if local_joint_rotations.shape[2] != 4:
+        raise ValueError(
+            f"IK sequence {ik_path.resolve()} local_joint_rotations must use quaternion_wxyz with shape [T, J, 4]."
+        )
+    if not np.isfinite(local_joint_rotations).all():
+        raise ValueError(f"IK sequence {ik_path.resolve()} local_joint_rotations contain NaN/Inf values.")
+    if str(ik_sequence.rotation_representation) != "quaternion_wxyz":
+        raise ValueError(
+            f"IK sequence {ik_path.resolve()} must use rotation_representation='quaternion_wxyz'."
+        )
 
+    ik_root_translation = np.asarray(ik_sequence.root_translation_m, dtype=np.float32)
+    if ik_root_translation.shape != (sequence.num_frames, 3):
+        raise ValueError(
+            f"IK sequence {ik_path.resolve()} root_translation_m must have shape [{sequence.num_frames}, 3]."
+        )
+    if not np.isfinite(ik_root_translation).all():
+        raise ValueError(f"IK sequence {ik_path.resolve()} root_translation_m contains NaN/Inf values.")
 
-def _resolve_root_translation(ik_sequence: IKSequence) -> tuple[np.ndarray, str]:
-    root_xyz = np.asarray(ik_sequence.root_translation_m, dtype=np.float32)
-    if not np.isfinite(root_xyz).all():
-        raise ValueError("ik_sequence.root_translation_m contains NaN/Inf values.")
-    return root_xyz, "ik_sequence.root_translation_m"
+    root_alignment_error = np.linalg.norm(ik_root_translation - root_translation_m, axis=1)
+    max_alignment_error_m = float(np.max(root_alignment_error))
+    if max_alignment_error_m > IK_ALIGNMENT_TOLERANCE_M:
+        raise ValueError(
+            f"IK sequence {ik_path.resolve()} root translation does not align with {pose_path.resolve()}; "
+            f"max error is {max_alignment_error_m:.6f} m."
+        )
+    return max_alignment_error_m
 
 
 def _build_window_constraints_payload(
     *,
-    sequence: PoseSequence3D,
+    cached: _CachedPoseClip,
     pose_path: Path,
-    source_times: np.ndarray,
-    root_translation_xyz: np.ndarray,
-    root_source: str,
-    ik_sequence: IKSequence,
-    ik_path: Path,
     window: WindowSpec,
     target_fps: float,
     target_model: str,
     target_skeleton: str | None,
     constraint_keyframes: int,
-    constraint_skeleton: Any,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    _validate_window_bounds(window, num_frames=cached.sequence.num_frames)
+
     num_target_frames = max(1, int(round(float(window.duration_sec) * float(target_fps))))
     dense_target_frame_indices = np.arange(num_target_frames, dtype=np.int32)
     sparse_target_frame_indices = _select_uniform_target_keyframes(num_target_frames, constraint_keyframes)
 
+    source_slice = slice(window.source_start_index, window.source_end_index)
     source_positions_window = np.asarray(
-        sequence.joint_positions_xyz[window.source_start_index : window.source_end_index],
+        cached.sequence.joint_positions_xyz[source_slice][:, cached.smplx_source_indices, :],
         dtype=np.float32,
     )
     source_root_window = np.asarray(
-        root_translation_xyz[window.source_start_index : window.source_end_index],
+        cached.root_translation_m[source_slice],
         dtype=np.float32,
     )
     if source_root_window.shape[0] <= 0:
@@ -390,62 +525,56 @@ def _build_window_constraints_payload(
         raise ValueError(f"Window {window.prompt_id!r} source pose and root windows are misaligned.")
     if not np.isfinite(source_positions_window).all():
         raise ValueError(f"Window {window.prompt_id!r} source pose contains NaN/Inf values.")
+    if not np.isfinite(source_root_window).all():
+        raise ValueError(f"Window {window.prompt_id!r} root translation contains NaN/Inf values.")
 
     source_times_window = (
-        np.asarray(source_times[window.source_start_index : window.source_end_index], dtype=np.float32)
-        - np.float32(window.start_sec)
+        np.asarray(cached.source_times[source_slice], dtype=np.float32) - np.float32(window.start_sec)
     )
     source_root_2d = source_root_window[:, [0, 2]]
-    if not np.isfinite(source_root_2d).all():
-        raise ValueError(f"Window {window.prompt_id!r} root2d contains NaN/Inf values.")
-
-    dense_root_2d = np.stack(
-        [
-            np.interp(
-                dense_target_frame_indices.astype(np.float32) / np.float32(target_fps),
-                source_times_window,
-                source_root_2d[:, axis],
-            ).astype(np.float32, copy=False)
-            for axis in range(2)
-        ],
-        axis=1,
+    dense_root_2d = _interpolate_dense_root2d(
+        target_frames=dense_target_frame_indices,
+        target_fps=target_fps,
+        source_times_window=source_times_window,
+        source_root_2d=source_root_2d,
     )
 
     sparse_source_indices = _map_target_frames_to_source_indices(
         target_frames=sparse_target_frame_indices,
         target_fps=target_fps,
-        source_times=source_times,
+        source_times=cached.source_times,
         window=window,
     )
     dense_source_indices = _map_target_frames_to_source_indices(
         target_frames=dense_target_frame_indices,
         target_fps=target_fps,
-        source_times=source_times,
+        source_times=cached.source_times,
         window=window,
     )
 
-    smplx_joint_indices = _resolve_smplx_joint_indices(ik_sequence)
-    sparse_source_positions = np.asarray(
-        sequence.joint_positions_xyz[np.asarray(sparse_source_indices, dtype=np.int32)][:, smplx_joint_indices, :],
+    sparse_source_indices = np.asarray(sparse_source_indices, dtype=np.int32)
+    sparse_source_root = np.asarray(
+        cached.ik_sequence.root_translation_m[sparse_source_indices],
         dtype=np.float32,
     )
-    ground_offset_m = np.float32(np.min(source_positions_window[..., 1]))
-    sparse_source_positions_grounded = sparse_source_positions.copy()
-    sparse_source_positions_grounded[..., 1] -= ground_offset_m
-    root_positions_grounded = sparse_source_positions_grounded[:, 0, :].astype(np.float32, copy=False)
-    fullbody_local_rot = _estimate_smplx22_fullbody_axis_angle(
-        sparse_source_positions_grounded,
-        constraint_skeleton=constraint_skeleton,
+    ground_height_m = _estimate_ground_height(source_positions_window)
+    sparse_root_positions_grounded = sparse_source_root.copy()
+    sparse_root_positions_grounded[:, 1] -= np.float32(ground_height_m)
+
+    fullbody_local_rot = _wxyz_quaternions_to_axis_angle(
+        np.asarray(
+            cached.ik_sequence.local_joint_rotations[sparse_source_indices][:, cached.ik_smplx_source_indices, :],
+            dtype=np.float32,
+        )
     )
 
     constraints_payload: list[dict[str, Any]] = [
         {
-            "type": "end-effector",
+            "type": "fullbody",
             "frame_indices": [int(value) for value in sparse_target_frame_indices.tolist()],
             "local_joints_rot": fullbody_local_rot.astype(np.float32, copy=False).tolist(),
-            "root_positions": root_positions_grounded.astype(np.float32, copy=False).tolist(),
-            "smooth_root_2d": root_positions_grounded[:, [0, 2]].astype(np.float32, copy=False).tolist(),
-            "joint_names": ["LeftFoot", "RightFoot", "LeftHand", "RightHand", "Hips"],
+            "root_positions": sparse_root_positions_grounded.astype(np.float32, copy=False).tolist(),
+            "smooth_root_2d": sparse_root_positions_grounded[:, [0, 2]].astype(np.float32, copy=False).tolist(),
         }
     ]
 
@@ -453,8 +582,8 @@ def _build_window_constraints_payload(
     root2d_enabled = root2d_displacement_m >= ROOT2D_MIN_DISPLACEMENT_M
     heading_enabled = False
 
-    constraint_types = ["end-effector"]
-    constraint_frame_counts = {"end-effector": int(len(sparse_target_frame_indices))}
+    constraint_types = ["fullbody"]
+    constraint_frame_counts = {"fullbody": int(len(sparse_target_frame_indices))}
     if root2d_enabled:
         root2d_payload: dict[str, Any] = {
             "type": "root2d",
@@ -470,18 +599,23 @@ def _build_window_constraints_payload(
         constraint_types.append("root2d")
         constraint_frame_counts["root2d"] = int(len(dense_target_frame_indices))
 
-    source_frame_ids = np.asarray(sequence.frame_indices, dtype=np.int32)
+    source_frame_ids = np.asarray(cached.sequence.frame_indices, dtype=np.int32)
     source_start_frame = int(source_frame_ids[window.source_start_index])
     source_end_frame = int(source_frame_ids[max(window.source_end_index - 1, window.source_start_index)])
     traceability = {
+        "constraint_mode": CONSTRAINT_MODE,
         "prompt_id": window.prompt_id,
-        "reference_clip_id": sequence.clip_id,
+        "reference_clip_id": cached.sequence.clip_id,
         "source_pose3d_npz_path": str(pose_path.resolve()),
-        "ik_sequence_path": str(ik_path.resolve()),
-        "root_source": root_source,
-        "fullbody_root_source": "pose3d_joint_positions_xyz_grounded[pelvis]",
-        "fullbody_rotation_source": "pose3d_joint_positions_xyz_grounded_retargeted_to_smplx22",
-        "source_fps": resolve_sequence_fps(sequence, source_times),
+        "ik_sequence_path": str(cached.ik_path.resolve()),
+        "source_coordinate_space": str(cached.sequence.coordinate_space),
+        "root_source": "pose3d.root_translation_m",
+        "ground_height_source": "pose3d.support_joint_heights_p05",
+        "fullbody_root_source": "ik_sequence.root_translation_m_grounded",
+        "fullbody_rotation_source": "ik_sequence.local_joint_rotations_quaternion_wxyz_to_axis_angle",
+        "root_alignment_max_error_m": float(cached.root_alignment_max_error_m),
+        "ik_root_alignment_max_error_m": float(cached.ik_root_alignment_max_error_m),
+        "source_fps": resolve_sequence_fps(cached.sequence, cached.source_times),
         "target_model": target_model,
         "target_skeleton": target_skeleton,
         "target_fps": float(target_fps),
@@ -500,6 +634,8 @@ def _build_window_constraints_payload(
         "root2d_min_displacement_m": float(ROOT2D_MIN_DISPLACEMENT_M),
         "heading_min_displacement_m": float(HEADING_MIN_DISPLACEMENT_M),
         "root2d_net_displacement_m": float(root2d_displacement_m),
+        "ground_height_m": float(ground_height_m),
+        "ground_reference_joint_names": list(SUPPORT_JOINT_NAMES),
         "fullbody_joint_names": list(SMPLX22_JOINT_NAMES),
         "fullbody_source_indices": [int(value) for value in sparse_source_indices.tolist()],
         "root2d_source_indices": [int(value) for value in dense_source_indices.tolist()],
@@ -507,145 +643,43 @@ def _build_window_constraints_payload(
     return constraints_payload, traceability
 
 
-def _resolve_smplx_joint_indices(ik_sequence: IKSequence) -> np.ndarray:
-    joint_names = [str(name) for name in ik_sequence.joint_names_3d]
-    joint_to_index: dict[str, int] = {}
-    duplicates: set[str] = set()
-    for index, joint_name in enumerate(joint_names):
-        if joint_name in joint_to_index:
-            duplicates.add(joint_name)
-        joint_to_index[joint_name] = index
-    if duplicates:
-        raise ValueError(f"IK sequence exposes duplicated joint names: {sorted(duplicates)}")
-
-    source_indices: list[int] = []
-    missing_source: list[str] = []
-    resolved_target_names: list[str] = []
-    for source_name, target_name in IMUGPT_TO_SMPLX_JOINT_MAP:
-        if source_name not in joint_to_index:
-            missing_source.append(source_name)
-            continue
-        source_indices.append(int(joint_to_index[source_name]))
-        resolved_target_names.append(target_name)
-
-    if missing_source:
+def _validate_window_bounds(window: WindowSpec, *, num_frames: int) -> None:
+    if window.source_start_index < 0:
+        raise ValueError(f"Window {window.prompt_id!r} has negative source_start_index.")
+    if window.source_end_index <= window.source_start_index:
+        raise ValueError(f"Window {window.prompt_id!r} must contain at least one source frame.")
+    if window.source_end_index > num_frames:
         raise ValueError(
-            "IK sequence is missing IMUGPT22 joints required for SMPLX export: "
-            f"{sorted(missing_source)}"
-        )
-    if tuple(resolved_target_names) != SMPLX22_JOINT_NAMES:
-        raise ValueError(
-            "The fixed IMUGPT22 -> SMPLX22 mapping no longer matches the expected SMPLX joint order."
-        )
-    return np.asarray(source_indices, dtype=np.int32)
-
-
-def _resolve_smplx_constraint_skeleton(model_skeleton: Any) -> Any:
-    skeleton = model_skeleton
-    if (
-        skeleton is None
-        or getattr(skeleton, "nbjoints", None) != len(SMPLX22_JOINT_NAMES)
-        or getattr(skeleton, "neutral_joints", None) is None
-    ):
-        _import_kimodo_package()
-        skeleton = importlib.import_module("kimodo.skeleton").build_skeleton(len(SMPLX22_JOINT_NAMES))
-
-    joint_names = tuple(str(name) for name in getattr(skeleton, "bone_order_names", []))
-    if joint_names != SMPLX22_JOINT_NAMES:
-        raise ValueError(
-            "The loaded SMPLX skeleton does not match the expected 22-joint body ordering required "
-            "by the anchor catalog."
+            f"Window {window.prompt_id!r} exceeds pose length: "
+            f"{window.source_end_index} > {num_frames}."
         )
 
-    neutral_joints = _tensor_to_numpy(getattr(skeleton, "neutral_joints", None))
-    if neutral_joints is None or neutral_joints.shape != (len(SMPLX22_JOINT_NAMES), 3):
-        raise ValueError("The loaded SMPLX skeleton does not expose neutral_joints with shape [22, 3].")
 
-    return skeleton
-
-
-def _estimate_smplx22_fullbody_axis_angle(
-    source_positions_grounded: np.ndarray,
-    *,
-    constraint_skeleton: Any,
-) -> np.ndarray:
-    posed_joints = np.asarray(source_positions_grounded, dtype=np.float32)
-    if posed_joints.ndim != 3 or posed_joints.shape[1:] != (len(SMPLX22_JOINT_NAMES), 3):
-        raise ValueError("Expected grounded SMPLX22 joint positions with shape [T, 22, 3].")
-    if posed_joints.shape[0] <= 0:
-        raise ValueError("Expected at least one grounded SMPLX22 frame.")
-    if not np.isfinite(posed_joints).all():
-        raise ValueError("Grounded SMPLX22 joint positions contain NaN/Inf values.")
-
-    parents = _tensor_to_numpy(getattr(constraint_skeleton, "joint_parents", None))
-    if parents is None or parents.shape != (len(SMPLX22_JOINT_NAMES),):
-        raise ValueError("The loaded SMPLX skeleton does not expose joint_parents with shape [22].")
-    parents_int = [int(parent) for parent in parents.tolist()]
-    root_index = int(getattr(constraint_skeleton, "root_idx", 0))
-    children = _build_children_list(parents_int)
-    traversal_order = _collect_depth_first_order(children, root_index=root_index)
-    offsets = _extract_skeleton_offsets_m(constraint_skeleton, parents_int)
-
-    local_rotation_matrices, _ = _estimate_local_rotation_matrices(
-        posed_joints,
-        offsets=offsets,
-        parents=parents_int,
-        children=children,
-        traversal_order=traversal_order,
-        root_index=root_index,
+def _estimate_ground_height(source_positions_window: np.ndarray) -> float:
+    support_indices = np.asarray(
+        [int(SMPLX22_JOINT_NAMES.index(name)) for name in SUPPORT_JOINT_NAMES],
+        dtype=np.int32,
     )
-    return _quaternion_wxyz_to_axis_angle(_rotation_matrices_to_wxyz_quaternions(local_rotation_matrices))
+    support_heights = np.asarray(source_positions_window[:, support_indices, 1], dtype=np.float32).reshape(-1)
+    finite_heights = support_heights[np.isfinite(support_heights)]
+    if finite_heights.size <= 0:
+        raise ValueError("Support-joint heights contain no finite values.")
+    return float(np.quantile(finite_heights, GROUND_HEIGHT_QUANTILE))
 
 
-def _extract_skeleton_offsets_m(constraint_skeleton: Any, parents: Sequence[int]) -> np.ndarray:
-    neutral_joints = _tensor_to_numpy(getattr(constraint_skeleton, "neutral_joints", None))
-    if neutral_joints is None or neutral_joints.shape != (len(SMPLX22_JOINT_NAMES), 3):
-        raise ValueError("The loaded SMPLX skeleton does not expose neutral_joints with shape [22, 3].")
-
-    offsets = np.zeros_like(neutral_joints, dtype=np.float32)
-    for joint_index, parent_index in enumerate(parents):
-        if int(parent_index) < 0:
-            continue
-        offsets[joint_index] = (
-            neutral_joints[joint_index] - neutral_joints[int(parent_index)]
-        ).astype(np.float32, copy=False)
-    return offsets.astype(np.float32, copy=False)
-
-
-def _tensor_to_numpy(value: Any) -> np.ndarray | None:
-    if value is None:
-        return None
-    if hasattr(value, "detach"):
-        value = value.detach()
-    if hasattr(value, "cpu"):
-        value = value.cpu()
-    return np.asarray(value, dtype=np.float32)
-
-
-def _quaternion_wxyz_to_axis_angle(quaternions: np.ndarray) -> np.ndarray:
-    rotations = np.asarray(quaternions, dtype=np.float32)
-    if rotations.ndim != 3 or rotations.shape[-1] != 4:
-        raise ValueError("Expected quaternion rotations with shape [T, J, 4].")
-
-    norms = np.linalg.norm(rotations, axis=-1, keepdims=True)
-    if not np.isfinite(norms).all() or np.any(norms <= 1e-8):
-        raise ValueError("Quaternion rotations contain invalid norms.")
-
-    unit_quats = rotations / norms
-    negative_w = unit_quats[..., :1] < 0.0
-    unit_quats = np.where(negative_w, -unit_quats, unit_quats)
-
-    xyz = unit_quats[..., 1:]
-    w = np.clip(unit_quats[..., 0], -1.0, 1.0)
-    sin_half = np.linalg.norm(xyz, axis=-1)
-    angles = 2.0 * np.arctan2(sin_half, w)
-
-    axis_angle = np.zeros_like(xyz, dtype=np.float32)
-    non_zero = sin_half > 1e-8
-    axis_angle[non_zero] = (
-        xyz[non_zero] / sin_half[non_zero][..., None]
-    ) * angles[non_zero][..., None]
-    axis_angle[~non_zero] = 2.0 * xyz[~non_zero]
+def _wxyz_quaternions_to_axis_angle(quaternions_wxyz: np.ndarray) -> np.ndarray:
+    quaternions = np.asarray(quaternions_wxyz, dtype=np.float64)
+    if quaternions.ndim != 3 or quaternions.shape[-1] != 4:
+        raise ValueError("Expected quaternion local_joint_rotations with shape [T, J, 4].")
+    norms = np.linalg.norm(quaternions, axis=2, keepdims=True)
+    if np.any(norms <= 1e-8):
+        raise ValueError("Quaternion local_joint_rotations contain zero-norm entries.")
+    quaternions_xyzw = np.concatenate(
+        [quaternions[..., 1:] / norms, quaternions[..., 0:1] / norms],
+        axis=2,
+    )
+    axis_angle = Rotation.from_quat(quaternions_xyzw.reshape(-1, 4)).as_rotvec()
+    axis_angle = axis_angle.reshape(quaternions.shape[:2] + (3,))
     if not np.isfinite(axis_angle).all():
         raise ValueError("Axis-angle conversion produced NaN/Inf values.")
     return axis_angle.astype(np.float32, copy=False)
@@ -683,6 +717,31 @@ def _select_uniform_target_keyframes(num_target_frames: int, requested_keyframes
                 break
     chosen.sort()
     return np.asarray(chosen, dtype=np.int32)
+
+
+def _interpolate_dense_root2d(
+    *,
+    target_frames: np.ndarray,
+    target_fps: float,
+    source_times_window: np.ndarray,
+    source_root_2d: np.ndarray,
+) -> np.ndarray:
+    if source_root_2d.shape[0] != source_times_window.shape[0]:
+        raise ValueError("source_root_2d and source_times_window must have the same length.")
+    if source_root_2d.shape[0] <= 0:
+        raise ValueError("Expected at least one source root frame for interpolation.")
+
+    target_times = target_frames.astype(np.float32) / np.float32(target_fps)
+    dense_root_2d = np.stack(
+        [
+            np.interp(target_times, source_times_window, source_root_2d[:, axis]).astype(np.float32, copy=False)
+            for axis in range(2)
+        ],
+        axis=1,
+    )
+    if not np.isfinite(dense_root_2d).all():
+        raise ValueError("Dense root2d interpolation produced NaN/Inf values.")
+    return dense_root_2d.astype(np.float32, copy=False)
 
 
 def _compute_root_heading(smooth_root_2d: np.ndarray) -> np.ndarray | None:

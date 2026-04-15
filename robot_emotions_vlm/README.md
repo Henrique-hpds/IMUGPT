@@ -81,8 +81,7 @@ python -m robot_emotions_vlm build-anchor-catalog \
   --qwen-window-catalog-path output/robot_emotions_qwen_windows/kimodo_window_prompt_catalog.jsonl \
   --output-dir output/robot_emotions_kimodo_anchors
 ```
-
-If the real pose export already contains `pose/ik_sequence.npz`, the anchor builder reuses it. Otherwise it derives and caches that IK export automatically next to `pose3d.npz`.
+This step now builds sampled `fullbody` constraints from `ik_sequence.npz` and optional `root2d` from `pose3d.npz`. If `ik_sequence.npz` is missing, it is materialized from `pose3d.npz` first.
 
 Generate Kimodo motions for all catalog entries:
 
@@ -155,5 +154,4 @@ Per-generated clip:
 ## Notes
 
 - The first real run may download model weights from Hugging Face.
-- The module is independent from `pose_module`.
 - Prompt templates are editable in `robot_emotions_vlm/prompt_templates/`.

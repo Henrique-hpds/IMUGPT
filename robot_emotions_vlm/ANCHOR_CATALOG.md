@@ -12,8 +12,8 @@ O comando `build-anchor-catalog` cria um catalogo por janela a partir de:
 Para cada janela, ele:
 
 - seleciona a janela temporal exata
-- reutiliza `pose/ik_sequence.npz` quando ele ja existe
-- materializa `pose/ik_sequence.npz` ao lado de `pose3d.npz` quando o export real ainda so tem pose3d
+- usa `pose3d.npz` como fonte primaria de trajetória e apoio no chão
+- carrega `ik_sequence.npz` como fonte de rotações locais SMPL-X
 - gera `constraints.json` com `fullbody` esparso e `root2d` condicional
 - salva `traceability.json`
 - escreve uma entrada em `kimodo_anchor_catalog.jsonl`
@@ -27,6 +27,8 @@ Esta linha principal agora e totalmente window-level e orientada para fidelidade
 - `fullbody` sempre e emitido com keyframes esparsos por janela
 - `root2d` so e emitido quando o deslocamento liquido da raiz na janela e relevante
 - `global_root_heading` so entra quando o deslocamento liquido da raiz justifica orientacao confiavel
+- `fullbody` usa `ik_sequence.local_joint_rotations` e `ik_sequence.root_translation_m`
+- `build-anchor-catalog` materializa `ik_sequence.npz` a partir de `pose3d` quando o arquivo ainda nao existe
 - `duration_hint_sec` e preservado por janela
 - `num_samples` continua por janela
 - filtros por `clip_id`, `prompt_id` e `window_id` continuam suportados na geracao
@@ -62,8 +64,7 @@ Na `.venv` do projeto:
   --no-debug
 ```
 
-Se `pose/ik_sequence.npz` ja existir ao lado de `pose/pose3d.npz`, ele sera reutilizado.
-Se ainda nao existir, `build-anchor-catalog` agora o gera automaticamente a partir do `pose3d.npz` e o salva em `pose/ik_sequence.npz`.
+`build-anchor-catalog` agora espera `ik_sequence.npz` como fonte cinemática do `fullbody`, mas materializa esse arquivo automaticamente a partir de `pose3d.npz` quando ele ainda nao existe.
 
 ### 2. Gerar o catalogo textual do Qwen por janela
 
@@ -86,7 +87,7 @@ python -m robot_emotions_vlm build-anchor-catalog \
   --qwen-window-catalog-path output/robot_emotions_qwen_windows/kimodo_window_prompt_catalog.jsonl \
   --output-dir output/robot_emotions_kimodo_anchors \
   --model Kimodo-SMPLX-RP-v1 \
-  --constraint-keyframes 8
+  --constraint-keyframes 2
 ```
 
 ### 4. Gerar motions com as ancoras
