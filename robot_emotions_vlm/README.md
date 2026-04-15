@@ -81,7 +81,7 @@ python -m robot_emotions_vlm build-anchor-catalog \
   --qwen-window-catalog-path output/robot_emotions_qwen_windows/kimodo_window_prompt_catalog.jsonl \
   --output-dir output/robot_emotions_kimodo_anchors
 ```
-This step now builds sampled `fullbody` constraints from `ik_sequence.npz` and optional `root2d` from `pose3d.npz`. If `ik_sequence.npz` is missing, it is materialized from `pose3d.npz` first.
+This step samples exact `fullbody` key poses directly from grounded `pose3d.npz` and saves them as `global_joints_positions`, with `root2d` derived from the dense root trajectory. No `ik_sequence.npz` is required. When `generate-kimodo` detects this pose-space `fullbody` format, it disables post-processing automatically so the sampled anchor pose is preserved.
 
 Generate Kimodo motions for all catalog entries:
 

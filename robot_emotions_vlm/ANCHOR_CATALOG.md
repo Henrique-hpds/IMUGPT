@@ -11,33 +11,33 @@ O comando `build-anchor-catalog` cria um catalogo por janela a partir de:
 
 Para cada janela, ele:
 
-- seleciona a janela temporal exata
-- usa `pose3d.npz` como fonte primaria de trajetória e apoio no chão
-- carrega `ik_sequence.npz` como fonte de rotações locais SMPL-X
-- gera `constraints.json` com `fullbody` esparso e `root2d` condicional
+- seleciona a janela temporal exata em `pose3d.npz`
+- amostra keyframes esparsos diretamente da pose 3D pseudo-global original
+- reordena as juntas para `SMPLX22`
+- aplica grounding usando a altura de apoio estimada pelos tornozelos e pes
+- escreve `constraints.json` com `fullbody` em `global_joints_positions`
+- escreve `root2d` denso a partir da trajetoria da raiz
 - salva `traceability.json`
 - escreve uma entrada em `kimodo_anchor_catalog.jsonl`
 
-## Estado atual
+## Contrato atual
 
-Esta linha principal agora e totalmente window-level e orientada para fidelidade no alvo `Kimodo-SMPLX-RP-v1`:
+Esta linha principal e totalmente window-level e centrada em fidelidade geometrica da pose amostrada:
 
-- o Qwen analisa cada janela individualmente
-- `prompt_text` passa por sanitizacao motion-only para ficar mais simples e compatível com o Kimodo
-- `fullbody` sempre e emitido com keyframes esparsos por janela
-- `root2d` so e emitido quando o deslocamento liquido da raiz na janela e relevante
-- `global_root_heading` so entra quando o deslocamento liquido da raiz justifica orientacao confiavel
-- `fullbody` usa `ik_sequence.local_joint_rotations` e `ik_sequence.root_translation_m`
-- `build-anchor-catalog` materializa `ik_sequence.npz` a partir de `pose3d` quando o arquivo ainda nao existe
-- `duration_hint_sec` e preservado por janela
-- `num_samples` continua por janela
-- filtros por `clip_id`, `prompt_id` e `window_id` continuam suportados na geracao
+- `fullbody` nao usa `ik_sequence.npz`
+- o artefato canonico da pose vem de `pose3d.npz`
+- o payload do `fullbody` salva `global_joints_positions` grounded como a fonte de verdade
+- `root_positions` e `smooth_root_2d` sao derivados da mesma pose grounded
+- `root2d` continua sendo emitido para estabilizar a trajetoria global
+- janelas quase estaticas usam `root2d_motion_mode = stabilized_linear`
+- `global_root_heading` so entra quando o deslocamento liquido da raiz justifica heading confiavel
+- `generate-kimodo` desliga o post-processamento automaticamente quando detecta este `fullbody` em espaco de pose
 
-Nesta correcao, o modo rico e suportado apenas para alvo `SMPLX`.
+Em uma frase: o catalogo agora representa poses reais amostradas da janela, e nao uma parametrizacao IK intermediaria.
 
 ## Defaults recomendados
 
-Para reduzir achatamento semantico e melhorar coerencia temporal:
+Para manter boa cobertura temporal sem perder fidelidade:
 
 - `describe-windows --window-sec 5.0`
 - `describe-windows --window-hop-sec 2.5`
@@ -48,6 +48,7 @@ Thresholds fixos desta versao:
 
 - `root2d_min_displacement_m = 0.05`
 - `heading_min_displacement_m = 0.10`
+- `max_fullbody_keyframe_gap_sec = 0.5`
 
 ## Como rodar
 
@@ -63,8 +64,6 @@ Na `.venv` do projeto:
   --motionbert-device cuda:0 \
   --no-debug
 ```
-
-`build-anchor-catalog` agora espera `ik_sequence.npz` como fonte cinemática do `fullbody`, mas materializa esse arquivo automaticamente a partir de `pose3d.npz` quando ele ainda nao existe.
 
 ### 2. Gerar o catalogo textual do Qwen por janela
 
@@ -87,8 +86,18 @@ python -m robot_emotions_vlm build-anchor-catalog \
   --qwen-window-catalog-path output/robot_emotions_qwen_windows/kimodo_window_prompt_catalog.jsonl \
   --output-dir output/robot_emotions_kimodo_anchors \
   --model Kimodo-SMPLX-RP-v1 \
-  --constraint-keyframes 2
+  --constraint-keyframes 8
 ```
+
+O `constraints.json` resultante salva:
+
+- `fullbody.frame_indices`
+- `fullbody.global_joints_positions`
+- `fullbody.root_positions`
+- `fullbody.smooth_root_2d`
+- `root2d.frame_indices`
+- `root2d.smooth_root_2d`
+- `root2d.global_root_heading` quando aplicavel
 
 ### 4. Gerar motions com as ancoras
 

@@ -136,6 +136,48 @@ def select_catalog_entries(
     return selected
 
 
+def _load_constraint_payload(constraints_path: str | Path | None) -> list[dict[str, Any]]:
+    if constraints_path is None:
+        return []
+    payload = json.loads(Path(constraints_path).read_text(encoding="utf-8"))
+    if isinstance(payload, dict):
+        return [dict(payload)]
+    return [dict(item) for item in payload]
+
+
+def _uses_pose_space_fullbody(entry: CatalogPromptEntry) -> bool:
+    summary = dict(entry.constraint_summary or {})
+    declared_types = {str(value) for value in (summary.get("constraint_types") or [])}
+    if "fullbody" not in declared_types and entry.constraints_path is None:
+        return False
+
+    if str(summary.get("fullbody_representation") or "").strip().lower() == "global_positions":
+        return True
+    if str(summary.get("constraint_mode") or "").strip().lower() == "pose3d":
+        return True
+
+    for constraint_payload in _load_constraint_payload(entry.constraints_path):
+        if str(constraint_payload.get("type") or "").strip().lower() != "fullbody":
+            continue
+        if "global_joints_positions" in constraint_payload and "local_joints_rot" not in constraint_payload:
+            return True
+    return False
+
+
+def _resolve_postprocess_flag(
+    *,
+    entry: CatalogPromptEntry,
+    resolved_model: str,
+    config: KimodoGenerationConfig,
+    runtime_notes: list[str],
+) -> bool:
+    use_postprocess = False if "g1" in resolved_model else (not config.no_postprocess)
+    if use_postprocess and _uses_pose_space_fullbody(entry):
+        runtime_notes.append("postprocess_disabled_for_pose_space_fullbody")
+        return False
+    return use_postprocess
+
+
 def generate_kimodo_from_catalog(
     *,
     catalog_path: str | Path,
@@ -215,7 +257,14 @@ def generate_kimodo_from_catalog(
         )
         effective_num_frames = max(1, int(round(effective_duration_sec * float(model.fps))))
         warnings: list[str] = []
+        runtime_notes: list[str] = []
         declared_constraint_types = _resolve_declared_constraint_types(entry)
+        use_postprocess = _resolve_postprocess_flag(
+            entry=entry,
+            resolved_model=resolved_model,
+            config=config,
+            runtime_notes=runtime_notes,
+        )
         if _uses_rich_constraints(declared_constraint_types) and not _is_smplx_generation_target(
             model_display_name=model_display_name,
             resolved_model=resolved_model,
@@ -243,10 +292,12 @@ def generate_kimodo_from_catalog(
                 "effective_num_samples": effective_num_samples,
                 "effective_duration_sec": effective_duration_sec,
                 "effective_num_frames": effective_num_frames,
+                "effective_post_processing": bool(use_postprocess),
                 "fps": float(model.fps),
                 "constraints_path": entry.constraints_path,
                 "constraint_summary": dict(entry.constraint_summary),
                 "declared_constraint_types": list(declared_constraint_types),
+                "runtime_notes": list(runtime_notes),
                 "target_skeleton": target_skeleton,
             },
         )
@@ -256,7 +307,6 @@ def generate_kimodo_from_catalog(
                 runtime.seed_everything(int(effective_seed))
 
             cfg_kwargs = _resolve_cfg_kwargs(config.cfg_type, config.cfg_weight)
-            use_postprocess = False if "g1" in resolved_model else (not config.no_postprocess)
             constraint_lst = []
             if entry.constraints_path is not None:
                 constraint_lst = runtime.load_constraints(
@@ -331,6 +381,8 @@ def generate_kimodo_from_catalog(
                     "declared_constraint_types": list(declared_constraint_types),
                     "loaded_constraint_types": list(loaded_constraint_types),
                     "num_constraints_loaded": int(len(loaded_constraint_types)),
+                    "post_processing": bool(use_postprocess),
+                    "runtime_notes": list(runtime_notes),
                     "warnings": warnings,
                     "artifacts": {
                         **base_artifacts,
@@ -350,6 +402,8 @@ def generate_kimodo_from_catalog(
             effective_num_frames=int(effective_num_frames),
             fps=float(model.fps),
             diffusion_steps=int(config.diffusion_steps),
+            post_processing=bool(use_postprocess),
+            runtime_notes=runtime_notes,
             warnings=warnings,
             constraint_summary=dict(entry.constraint_summary),
             declared_constraint_types=declared_constraint_types,
@@ -483,6 +537,8 @@ def _build_sample_manifest_entries(
     effective_num_frames: int,
     fps: float,
     diffusion_steps: int,
+    post_processing: bool,
+    runtime_notes: Sequence[str],
     warnings: Sequence[str],
     constraint_summary: dict[str, Any],
     declared_constraint_types: Sequence[str],
@@ -515,11 +571,13 @@ def _build_sample_manifest_entries(
                 "num_frames": int(effective_num_frames),
                 "fps": float(fps),
                 "diffusion_steps": int(diffusion_steps),
+                "post_processing": bool(post_processing),
                 "constraints_path": entry.constraints_path,
                 "constraint_summary": dict(constraint_summary),
                 "declared_constraint_types": list(declared_constraint_types),
                 "loaded_constraint_types": list(loaded_constraint_types),
                 "num_constraints_loaded": int(len(loaded_constraint_types)),
+                "runtime_notes": list(runtime_notes),
                 "warnings": list(warnings),
                 "artifacts": sample_artifacts,
             }

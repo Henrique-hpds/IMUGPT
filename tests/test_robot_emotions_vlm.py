@@ -8,9 +8,8 @@ from pathlib import Path
 from unittest.mock import patch
 
 import numpy as np
-from scipy.spatial.transform import Rotation
 
-from pose_module.interfaces import IKSequence, IMUGPT_22_JOINT_NAMES, IMUGPT_22_PARENT_INDICES, PoseSequence3D
+from pose_module.interfaces import IMUGPT_22_JOINT_NAMES, IMUGPT_22_PARENT_INDICES, PoseSequence3D
 from pose_module.motionbert.adapter import write_pose_sequence3d_npz
 from robot_emotions_vlm.anchor_catalog import SMPLX22_JOINT_NAMES, build_anchor_catalog
 from robot_emotions_vlm.cli import describe_videos, main as robot_emotions_vlm_main
@@ -59,56 +58,6 @@ def _make_pose_sequence(clip_id: str, *, x_step: float = 0.02, z_step: float = 0
         root_translation_m=root_translation,
     )
 
-
-def _make_ik_sequence(
-    sequence: PoseSequence3D,
-    *,
-    joint_rotvecs_by_name: dict[str, list[float]] | None = None,
-) -> IKSequence:
-    num_frames = int(sequence.num_frames)
-    num_joints = len(sequence.joint_names_3d)
-    local_rotvecs = np.zeros((num_frames, num_joints, 3), dtype=np.float32)
-    if joint_rotvecs_by_name:
-        joint_index = {str(name): index for index, name in enumerate(sequence.joint_names_3d)}
-        for joint_name, rotvec in joint_rotvecs_by_name.items():
-            local_rotvecs[:, int(joint_index[joint_name]), :] = np.asarray(rotvec, dtype=np.float32)
-
-    quaternions_xyzw = Rotation.from_rotvec(
-        local_rotvecs.reshape(-1, 3).astype(np.float64, copy=False)
-    ).as_quat()
-    local_joint_rotations = np.concatenate(
-        [quaternions_xyzw[:, 3:4], quaternions_xyzw[:, :3]],
-        axis=1,
-    ).reshape(num_frames, num_joints, 4)
-
-    rest_positions = np.asarray(sequence.joint_positions_xyz[0], dtype=np.float32)
-    joint_offsets_m = np.zeros((num_joints, 3), dtype=np.float32)
-    for joint_index, parent_index in enumerate(sequence.skeleton_parents):
-        if int(parent_index) < 0:
-            continue
-        joint_offsets_m[joint_index] = rest_positions[joint_index] - rest_positions[int(parent_index)]
-
-    return IKSequence(
-        clip_id=str(sequence.clip_id),
-        fps=sequence.fps,
-        fps_original=sequence.fps_original,
-        joint_names_3d=list(sequence.joint_names_3d),
-        local_joint_rotations=local_joint_rotations.astype(np.float32, copy=False),
-        root_translation_m=np.asarray(sequence.root_translation_m, dtype=np.float32),
-        joint_offsets_m=joint_offsets_m.astype(np.float32, copy=False),
-        skeleton_parents=list(sequence.skeleton_parents),
-        frame_indices=np.asarray(sequence.frame_indices, dtype=np.int32),
-        timestamps_sec=np.asarray(sequence.timestamps_sec, dtype=np.float32),
-        source=f"{sequence.source}_ik",
-        rotation_representation="quaternion_wxyz",
-    )
-
-
-def _write_ik_sequence(path: Path, ik_sequence: IKSequence) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    np.savez_compressed(path, **ik_sequence.to_npz_payload())
-
-
 def _write_anchor_pose_manifest(path: Path, *, clip_id: str, pose_path: Path) -> None:
     path.write_text(
         json.dumps(
@@ -147,6 +96,18 @@ def _write_anchor_qwen_catalog(path: Path, *, prompt_id: str, reference_clip_id:
         + "\n",
         encoding="utf-8",
     )
+
+
+def _load_kimodo_fullbody_helpers():
+    kimodo_repo = Path(__file__).resolve().parents[1] / "kimodo"
+    kimodo_repo_str = str(kimodo_repo)
+    if kimodo_repo_str not in sys.path:
+        sys.path.insert(0, kimodo_repo_str)
+
+    from kimodo.constraints import FullBodyConstraintSet
+    from kimodo.skeleton import build_skeleton
+
+    return FullBodyConstraintSet, build_skeleton
 
 
 class _FakeBackend:
@@ -546,14 +507,24 @@ class RobotEmotionsVLMTests(unittest.TestCase):
             catalog_path = Path(tmp_dir) / "catalog.jsonl"
             output_dir = Path(tmp_dir) / "kimodo_output"
             constraints_path = Path(tmp_dir) / "constraints.json"
+            fullbody_positions = np.zeros((2, len(IMUGPT_22_JOINT_NAMES), 3), dtype=np.float32)
+            fullbody_positions[0, :, 0] = np.linspace(-0.3, 0.3, len(IMUGPT_22_JOINT_NAMES), dtype=np.float32)
+            fullbody_positions[1, :, 0] = np.linspace(-0.2, 0.4, len(IMUGPT_22_JOINT_NAMES), dtype=np.float32)
+            fullbody_positions[0, :, 1] = np.linspace(1.2, 0.2, len(IMUGPT_22_JOINT_NAMES), dtype=np.float32)
+            fullbody_positions[1, :, 1] = np.linspace(1.25, 0.25, len(IMUGPT_22_JOINT_NAMES), dtype=np.float32)
+            fullbody_positions[0, :, 2] = 0.0
+            fullbody_positions[1, :, 2] = 0.1
+            root_positions = np.asarray([[0.0, 0.9, 0.0], [0.1, 0.9, 0.1]], dtype=np.float32)
+            fullbody_positions[:, 0, :] = root_positions
             constraints_path.write_text(
                 json.dumps(
                     [
                         {
                             "type": "fullbody",
                             "frame_indices": [0, 2],
-                            "local_joints_rot": [[[0.0, 0.0, 0.0]] * len(IMUGPT_22_JOINT_NAMES)] * 2,
-                            "root_positions": [[0.0, 0.0, 0.0], [0.1, 0.0, 0.0]],
+                            "global_joints_positions": fullbody_positions.tolist(),
+                            "root_positions": root_positions.tolist(),
+                            "smooth_root_2d": root_positions[:, [0, 2]].tolist(),
                         },
                         {
                             "type": "root2d",
@@ -580,6 +551,8 @@ class RobotEmotionsVLMTests(unittest.TestCase):
                                 "duration_hint_sec": 5.0,
                                 "constraints_path": str(constraints_path.resolve()),
                                 "constraint_summary": {
+                                    "constraint_mode": "pose3d",
+                                    "fullbody_representation": "global_positions",
                                     "constraint_types": ["fullbody", "root2d"],
                                     "constraint_frame_counts": {"fullbody": 2, "root2d": 3},
                                 },
@@ -619,6 +592,7 @@ class RobotEmotionsVLMTests(unittest.TestCase):
                 [constraint["type"] for constraint in runtime.model.calls[0]["constraint_lst"]],
                 ["fullbody", "root2d"],
             )
+            self.assertFalse(runtime.model.calls[0]["post_processing"])
             manifest_entries = [
                 json.loads(line)
                 for line in Path(summary["manifest_path"]).read_text(encoding="utf-8").splitlines()
@@ -629,6 +603,11 @@ class RobotEmotionsVLMTests(unittest.TestCase):
             self.assertEqual(manifest_entries[0]["constraints_path"], str(constraints_path.resolve()))
             self.assertEqual(manifest_entries[0]["loaded_constraint_types"], ["fullbody", "root2d"])
             self.assertEqual(manifest_entries[0]["num_constraints_loaded"], 2)
+            self.assertFalse(manifest_entries[0]["post_processing"])
+            self.assertEqual(
+                manifest_entries[0]["runtime_notes"],
+                ["postprocess_disabled_for_pose_space_fullbody"],
+            )
 
     def test_describe_windows_writes_window_catalog(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -975,7 +954,6 @@ class RobotEmotionsVLMTests(unittest.TestCase):
             pose_path = Path(tmp_dir) / "pose3d.npz"
             sequence = _make_pose_sequence("robot_emotions_10ms_u02_tag11")
             write_pose_sequence3d_npz(sequence, pose_path)
-            _write_ik_sequence(pose_path.with_name("ik_sequence.npz"), _make_ik_sequence(sequence))
             pose_manifest_path = Path(tmp_dir) / "pose3d_manifest.jsonl"
             _write_anchor_pose_manifest(
                 pose_manifest_path,
@@ -1023,8 +1001,10 @@ class RobotEmotionsVLMTests(unittest.TestCase):
             )
             self.assertEqual([constraint["type"] for constraint in constraints_payload], ["fullbody", "root2d"])
             self.assertEqual(constraints_payload[0]["frame_indices"], [0, 2, 4, 5, 7])
+            self.assertEqual(len(constraints_payload[0]["global_joints_positions"]), 5)
             self.assertEqual(len(constraints_payload[0]["root_positions"]), 5)
             self.assertIn("smooth_root_2d", constraints_payload[0])
+            self.assertNotIn("local_joints_rot", constraints_payload[0])
             self.assertNotIn("joint_names", constraints_payload[0])
             self.assertEqual(len(constraints_payload[1]["frame_indices"]), 8)
             self.assertIn("global_root_heading", constraints_payload[1])
@@ -1038,7 +1018,11 @@ class RobotEmotionsVLMTests(unittest.TestCase):
             )
             self.assertTrue(catalog_entries[0]["constraint_summary"]["root2d_enabled"])
             self.assertTrue(catalog_entries[0]["constraint_summary"]["heading_enabled"])
-            self.assertEqual(catalog_entries[0]["constraint_summary"]["constraint_mode"], "ik_sequence")
+            self.assertEqual(catalog_entries[0]["constraint_summary"]["constraint_mode"], "pose3d")
+            self.assertEqual(
+                catalog_entries[0]["constraint_summary"]["fullbody_representation"],
+                "global_positions",
+            )
             self.assertEqual(catalog_entries[0]["constraint_summary"]["pose3d_source_path"], str(pose_path.resolve()))
 
     def test_build_anchor_catalog_grounds_fullbody_root_positions(self) -> None:
@@ -1050,7 +1034,6 @@ class RobotEmotionsVLMTests(unittest.TestCase):
                 dtype=np.float32,
             )
             write_pose_sequence3d_npz(sequence, pose_path)
-            _write_ik_sequence(pose_path.with_name("ik_sequence.npz"), _make_ik_sequence(sequence))
             pose_manifest_path = Path(tmp_dir) / "pose3d_manifest.jsonl"
             _write_anchor_pose_manifest(
                 pose_manifest_path,
@@ -1087,56 +1070,23 @@ class RobotEmotionsVLMTests(unittest.TestCase):
             self.assertTrue(np.allclose(grounded_root_positions[:, 1], 0.55, atol=1e-6))
             self.assertTrue(np.all(grounded_root_positions[:, 1] > 0.0))
 
-    def test_build_anchor_catalog_retargets_fullbody_rotations_to_smplx_frame(self) -> None:
+    def test_build_anchor_catalog_samples_grounded_pose3d_positions(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             pose_path = Path(tmp_dir) / "pose3d.npz"
             sequence = _make_pose_sequence("robot_emotions_10ms_u02_tag11", x_step=0.0, z_step=0.0)
-            joint_index = {name: idx for idx, name in enumerate(IMUGPT_22_JOINT_NAMES)}
-            reference_offsets = {
-                "Pelvis": [0.0, 0.0, 0.0],
-                "Left_hip": [0.09, -0.03, 0.0],
-                "Right_hip": [-0.09, -0.03, 0.0],
-                "Spine1": [0.0, 0.18, 0.0],
-                "Left_knee": [0.09, -0.42, 0.02],
-                "Right_knee": [-0.09, -0.42, 0.02],
-                "Spine2": [0.0, 0.34, 0.0],
-                "Left_ankle": [0.09, -0.78, 0.04],
-                "Right_ankle": [-0.09, -0.78, 0.04],
-                "Spine3": [0.0, 0.52, 0.0],
-                "Left_foot": [0.09, -0.84, 0.16],
-                "Right_foot": [-0.09, -0.84, 0.16],
-                "Neck": [0.0, 0.68, 0.0],
-                "Left_collar": [0.08, 0.56, 0.0],
-                "Right_collar": [-0.08, 0.56, 0.0],
-                "Head": [0.0, 0.84, 0.02],
-                "Left_shoulder": [0.12, 0.49, 0.01],
-                "Right_shoulder": [-0.12, 0.49, 0.01],
-                "Left_elbow": [0.11, 0.27, 0.03],
-                "Right_elbow": [-0.11, 0.27, 0.03],
-                "Left_wrist": [0.08, 0.08, 0.05],
-                "Right_wrist": [-0.08, 0.08, 0.05],
-            }
-            for frame_index in range(sequence.num_frames):
-                root = np.asarray(sequence.root_translation_m[frame_index], dtype=np.float32)
-                for joint_name, offset in reference_offsets.items():
-                    sequence.joint_positions_xyz[frame_index, joint_index[joint_name]] = (
-                        root + np.asarray(offset, dtype=np.float32)
-                    )
-            write_pose_sequence3d_npz(sequence, pose_path)
-            _write_ik_sequence(
-                pose_path.with_name("ik_sequence.npz"),
-                _make_ik_sequence(
-                    sequence,
-                    joint_rotvecs_by_name={
-                        "Left_shoulder": [0.0, 0.25, 0.0],
-                        "Right_shoulder": [0.0, -0.25, 0.0],
-                        "Left_elbow": [0.0, 0.15, 0.0],
-                        "Right_elbow": [0.0, -0.15, 0.0],
-                        "Left_wrist": [0.0, 0.1, 0.0],
-                        "Right_wrist": [0.0, -0.1, 0.0],
-                    },
-                ),
+            sequence.joint_positions_xyz[:, SMPLX22_JOINT_NAMES.index("left_wrist"), 0] += np.linspace(
+                0.0,
+                0.18,
+                sequence.num_frames,
+                dtype=np.float32,
             )
+            sequence.joint_positions_xyz[:, SMPLX22_JOINT_NAMES.index("right_wrist"), 2] -= np.linspace(
+                0.0,
+                0.14,
+                sequence.num_frames,
+                dtype=np.float32,
+            )
+            write_pose_sequence3d_npz(sequence, pose_path)
             pose_manifest_path = Path(tmp_dir) / "pose3d_manifest.jsonl"
             _write_anchor_pose_manifest(
                 pose_manifest_path,
@@ -1169,24 +1119,69 @@ class RobotEmotionsVLMTests(unittest.TestCase):
 
             catalog_entry = json.loads(Path(summary["catalog_path"]).read_text(encoding="utf-8").strip())
             constraints_payload = json.loads(Path(catalog_entry["constraints_path"]).read_text(encoding="utf-8"))
-            fullbody_local_rot = np.asarray(constraints_payload[0]["local_joints_rot"], dtype=np.float32)
-            arm_indices = [
-                int(SMPLX22_JOINT_NAMES.index("left_shoulder")),
-                int(SMPLX22_JOINT_NAMES.index("right_shoulder")),
-                int(SMPLX22_JOINT_NAMES.index("left_elbow")),
-                int(SMPLX22_JOINT_NAMES.index("right_elbow")),
-                int(SMPLX22_JOINT_NAMES.index("left_wrist")),
-                int(SMPLX22_JOINT_NAMES.index("right_wrist")),
-            ]
-            arm_rotation_norms = np.linalg.norm(fullbody_local_rot[:, arm_indices, :], axis=-1)
-            self.assertGreater(float(np.max(arm_rotation_norms)), 0.05)
+            fullbody_positions = np.asarray(constraints_payload[0]["global_joints_positions"], dtype=np.float32)
+            grounded_root_positions = np.asarray(constraints_payload[0]["root_positions"], dtype=np.float32)
+            frame_indices = np.asarray(constraints_payload[0]["frame_indices"], dtype=np.int32)
 
-    def test_build_anchor_catalog_skips_root2d_for_small_displacement(self) -> None:
+            support_heights = sequence.joint_positions_xyz[:8, [7, 8, 10, 11], 1].reshape(-1)
+            ground_height_m = float(np.quantile(support_heights, 0.05))
+            expected_positions = np.asarray(sequence.joint_positions_xyz[frame_indices], dtype=np.float32).copy()
+            expected_positions[:, :, 1] -= np.float32(ground_height_m)
+            expected_root_positions = np.asarray(sequence.root_translation_m[frame_indices], dtype=np.float32).copy()
+            expected_root_positions[:, 1] -= np.float32(ground_height_m)
+            expected_positions[:, 0, :] = expected_root_positions
+
+            self.assertTrue(np.allclose(fullbody_positions, expected_positions, atol=1e-6))
+            self.assertTrue(np.allclose(grounded_root_positions, expected_root_positions, atol=1e-6))
+
+            FullBodyConstraintSet, build_skeleton = _load_kimodo_fullbody_helpers()
+            constraint_set = FullBodyConstraintSet.from_dict(build_skeleton(22), constraints_payload[0])
+            loaded_positions = constraint_set.global_joints_positions.detach().cpu().numpy()
+            self.assertTrue(np.allclose(loaded_positions, fullbody_positions, atol=1e-6))
+
+    def test_fullbody_constraint_loader_prefers_global_positions_over_local_reconstruction(self) -> None:
+        FullBodyConstraintSet, build_skeleton = _load_kimodo_fullbody_helpers()
+        skeleton = build_skeleton(22)
+        frame_indices = np.asarray([0, 3], dtype=np.int32)
+        neutral_joints = skeleton.neutral_joints.detach().cpu().numpy().astype(np.float32, copy=False)
+        local_joints_rot = np.zeros((2, 22, 3), dtype=np.float32)
+        local_joints_rot[:, SMPLX22_JOINT_NAMES.index("left_shoulder"), 1] = 0.25
+        local_joints_rot[:, SMPLX22_JOINT_NAMES.index("right_shoulder"), 1] = -0.25
+        root_positions = np.asarray(
+            [
+                [0.10, 0.95, 0.20],
+                [0.12, 0.95, 0.22],
+            ],
+            dtype=np.float32,
+        )
+        authoritative_positions = np.stack(
+            [
+                neutral_joints + np.asarray([1.25, 0.90, 0.35], dtype=np.float32),
+                neutral_joints + np.asarray([1.55, 1.05, 0.55], dtype=np.float32),
+            ],
+            axis=0,
+        ).astype(np.float32, copy=False)
+
+        payload = {
+            "type": "fullbody",
+            "frame_indices": frame_indices.tolist(),
+            "local_joints_rot": local_joints_rot.tolist(),
+            "root_positions": root_positions.tolist(),
+            "global_joints_positions": authoritative_positions.tolist(),
+            "smooth_root_2d": authoritative_positions[:, 0, [0, 2]].tolist(),
+        }
+
+        constraint_set = FullBodyConstraintSet.from_dict(skeleton, payload)
+        loaded_positions = constraint_set.global_joints_positions.detach().cpu().numpy()
+
+        self.assertTrue(np.allclose(loaded_positions, authoritative_positions, atol=1e-6))
+        self.assertFalse(np.allclose(loaded_positions[:, 0, :], root_positions, atol=1e-6))
+
+    def test_build_anchor_catalog_stabilizes_root2d_for_small_displacement(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             pose_path = Path(tmp_dir) / "pose3d.npz"
             sequence = _make_pose_sequence("robot_emotions_10ms_u02_tag11", x_step=0.004, z_step=0.0)
             write_pose_sequence3d_npz(sequence, pose_path)
-            _write_ik_sequence(pose_path.with_name("ik_sequence.npz"), _make_ik_sequence(sequence))
             pose_manifest_path = Path(tmp_dir) / "pose3d_manifest.jsonl"
             _write_anchor_pose_manifest(
                 pose_manifest_path,
@@ -1219,16 +1214,20 @@ class RobotEmotionsVLMTests(unittest.TestCase):
 
             catalog_entry = json.loads(Path(summary["catalog_path"]).read_text(encoding="utf-8").strip())
             constraints_payload = json.loads(Path(catalog_entry["constraints_path"]).read_text(encoding="utf-8"))
-            self.assertEqual([constraint["type"] for constraint in constraints_payload], ["fullbody"])
-            self.assertFalse(catalog_entry["constraint_summary"]["root2d_enabled"])
+            traceability = json.loads(
+                Path(catalog_entry["constraints_path"]).with_name("traceability.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual([constraint["type"] for constraint in constraints_payload], ["fullbody", "root2d"])
+            self.assertTrue(catalog_entry["constraint_summary"]["root2d_enabled"])
             self.assertFalse(catalog_entry["constraint_summary"]["heading_enabled"])
+            self.assertEqual(traceability["root2d_motion_mode"], "stabilized_linear")
+            self.assertNotIn("global_root_heading", constraints_payload[1])
 
     def test_build_anchor_catalog_emits_root2d_without_heading_for_mid_displacement(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             pose_path = Path(tmp_dir) / "pose3d.npz"
             sequence = _make_pose_sequence("robot_emotions_10ms_u02_tag11", x_step=0.01, z_step=0.0)
             write_pose_sequence3d_npz(sequence, pose_path)
-            _write_ik_sequence(pose_path.with_name("ik_sequence.npz"), _make_ik_sequence(sequence))
             pose_manifest_path = Path(tmp_dir) / "pose3d_manifest.jsonl"
             _write_anchor_pose_manifest(
                 pose_manifest_path,
@@ -1266,7 +1265,7 @@ class RobotEmotionsVLMTests(unittest.TestCase):
             self.assertTrue(catalog_entry["constraint_summary"]["root2d_enabled"])
             self.assertFalse(catalog_entry["constraint_summary"]["heading_enabled"])
 
-    def test_build_anchor_catalog_materializes_ik_sequence_when_missing(self) -> None:
+    def test_build_anchor_catalog_does_not_require_ik_sequence(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             pose_path = Path(tmp_dir) / "pose3d.npz"
             sequence = _make_pose_sequence("robot_emotions_10ms_u02_tag11")
@@ -1293,22 +1292,19 @@ class RobotEmotionsVLMTests(unittest.TestCase):
                 },
             )
 
-            def _fake_run_ik(sequence_arg, *, output_dir, ik_sequence_filename, **kwargs):
-                ik_path = Path(output_dir) / str(ik_sequence_filename)
-                _write_ik_sequence(ik_path, _make_ik_sequence(sequence_arg))
-                return {"artifacts": {"ik_sequence_npz_path": str(ik_path.resolve())}}
-
-            with patch("robot_emotions_vlm.anchor_catalog.run_ik", side_effect=_fake_run_ik) as mocked_run_ik:
-                summary = build_anchor_catalog(
-                    pose3d_manifest_path=pose_manifest_path,
-                    qwen_window_catalog_path=qwen_catalog_path,
-                    output_dir=Path(tmp_dir) / "anchors",
-                    runtime=_FakeAnchorRuntime(fps=20.0),
-                )
+            summary = build_anchor_catalog(
+                pose3d_manifest_path=pose_manifest_path,
+                qwen_window_catalog_path=qwen_catalog_path,
+                output_dir=Path(tmp_dir) / "anchors",
+                runtime=_FakeAnchorRuntime(fps=20.0),
+            )
             catalog_entry = json.loads(Path(summary["catalog_path"]).read_text(encoding="utf-8").strip())
-            self.assertEqual(mocked_run_ik.call_count, 1)
-            self.assertTrue(pose_path.with_name("ik_sequence.npz").exists())
-            self.assertEqual(catalog_entry["constraint_summary"]["constraint_mode"], "ik_sequence")
+            self.assertFalse(pose_path.with_name("ik_sequence.npz").exists())
+            self.assertEqual(catalog_entry["constraint_summary"]["constraint_mode"], "pose3d")
+            self.assertEqual(
+                catalog_entry["constraint_summary"]["fullbody_representation"],
+                "global_positions",
+            )
             self.assertEqual(catalog_entry["constraint_summary"]["pose3d_source_path"], str(pose_path.resolve()))
 
     def test_save_smplx_amass_outputs_writes_next_to_npz(self) -> None:
