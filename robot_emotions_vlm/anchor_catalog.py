@@ -28,67 +28,55 @@ from .windowing import (
 
 ROOT2D_MIN_DISPLACEMENT_M = 0.05
 HEADING_MIN_DISPLACEMENT_M = 0.10
-MAX_FULLBODY_KEYFRAME_GAP_SEC = 0.5
-GROUND_HEIGHT_QUANTILE = 0.05
-ROOT_ALIGNMENT_TOLERANCE_M = 1e-3
 CONSTRAINT_MODE = "pose3d"
 
 SMPLX22_JOINT_NAMES = (
-    "pelvis",
-    "left_hip",
-    "right_hip",
-    "spine1",
-    "left_knee",
-    "right_knee",
-    "spine2",
-    "left_ankle",
-    "right_ankle",
-    "spine3",
-    "left_foot",
-    "right_foot",
-    "neck",
-    "left_collar",
-    "right_collar",
-    "head",
-    "left_shoulder",
-    "right_shoulder",
-    "left_elbow",
-    "right_elbow",
-    "left_wrist",
-    "right_wrist",
+    "pelvis", "left_hip", "right_hip", "spine1", "left_knee", "right_knee",
+    "spine2", "left_ankle", "right_ankle", "spine3", "left_foot", "right_foot",
+    "neck", "left_collar", "right_collar", "head", "left_shoulder", "right_shoulder",
+    "left_elbow", "right_elbow", "left_wrist", "right_wrist",
 )
 IMUGPT_TO_SMPLX_JOINT_MAP = (
-    ("Pelvis", "pelvis"),
-    ("Left_hip", "left_hip"),
-    ("Right_hip", "right_hip"),
-    ("Spine1", "spine1"),
-    ("Left_knee", "left_knee"),
-    ("Right_knee", "right_knee"),
-    ("Spine2", "spine2"),
-    ("Left_ankle", "left_ankle"),
-    ("Right_ankle", "right_ankle"),
-    ("Spine3", "spine3"),
-    ("Left_foot", "left_foot"),
-    ("Right_foot", "right_foot"),
-    ("Neck", "neck"),
-    ("Left_collar", "left_collar"),
-    ("Right_collar", "right_collar"),
-    ("Head", "head"),
-    ("Left_shoulder", "left_shoulder"),
-    ("Right_shoulder", "right_shoulder"),
-    ("Left_elbow", "left_elbow"),
-    ("Right_elbow", "right_elbow"),
-    ("Left_wrist", "left_wrist"),
-    ("Right_wrist", "right_wrist"),
+    ("Pelvis", "pelvis"), ("Left_hip", "left_hip"), ("Right_hip", "right_hip"),
+    ("Spine1", "spine1"), ("Left_knee", "left_knee"), ("Right_knee", "right_knee"),
+    ("Spine2", "spine2"), ("Left_ankle", "left_ankle"), ("Right_ankle", "right_ankle"),
+    ("Spine3", "spine3"), ("Left_foot", "left_foot"), ("Right_foot", "right_foot"),
+    ("Neck", "neck"), ("Left_collar", "left_collar"), ("Right_collar", "right_collar"),
+    ("Head", "head"), ("Left_shoulder", "left_shoulder"), ("Right_shoulder", "right_shoulder"),
+    ("Left_elbow", "left_elbow"), ("Right_elbow", "right_elbow"),
+    ("Left_wrist", "left_wrist"), ("Right_wrist", "right_wrist"),
 )
-SUPPORT_JOINT_NAMES = ("left_ankle", "right_ankle", "left_foot", "right_foot")
+CONSTRAINT_SOURCE_POSE3D_NPZ = "pose3d_npz"
+SUPPORTED_CONSTRAINT_SOURCES = (CONSTRAINT_SOURCE_POSE3D_NPZ,)
+
+
+def _rebase_root_positions_to_first_xz(
+    root_positions_xyz: np.ndarray,
+    root2d_xz: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Translate root trajectories so the first frame starts at x=z=0."""
+
+    root_positions = np.asarray(root_positions_xyz, dtype=np.float32).copy()
+    root2d = np.asarray(root2d_xz, dtype=np.float32).copy()
+    if root_positions.shape[0] <= 0:
+        raise ValueError("Expected at least one root frame to rebase the root trajectory.")
+
+    xz_offset = np.asarray(root_positions[0, [0, 2]], dtype=np.float32)
+    root_positions[:, 0] -= xz_offset[0]
+    root_positions[:, 2] -= xz_offset[1]
+    root2d[:, 0] -= xz_offset[0]
+    root2d[:, 1] -= xz_offset[1]
+    return (
+        root_positions.astype(np.float32, copy=False),
+        root2d.astype(np.float32, copy=False),
+        xz_offset.astype(np.float32, copy=False),
+    )
 
 
 @dataclass(frozen=True)
 class _CachedPoseClip:
     sequence: PoseSequence3D
     source_times: np.ndarray
-    smplx_source_indices: np.ndarray
     root_translation_m: np.ndarray
     root_alignment_max_error_m: float
 
@@ -100,13 +88,9 @@ def build_anchor_catalog(
     output_dir: str | Path,
     model_name: str | None = DEFAULT_KIMODO_GENERATION_MODEL,
     clip_ids: Sequence[str] | None = None,
-    constraint_keyframes: int = 8,
     runtime: Any = None,
 ) -> dict[str, Any]:
-    """Build a Kimodo-ready anchor catalog from exact window-level Qwen entries."""
-
-    if int(constraint_keyframes) <= 0:
-        raise ValueError("constraint_keyframes must be >= 1.")
+    """Build a Kimodo-ready anchor catalog (root2d only) from window-level Qwen entries."""
 
     output_root = Path(output_dir)
     output_root.mkdir(parents=True, exist_ok=True)
@@ -118,6 +102,7 @@ def build_anchor_catalog(
         clip_ids=clip_ids,
     )
 
+    # Resolve target FPS from the Kimodo model (needed to build the dense frame grid).
     if runtime is None:
         runtime = _load_kimodo_runtime()
     device = runtime.resolve_device()
@@ -131,15 +116,6 @@ def build_anchor_catalog(
     model_info = runtime.get_model_info(resolved_model)
     model_display_name = resolved_model if model_info is None else model_info.display_name
     target_skeleton = None if model_info is None else model_info.skeleton
-    if not _supports_smplx_rich_constraints(
-        target_model=model_display_name,
-        target_skeleton=target_skeleton,
-        model_skeleton=getattr(model, "skeleton", None),
-    ):
-        raise ValueError(
-            "Rich window constraints are only supported for SMPLX targets; "
-            f"got model={model_display_name!r}, skeleton={target_skeleton!r}."
-        )
     target_fps = float(model.fps)
 
     cache: dict[str, _CachedPoseClip] = {}
@@ -164,40 +140,31 @@ def build_anchor_catalog(
 
         window = WindowSpec.from_dict(qwen_entry.window, prompt_id=prompt_id)
         pose_entry = pose_by_clip[reference_clip_id]
-        pose_path = Path(pose_entry.pose3d_npz_path)
 
         if reference_clip_id not in cache:
-            sequence = load_pose_sequence3d(pose_path)
+            pose3d_npz_path = Path(pose_entry.pose3d_npz_path)
+            sequence = load_pose_sequence3d(pose3d_npz_path)
             source_times = resolve_source_times(sequence)
-            smplx_source_indices = _resolve_smplx_source_indices(sequence.joint_names_3d)
-            root_translation_m = _require_root_translation(sequence, pose_path)
-            root_alignment_max_error_m = _validate_pose_sequence_for_constraints(
-                sequence=sequence,
-                source_times=source_times,
-                root_translation_m=root_translation_m,
-                smplx_source_indices=smplx_source_indices,
-                pose_path=pose_path,
-            )
+            root_translation_m = _require_root_translation(sequence, pose3d_npz_path)
             cache[reference_clip_id] = _CachedPoseClip(
                 sequence=sequence,
                 source_times=source_times,
-                smplx_source_indices=smplx_source_indices,
                 root_translation_m=root_translation_m,
-                root_alignment_max_error_m=root_alignment_max_error_m,
+                root_alignment_max_error_m=0.0,
             )
 
         cached = cache[reference_clip_id]
+        pose3d_npz_path = Path(pose_entry.pose3d_npz_path)
         window_dir = output_root / prompt_id
         window_dir.mkdir(parents=True, exist_ok=True)
 
         constraints_payload, traceability = _build_window_constraints_payload(
             cached=cached,
-            pose_path=pose_path,
+            pose3d_npz_path=pose3d_npz_path,
             window=window,
             target_fps=target_fps,
             target_model=model_display_name,
             target_skeleton=target_skeleton,
-            constraint_keyframes=int(constraint_keyframes),
         )
 
         constraints_path = window_dir / "constraints.json"
@@ -212,18 +179,15 @@ def build_anchor_catalog(
             "constraint_mode": CONSTRAINT_MODE,
             "target_model": model_display_name,
             "target_skeleton": target_skeleton,
-            "fullbody_representation": traceability["fullbody_representation"],
             "constraint_types": list(traceability["constraint_types"]),
             "constraint_frame_counts": dict(traceability["constraint_frame_counts"]),
             "source_frame_range": [
                 int(traceability["source_frame_start"]),
                 int(traceability["source_frame_end"]),
             ],
-            "source_keyframes": list(traceability["source_keyframes"]),
-            "target_keyframes": list(traceability["target_keyframes"]),
             "root2d_enabled": bool(traceability["root2d_enabled"]),
             "heading_enabled": bool(traceability["heading_enabled"]),
-            "pose3d_source_path": traceability["source_pose3d_npz_path"],
+            "pose3d_source_path": traceability["pose3d_npz_path"],
             "root2d_min_displacement_m": float(traceability["root2d_min_displacement_m"]),
             "heading_min_displacement_m": float(traceability["heading_min_displacement_m"]),
         }
@@ -247,10 +211,8 @@ def build_anchor_catalog(
         "model_name": model_display_name,
         "resolved_model": resolved_model,
         "target_fps": target_fps,
-        "constraint_keyframes": int(constraint_keyframes),
         "root2d_min_displacement_m": float(ROOT2D_MIN_DISPLACEMENT_M),
         "heading_min_displacement_m": float(HEADING_MIN_DISPLACEMENT_M),
-        "ground_height_quantile": float(GROUND_HEIGHT_QUANTILE),
         "num_input_clips": int(len(pose_entries)),
         "num_input_windows": int(len(qwen_entries)),
         "num_ok": int(len(catalog_entries)),
@@ -261,52 +223,6 @@ def build_anchor_catalog(
     }
     write_json(summary_path, summary)
     return summary
-
-
-def _supports_smplx_rich_constraints(
-    *,
-    target_model: str,
-    target_skeleton: str | None,
-    model_skeleton: Any,
-) -> bool:
-    if str(target_skeleton or "").upper() == "SMPLX":
-        return True
-    if "smplx" in str(target_model).lower():
-        return True
-    return "smplx" in str(getattr(model_skeleton, "name", "")).lower()
-
-
-def _resolve_smplx_source_indices(joint_names_3d: Sequence[str]) -> np.ndarray:
-    joint_names = [str(name) for name in joint_names_3d]
-    joint_to_index: dict[str, int] = {}
-    duplicates: set[str] = set()
-    for index, joint_name in enumerate(joint_names):
-        if joint_name in joint_to_index:
-            duplicates.add(joint_name)
-        joint_to_index[joint_name] = index
-    if duplicates:
-        raise ValueError(f"Joint source exposes duplicated joint names: {sorted(duplicates)}")
-
-    source_indices: list[int] = []
-    missing_source: list[str] = []
-    resolved_target_names: list[str] = []
-    for source_name, target_name in IMUGPT_TO_SMPLX_JOINT_MAP:
-        if source_name not in joint_to_index:
-            missing_source.append(source_name)
-            continue
-        source_indices.append(int(joint_to_index[source_name]))
-        resolved_target_names.append(target_name)
-
-    if missing_source:
-        raise ValueError(
-            "Joint source is missing IMUGPT22 joints required for SMPLX export: "
-            f"{sorted(missing_source)}"
-        )
-    if tuple(resolved_target_names) != SMPLX22_JOINT_NAMES:
-        raise ValueError(
-            "The fixed IMUGPT22 -> SMPLX22 mapping no longer matches the expected SMPLX joint order."
-        )
-    return np.asarray(source_indices, dtype=np.int32)
 
 
 def _require_root_translation(sequence: PoseSequence3D, pose_path: Path) -> np.ndarray:
@@ -320,85 +236,27 @@ def _require_root_translation(sequence: PoseSequence3D, pose_path: Path) -> np.n
     return root_translation_m.astype(np.float32, copy=False)
 
 
-def _validate_pose_sequence_for_constraints(
-    *,
-    sequence: PoseSequence3D,
-    source_times: np.ndarray,
-    root_translation_m: np.ndarray,
-    smplx_source_indices: np.ndarray,
-    pose_path: Path,
-) -> float:
-    if sequence.num_frames <= 0:
-        raise ValueError(f"Pose sequence {pose_path.resolve()} must contain at least one frame.")
-
-    joint_positions = np.asarray(sequence.joint_positions_xyz, dtype=np.float32)
-    if joint_positions.shape != (sequence.num_frames, len(sequence.joint_names_3d), 3):
-        raise ValueError(
-            f"Pose sequence {pose_path.resolve()} joint_positions_xyz has unexpected shape {joint_positions.shape}."
-        )
-    if not np.isfinite(joint_positions).all():
-        raise ValueError(f"Pose sequence {pose_path.resolve()} joint_positions_xyz contains NaN/Inf values.")
-
-    if source_times.shape != (sequence.num_frames,):
-        raise ValueError(
-            f"Pose sequence {pose_path.resolve()} timestamps must have shape [{sequence.num_frames}]."
-        )
-    if not np.isfinite(source_times).all():
-        raise ValueError(f"Pose sequence {pose_path.resolve()} timestamps contain NaN/Inf values.")
-
-    if root_translation_m.shape != (sequence.num_frames, 3):
-        raise ValueError(
-            f"Pose sequence {pose_path.resolve()} root_translation_m must have shape "
-            f"[{sequence.num_frames}, 3]."
-        )
-
-    pelvis_positions = joint_positions[:, int(smplx_source_indices[0]), :]
-    alignment_error = np.linalg.norm(pelvis_positions - root_translation_m, axis=1)
-    max_alignment_error_m = float(np.max(alignment_error))
-    if max_alignment_error_m > ROOT_ALIGNMENT_TOLERANCE_M:
-        raise ValueError(
-            f"Pose sequence {pose_path.resolve()} root_translation_m does not align with pelvis positions; "
-            f"max error is {max_alignment_error_m:.6f} m."
-        )
-    return max_alignment_error_m
-
-
 def _build_window_constraints_payload(
     *,
     cached: _CachedPoseClip,
-    pose_path: Path,
+    pose3d_npz_path: Path,
     window: WindowSpec,
     target_fps: float,
     target_model: str,
     target_skeleton: str | None,
-    constraint_keyframes: int,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     _validate_window_bounds(window, num_frames=cached.sequence.num_frames)
 
     num_target_frames = max(1, int(round(float(window.duration_sec) * float(target_fps))))
     dense_target_frame_indices = np.arange(num_target_frames, dtype=np.int32)
-    min_keyframes_for_gap = max(
-        2,
-        int(np.floor(float(window.duration_sec) / float(MAX_FULLBODY_KEYFRAME_GAP_SEC))) + 1,
-    )
-    effective_constraint_keyframes = max(int(constraint_keyframes), int(min_keyframes_for_gap))
-    sparse_target_frame_indices = _select_uniform_target_keyframes(num_target_frames, effective_constraint_keyframes)
 
     source_slice = slice(window.source_start_index, window.source_end_index)
-    source_positions_window = np.asarray(
-        cached.sequence.joint_positions_xyz[source_slice][:, cached.smplx_source_indices, :],
-        dtype=np.float32,
-    )
     source_root_window = np.asarray(
         cached.root_translation_m[source_slice],
         dtype=np.float32,
     )
     if source_root_window.shape[0] <= 0:
         raise ValueError(f"Window {window.prompt_id!r} does not contain source frames.")
-    if source_positions_window.shape[0] != source_root_window.shape[0]:
-        raise ValueError(f"Window {window.prompt_id!r} source pose and root windows are misaligned.")
-    if not np.isfinite(source_positions_window).all():
-        raise ValueError(f"Window {window.prompt_id!r} source pose contains NaN/Inf values.")
     if not np.isfinite(source_root_window).all():
         raise ValueError(f"Window {window.prompt_id!r} root translation contains NaN/Inf values.")
 
@@ -413,41 +271,12 @@ def _build_window_constraints_payload(
         source_root_2d=source_root_2d,
     )
 
-    sparse_source_indices = _map_target_frames_to_source_indices(
-        target_frames=sparse_target_frame_indices,
-        target_fps=target_fps,
-        source_times=cached.source_times,
-        window=window,
-    )
     dense_source_indices = _map_target_frames_to_source_indices(
         target_frames=dense_target_frame_indices,
         target_fps=target_fps,
         source_times=cached.source_times,
         window=window,
     )
-
-    sparse_source_indices = np.asarray(sparse_source_indices, dtype=np.int32)
-    sparse_source_positions = np.asarray(
-        cached.sequence.joint_positions_xyz[sparse_source_indices][:, cached.smplx_source_indices, :],
-        dtype=np.float32,
-    )
-    sparse_source_root = np.asarray(cached.root_translation_m[sparse_source_indices], dtype=np.float32)
-    ground_height_m = _estimate_ground_height(source_positions_window)
-    sparse_global_positions_grounded = sparse_source_positions.copy()
-    sparse_global_positions_grounded[:, :, 1] -= np.float32(ground_height_m)
-    sparse_root_positions_grounded = sparse_source_root.copy()
-    sparse_root_positions_grounded[:, 1] -= np.float32(ground_height_m)
-    sparse_global_positions_grounded[:, 0, :] = sparse_root_positions_grounded
-
-    constraints_payload: list[dict[str, Any]] = [
-        {
-            "type": "fullbody",
-            "frame_indices": [int(value) for value in sparse_target_frame_indices.tolist()],
-            "global_joints_positions": sparse_global_positions_grounded.astype(np.float32, copy=False).tolist(),
-            "root_positions": sparse_root_positions_grounded.astype(np.float32, copy=False).tolist(),
-            "smooth_root_2d": sparse_root_positions_grounded[:, [0, 2]].astype(np.float32, copy=False).tolist(),
-        }
-    ]
 
     root2d_displacement_m = float(np.linalg.norm(source_root_2d[-1] - source_root_2d[0]))
     root2d_motion_mode = "interpolated"
@@ -465,24 +294,27 @@ def _build_window_constraints_payload(
             )
         root2d_motion_mode = "stabilized_linear"
 
-    root2d_enabled = True
-    heading_enabled = False
+    # Rebase so the window starts at XZ origin, then flip to Kimodo convention:
+    # Pipeline: +X = anatomical right, +Z = forward.
+    # Kimodo:   +X = anatomical left,  -Z = forward.  Negate both root2d columns.
+    _, dense_root_2d_rebased, window_root_origin_xz = _rebase_root_positions_to_first_xz(
+        source_root_window,
+        dense_root_2d,
+    )
+    dense_root_2d_rebased = -dense_root_2d_rebased
 
-    constraint_types = ["fullbody"]
-    constraint_frame_counts = {"fullbody": int(len(sparse_target_frame_indices))}
+    heading_enabled = False
     root2d_payload: dict[str, Any] = {
         "type": "root2d",
         "frame_indices": [int(value) for value in dense_target_frame_indices.tolist()],
-        "smooth_root_2d": dense_root_2d.astype(np.float32, copy=False).tolist(),
+        "smooth_root_2d": dense_root_2d_rebased.astype(np.float32, copy=False).tolist(),
     }
     if root2d_displacement_m >= HEADING_MIN_DISPLACEMENT_M:
-        global_root_heading = _compute_root_heading(dense_root_2d)
+        global_root_heading = _compute_root_heading(dense_root_2d_rebased)
         if global_root_heading is not None:
             root2d_payload["global_root_heading"] = global_root_heading.astype(np.float32, copy=False).tolist()
             heading_enabled = True
-    constraints_payload.append(root2d_payload)
-    constraint_types.append("root2d")
-    constraint_frame_counts["root2d"] = int(len(dense_target_frame_indices))
+    constraints_payload: list[dict[str, Any]] = [root2d_payload]
 
     source_frame_ids = np.asarray(cached.sequence.frame_indices, dtype=np.int32)
     source_start_frame = int(source_frame_ids[window.source_start_index])
@@ -491,13 +323,10 @@ def _build_window_constraints_payload(
         "constraint_mode": CONSTRAINT_MODE,
         "prompt_id": window.prompt_id,
         "reference_clip_id": cached.sequence.clip_id,
-        "source_pose3d_npz_path": str(pose_path.resolve()),
+        "pose3d_npz_path": str(pose3d_npz_path.resolve()),
         "source_coordinate_space": str(cached.sequence.coordinate_space),
         "root_source": "pose3d.root_translation_m",
-        "ground_height_source": "pose3d.support_joint_heights_p05",
-        "fullbody_representation": "global_positions",
-        "fullbody_position_source": "pose3d.joint_positions_xyz_grounded",
-        "fullbody_root_source": "pose3d.root_translation_m_grounded",
+        "ground_height_source": None,
         "root_alignment_max_error_m": float(cached.root_alignment_max_error_m),
         "source_fps": resolve_sequence_fps(cached.sequence, cached.source_times),
         "target_model": target_model,
@@ -505,26 +334,17 @@ def _build_window_constraints_payload(
         "target_fps": float(target_fps),
         "source_frame_start": source_start_frame,
         "source_frame_end": source_end_frame,
-        "source_keyframes": [int(value) for value in source_frame_ids[sparse_source_indices].tolist()],
-        "target_keyframes": [int(value) for value in sparse_target_frame_indices.tolist()],
-        "constraint_types": list(constraint_types),
-        "constraint_frame_counts": dict(constraint_frame_counts),
+        "constraint_types": ["root2d"],
+        "constraint_frame_counts": {"root2d": int(len(dense_target_frame_indices))},
         "duration_hint_sec": float(window.duration_sec),
         "num_target_frames": int(num_target_frames),
-        "constraint_keyframes_requested": int(constraint_keyframes),
-        "constraint_keyframes_min_for_gap": int(min_keyframes_for_gap),
-        "constraint_keyframes_effective": int(effective_constraint_keyframes),
-        "constraint_keyframes_emitted": int(len(sparse_target_frame_indices)),
-        "root2d_enabled": bool(root2d_enabled),
+        "root2d_enabled": True,
         "root2d_motion_mode": root2d_motion_mode,
         "heading_enabled": bool(heading_enabled),
         "root2d_min_displacement_m": float(ROOT2D_MIN_DISPLACEMENT_M),
         "heading_min_displacement_m": float(HEADING_MIN_DISPLACEMENT_M),
         "root2d_net_displacement_m": float(root2d_displacement_m),
-        "ground_height_m": float(ground_height_m),
-        "ground_reference_joint_names": list(SUPPORT_JOINT_NAMES),
-        "fullbody_joint_names": list(SMPLX22_JOINT_NAMES),
-        "fullbody_source_indices": [int(value) for value in sparse_source_indices.tolist()],
+        "window_root_origin_xz_m": window_root_origin_xz.astype(np.float32, copy=False).tolist(),
         "root2d_source_indices": [int(value) for value in dense_source_indices.tolist()],
     }
     return constraints_payload, traceability
@@ -540,52 +360,6 @@ def _validate_window_bounds(window: WindowSpec, *, num_frames: int) -> None:
             f"Window {window.prompt_id!r} exceeds pose length: "
             f"{window.source_end_index} > {num_frames}."
         )
-
-
-def _estimate_ground_height(source_positions_window: np.ndarray) -> float:
-    support_indices = np.asarray(
-        [int(SMPLX22_JOINT_NAMES.index(name)) for name in SUPPORT_JOINT_NAMES],
-        dtype=np.int32,
-    )
-    support_heights = np.asarray(source_positions_window[:, support_indices, 1], dtype=np.float32).reshape(-1)
-    finite_heights = support_heights[np.isfinite(support_heights)]
-    if finite_heights.size <= 0:
-        raise ValueError("Support-joint heights contain no finite values.")
-    return float(np.quantile(finite_heights, GROUND_HEIGHT_QUANTILE))
-
-
-def _select_uniform_target_keyframes(num_target_frames: int, requested_keyframes: int) -> np.ndarray:
-    if num_target_frames <= 0:
-        raise ValueError("num_target_frames must be >= 1.")
-    if requested_keyframes <= 0:
-        raise ValueError("requested_keyframes must be >= 1.")
-    if num_target_frames == 1:
-        return np.asarray([0], dtype=np.int32)
-
-    count = min(int(requested_keyframes), int(num_target_frames))
-    if count == num_target_frames:
-        return np.arange(num_target_frames, dtype=np.int32)
-
-    raw_positions = np.linspace(0, num_target_frames - 1, num=count, endpoint=True)
-    indices = np.rint(raw_positions).astype(np.int32)
-    indices[0] = 0
-    indices[-1] = num_target_frames - 1
-    indices = np.unique(indices)
-    if indices.size == count:
-        return indices.astype(np.int32, copy=False)
-
-    all_frames = np.arange(num_target_frames, dtype=np.int32)
-    chosen: list[int] = []
-    used: set[int] = set()
-    for target in raw_positions.tolist():
-        candidate_order = sorted(all_frames.tolist(), key=lambda frame: (abs(frame - target), frame))
-        for candidate in candidate_order:
-            if candidate not in used:
-                used.add(candidate)
-                chosen.append(int(candidate))
-                break
-    chosen.sort()
-    return np.asarray(chosen, dtype=np.int32)
 
 
 def _interpolate_dense_root2d(

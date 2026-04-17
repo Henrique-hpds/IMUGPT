@@ -286,7 +286,6 @@ def build_parser() -> argparse.ArgumentParser:
     anchor_parser.add_argument("--output-dir", required=True)
     anchor_parser.add_argument("--model", default=DEFAULT_KIMODO_GENERATION_MODEL)
     anchor_parser.add_argument("--clip-id", action="append", dest="clip_ids")
-    anchor_parser.add_argument("--constraint-keyframes", type=int, default=8)
     return parser
 
 
@@ -347,7 +346,6 @@ def main(argv: Sequence[str] | None = None) -> int:
                 output_dir=args.output_dir,
                 model_name=args.model,
                 clip_ids=args.clip_ids,
-                constraint_keyframes=args.constraint_keyframes,
             )
             print(json.dumps(summary, indent=2, ensure_ascii=True))
             return 0

@@ -25,6 +25,7 @@ class PoseManifestEntry:
     source: dict[str, Any]
     video: dict[str, Any]
     pose3d_npz_path: str
+    pose3d_bvh_path: str | None = None
 
     @property
     def source_video_path(self) -> str | None:
@@ -89,6 +90,7 @@ def load_pose_manifest_entries(path: str | Path) -> list[PoseManifestEntry]:
         payload = json.loads(line)
         artifacts = dict(payload.get("artifacts") or {})
         pose3d_npz_path = artifacts.get("pose3d_npz_path")
+        pose3d_bvh_path = artifacts.get("pose3d_bvh_path")
         status = str(payload.get("status", "")).lower()
         if status not in {"ok", "warning"}:
             continue
@@ -105,6 +107,7 @@ def load_pose_manifest_entries(path: str | Path) -> list[PoseManifestEntry]:
                 source=dict(payload.get("source") or {}),
                 video=dict(payload.get("video") or {}),
                 pose3d_npz_path=str(pose3d_npz_path),
+                pose3d_bvh_path=None if pose3d_bvh_path in (None, "") else str(pose3d_bvh_path),
             )
         )
     return entries

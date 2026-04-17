@@ -75,3 +75,6 @@ data/
 output/
 checkpoints/
 models_lockedhead/
+
+CLAUDE.md
+.claude

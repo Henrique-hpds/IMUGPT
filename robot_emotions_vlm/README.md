@@ -81,7 +81,9 @@ python -m robot_emotions_vlm build-anchor-catalog \
   --qwen-window-catalog-path output/robot_emotions_qwen_windows/kimodo_window_prompt_catalog.jsonl \
   --output-dir output/robot_emotions_kimodo_anchors
 ```
-This step samples exact `fullbody` key poses directly from grounded `pose3d.npz` and saves them as `global_joints_positions`, with `root2d` derived from the dense root trajectory. No `ik_sequence.npz` is required. When `generate-kimodo` detects this pose-space `fullbody` format, it disables post-processing automatically so the sampled anchor pose is preserved.
+This step samples exact `fullbody` key poses directly from grounded `pose3d.npz`, rebases the window so the first root starts at `x=z=0`, and retargets the sampled poses onto the Kimodo SMPLX22 skeleton as `local_joints_rot` (axis-angle), with `root2d` derived from the dense rebased root trajectory. No `ik_sequence.npz` is required. The retarget preserves the observed bone directions while discarding subject bone-lengths — the model uses its own rest-pose bone-lengths downstream, keeping the anchor geometrically consistent with Kimodo's conditioning space.
+
+If the BVH export is visually more faithful for your capture, `build-anchor-catalog` also accepts `--constraint-source pose3d_bvh` and reconstructs the sparse `fullbody` poses from `pose3d.bvh` before writing the constraints.
 
 Generate Kimodo motions for all catalog entries:
 

@@ -136,34 +136,6 @@ def select_catalog_entries(
     return selected
 
 
-def _load_constraint_payload(constraints_path: str | Path | None) -> list[dict[str, Any]]:
-    if constraints_path is None:
-        return []
-    payload = json.loads(Path(constraints_path).read_text(encoding="utf-8"))
-    if isinstance(payload, dict):
-        return [dict(payload)]
-    return [dict(item) for item in payload]
-
-
-def _uses_pose_space_fullbody(entry: CatalogPromptEntry) -> bool:
-    summary = dict(entry.constraint_summary or {})
-    declared_types = {str(value) for value in (summary.get("constraint_types") or [])}
-    if "fullbody" not in declared_types and entry.constraints_path is None:
-        return False
-
-    if str(summary.get("fullbody_representation") or "").strip().lower() == "global_positions":
-        return True
-    if str(summary.get("constraint_mode") or "").strip().lower() == "pose3d":
-        return True
-
-    for constraint_payload in _load_constraint_payload(entry.constraints_path):
-        if str(constraint_payload.get("type") or "").strip().lower() != "fullbody":
-            continue
-        if "global_joints_positions" in constraint_payload and "local_joints_rot" not in constraint_payload:
-            return True
-    return False
-
-
 def _resolve_postprocess_flag(
     *,
     entry: CatalogPromptEntry,
@@ -171,11 +143,8 @@ def _resolve_postprocess_flag(
     config: KimodoGenerationConfig,
     runtime_notes: list[str],
 ) -> bool:
-    use_postprocess = False if "g1" in resolved_model else (not config.no_postprocess)
-    if use_postprocess and _uses_pose_space_fullbody(entry):
-        runtime_notes.append("postprocess_disabled_for_pose_space_fullbody")
-        return False
-    return use_postprocess
+    del entry, runtime_notes
+    return False if "g1" in resolved_model else (not config.no_postprocess)
 
 
 def generate_kimodo_from_catalog(
