@@ -30,6 +30,10 @@ ROOT2D_MIN_DISPLACEMENT_M = 0.05
 HEADING_MIN_DISPLACEMENT_M = 0.10
 CONSTRAINT_MODE = "pose3d"
 
+# Joint indices for hand end-effectors in IMUGPT22 / SMPLX22 (identical order).
+_LEFT_WRIST_IDX = 20
+_RIGHT_WRIST_IDX = 21
+
 SMPLX22_JOINT_NAMES = (
     "pelvis", "left_hip", "right_hip", "spine1", "left_knee", "right_knee",
     "spine2", "left_ankle", "right_ankle", "spine3", "left_foot", "right_foot",
@@ -88,9 +92,15 @@ def build_anchor_catalog(
     output_dir: str | Path,
     model_name: str | None = DEFAULT_KIMODO_GENERATION_MODEL,
     clip_ids: Sequence[str] | None = None,
+    hand_keyframes: int = 0,
     runtime: Any = None,
 ) -> dict[str, Any]:
-    """Build a Kimodo-ready anchor catalog (root2d only) from window-level Qwen entries."""
+    """Build a Kimodo-ready anchor catalog from window-level Qwen entries.
+
+    When hand_keyframes > 0, adds left-hand and right-hand end-effector
+    constraints sampled at that many uniform keyframes per window, in addition
+    to the root2d constraint.  Requires the kimodo conda environment.
+    """
 
     output_root = Path(output_dir)
     output_root.mkdir(parents=True, exist_ok=True)
@@ -165,6 +175,7 @@ def build_anchor_catalog(
             target_fps=target_fps,
             target_model=model_display_name,
             target_skeleton=target_skeleton,
+            hand_keyframes=int(hand_keyframes),
         )
 
         constraints_path = window_dir / "constraints.json"
@@ -187,6 +198,7 @@ def build_anchor_catalog(
             ],
             "root2d_enabled": bool(traceability["root2d_enabled"]),
             "heading_enabled": bool(traceability["heading_enabled"]),
+            "hand_keyframes_enabled": bool(traceability["hand_keyframes_enabled"]),
             "pose3d_source_path": traceability["pose3d_npz_path"],
             "root2d_min_displacement_m": float(traceability["root2d_min_displacement_m"]),
             "heading_min_displacement_m": float(traceability["heading_min_displacement_m"]),
@@ -203,6 +215,7 @@ def build_anchor_catalog(
 
     summary = {
         "constraint_mode": CONSTRAINT_MODE,
+        "hand_keyframes": int(hand_keyframes),
         "pose3d_manifest_path": str(Path(pose3d_manifest_path).resolve()),
         "qwen_window_catalog_path": str(Path(qwen_window_catalog_path).resolve()),
         "output_dir": str(output_root.resolve()),
@@ -244,6 +257,7 @@ def _build_window_constraints_payload(
     target_fps: float,
     target_model: str,
     target_skeleton: str | None,
+    hand_keyframes: int = 0,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     _validate_window_bounds(window, num_frames=cached.sequence.num_frames)
 
@@ -316,9 +330,31 @@ def _build_window_constraints_payload(
             heading_enabled = True
     constraints_payload: list[dict[str, Any]] = [root2d_payload]
 
+    # --- Optional hand end-effector constraints ---
+    hand_keyframes_enabled = False
+    hand_constraint_types: list[str] = []
+    hand_frame_counts: dict[str, int] = {}
+
+    if hand_keyframes > 0:
+        hand_payloads, hand_constraint_types, hand_frame_counts = _build_hand_constraints(
+            cached=cached,
+            window=window,
+            source_root_window=source_root_window,
+            window_root_origin_xz=window_root_origin_xz,
+            num_target_frames=num_target_frames,
+            target_fps=target_fps,
+            hand_keyframes=hand_keyframes,
+        )
+        constraints_payload = hand_payloads + constraints_payload
+        hand_keyframes_enabled = len(hand_payloads) > 0
+
     source_frame_ids = np.asarray(cached.sequence.frame_indices, dtype=np.int32)
     source_start_frame = int(source_frame_ids[window.source_start_index])
     source_end_frame = int(source_frame_ids[max(window.source_end_index - 1, window.source_start_index)])
+
+    all_constraint_types = hand_constraint_types + ["root2d"]
+    all_frame_counts = {**hand_frame_counts, "root2d": int(len(dense_target_frame_indices))}
+
     traceability = {
         "constraint_mode": CONSTRAINT_MODE,
         "prompt_id": window.prompt_id,
@@ -334,13 +370,15 @@ def _build_window_constraints_payload(
         "target_fps": float(target_fps),
         "source_frame_start": source_start_frame,
         "source_frame_end": source_end_frame,
-        "constraint_types": ["root2d"],
-        "constraint_frame_counts": {"root2d": int(len(dense_target_frame_indices))},
+        "constraint_types": all_constraint_types,
+        "constraint_frame_counts": all_frame_counts,
         "duration_hint_sec": float(window.duration_sec),
         "num_target_frames": int(num_target_frames),
         "root2d_enabled": True,
         "root2d_motion_mode": root2d_motion_mode,
         "heading_enabled": bool(heading_enabled),
+        "hand_keyframes_enabled": bool(hand_keyframes_enabled),
+        "hand_keyframes": int(hand_keyframes),
         "root2d_min_displacement_m": float(ROOT2D_MIN_DISPLACEMENT_M),
         "heading_min_displacement_m": float(HEADING_MIN_DISPLACEMENT_M),
         "root2d_net_displacement_m": float(root2d_displacement_m),
@@ -348,6 +386,104 @@ def _build_window_constraints_payload(
         "root2d_source_indices": [int(value) for value in dense_source_indices.tolist()],
     }
     return constraints_payload, traceability
+
+
+def _select_uniform_keyframes(num_source_frames: int, requested: int) -> np.ndarray:
+    """Select up to `requested` uniformly-spaced indices in [0, num_source_frames)."""
+    count = min(int(requested), int(num_source_frames))
+    if count <= 1:
+        return np.asarray([0], dtype=np.int32)
+    raw = np.linspace(0, num_source_frames - 1, num=count, endpoint=True)
+    indices = np.unique(np.rint(raw).astype(np.int32))
+    indices[0] = 0
+    indices[-1] = num_source_frames - 1
+    return indices
+
+
+def _build_hand_constraints(
+    *,
+    cached: _CachedPoseClip,
+    window: WindowSpec,
+    source_root_window: np.ndarray,
+    window_root_origin_xz: np.ndarray,
+    num_target_frames: int,
+    target_fps: float,
+    hand_keyframes: int,
+) -> tuple[list[dict[str, Any]], list[str], dict[str, int]]:
+    """Build left-hand and right-hand end-effector constraint payloads.
+
+    Transforms IMUGPT22 joint positions into Kimodo/SMPLX22 space and passes
+    them as ``global_joints_positions`` — bypassing FK-inversion entirely.
+    This avoids the restpose mismatch between IMUGPT22 and SMPLX22 that causes
+    incorrect hip rotations (~180°) when using _estimate_global_rotations_from_positions.
+
+    Returns:
+        (payloads, constraint_type_names, frame_count_dict)
+    """
+    source_slice = slice(window.source_start_index, window.source_end_index)
+    source_positions = np.asarray(
+        cached.sequence.joint_positions_xyz[source_slice], dtype=np.float32
+    )
+    num_source_frames = source_positions.shape[0]
+
+    # Select sparse keyframe indices within the source window.
+    sparse_local_indices = _select_uniform_keyframes(num_source_frames, hand_keyframes)
+
+    # Coordinate flip: pipeline +X=right / +Z=fwd → Kimodo -X / -Z.
+    positions_kimodo = source_positions.copy()
+    positions_kimodo[:, :, 0] *= -1.0
+    positions_kimodo[:, :, 2] *= -1.0
+
+    # Rebase XZ so first keyframe root is at origin (match root2d rebase).
+    xz_origin = np.asarray([source_root_window[0, 0], source_root_window[0, 2]], dtype=np.float32)
+    # xz_origin was in pipeline space; after flip it becomes -xz_origin in Kimodo space.
+    positions_kimodo[:, :, 0] -= -xz_origin[0]
+    positions_kimodo[:, :, 2] -= -xz_origin[1]
+
+    sparse_positions = positions_kimodo[sparse_local_indices]  # (K, 22, 3)
+
+    # The pipeline pelvis Y is always 0 (pelvis-centered horizontally).  In the
+    # Kimodo/SMPLX22 world the pelvis sits at a positive Y (standing height).
+    # Estimate it as the distance from the feet to the pelvis — lift the entire
+    # skeleton so the feet land at Y≈0 and the pelvis is at its real height.
+    # Note: no bone-length rescaling here — the pipeline positions are already
+    # in metric units (meters) with correct joint directions for the arms.
+    # Rescaling would distort wrist positions due to the IMUGPT/SMPLX22 pelvis
+    # rest-pose mismatch (hip direction inversion propagates through the chain).
+    feet_Y = sparse_positions[:, [10, 11], 1]  # L_Foot, R_Foot  (K, 2)
+    ground_Y = float(feet_Y.min())
+    sparse_lifted = sparse_positions.copy()
+    if ground_Y < 0.0:
+        sparse_lifted[:, :, 1] -= ground_Y  # shift whole skeleton up
+
+    # smooth_root_2d at keyframes (XZ after rebase).
+    smooth_root_2d = sparse_lifted[:, 0, [0, 2]]  # (K, 2)
+
+    # Map local source indices to target (Kimodo) frame indices.
+    source_times_window = (
+        np.asarray(cached.source_times[source_slice], dtype=np.float32)
+        - np.float32(window.start_sec)
+    )
+    target_times = np.arange(num_target_frames, dtype=np.float32) / np.float32(target_fps)
+    keyframe_times = source_times_window[sparse_local_indices]
+    sparse_target_indices = np.asarray(
+        [int(np.argmin(np.abs(target_times - t))) for t in keyframe_times],
+        dtype=np.int32,
+    )
+
+    # Pass global_joints_positions directly — Kimodo uses pelvis Y as root_y_pos.
+    def _make_ee_payload(constraint_type: str) -> dict[str, Any]:
+        return {
+            "type": constraint_type,
+            "frame_indices": [int(v) for v in sparse_target_indices.tolist()],
+            "global_joints_positions": sparse_lifted.tolist(),
+            "smooth_root_2d": smooth_root_2d.tolist(),
+        }
+
+    payloads = [_make_ee_payload("left-hand"), _make_ee_payload("right-hand")]
+    types = ["left-hand", "right-hand"]
+    counts = {"left-hand": int(len(sparse_target_indices)), "right-hand": int(len(sparse_target_indices))}
+    return payloads, types, counts
 
 
 def _validate_window_bounds(window: WindowSpec, *, num_frames: int) -> None:

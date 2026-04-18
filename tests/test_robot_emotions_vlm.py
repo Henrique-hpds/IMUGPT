@@ -1357,6 +1357,220 @@ class RobotEmotionsVLMTests(unittest.TestCase):
         self.assertEqual(fake_processor.apply_calls[0]["num_frames"], 8)
         self.assertIsNone(fake_processor.apply_calls[0]["fps"])
 
+    # ------------------------------------------------------------------
+    # Retarget module tests
+    # ------------------------------------------------------------------
+
+    def test_retarget_rescale_preserves_bone_directions(self) -> None:
+        from robot_emotions_vlm.retarget import rescale_positions_to_smplx22
+
+        # Build synthetic IMUGPT22 positions with arbitrary bone lengths.
+        parents = (-1, 0, 0, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 9, 9, 12, 13, 14, 16, 17, 18, 19)
+        num_joints = 22
+        rng = np.random.default_rng(42)
+        positions = np.zeros((1, num_joints, 3), dtype=np.float32)
+        for i, p in enumerate(parents):
+            if p >= 0:
+                direction = rng.standard_normal(3).astype(np.float32)
+                direction /= np.linalg.norm(direction)
+                # Arbitrary bone length between 0.05 and 0.5 m.
+                length = rng.uniform(0.05, 0.5)
+                positions[0, i] = positions[0, p] + direction * length
+
+        rescaled = rescale_positions_to_smplx22(positions)
+
+        from robot_emotions_vlm.retarget import _smplx22_bone_lengths
+        target_lengths = _smplx22_bone_lengths()
+
+        for i, p in enumerate(parents):
+            if p < 0:
+                continue
+            observed_bone = positions[0, i] - positions[0, p]
+            rescaled_bone = rescaled[0, i] - rescaled[0, p]
+
+            # Direction preserved.
+            obs_norm = float(np.linalg.norm(observed_bone))
+            res_norm = float(np.linalg.norm(rescaled_bone))
+            if obs_norm > 1e-6 and res_norm > 1e-6:
+                cos_sim = float(np.dot(observed_bone / obs_norm, rescaled_bone / res_norm))
+                self.assertGreater(cos_sim, 0.999, msg=f"joint {i}: bone direction changed")
+
+            # Length matches SMPLX22 canonical.
+            self.assertAlmostEqual(res_norm, float(target_lengths[i]), places=4,
+                                   msg=f"joint {i}: bone length mismatch")
+
+    def test_retarget_rescale_preserves_pelvis_position(self) -> None:
+        from robot_emotions_vlm.retarget import retarget_positions_to_smplx22_space
+
+        positions = np.zeros((5, 22, 3), dtype=np.float32)
+        positions[:, 0, 0] = np.linspace(0.0, 1.0, 5, dtype=np.float32)
+        positions[:, 0, 2] = np.linspace(0.0, 0.5, 5, dtype=np.float32)
+
+        result = retarget_positions_to_smplx22_space(positions)
+
+        np.testing.assert_allclose(result[:, 0, :], positions[:, 0, :], atol=1e-5)
+
+    def test_retarget_output_bone_lengths_match_smplx22(self) -> None:
+        from robot_emotions_vlm.retarget import (
+            _smplx22_bone_lengths,
+            retarget_positions_to_smplx22_space,
+        )
+
+        parents = (-1, 0, 0, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 9, 9, 12, 13, 14, 16, 17, 18, 19)
+        # Create T-pose-ish positions with random bone lengths.
+        rng = np.random.default_rng(7)
+        pos = np.zeros((3, 22, 3), dtype=np.float32)
+        for i, p in enumerate(parents):
+            if p >= 0:
+                d = rng.standard_normal(3).astype(np.float32)
+                d /= np.linalg.norm(d)
+                pos[:, i] = pos[:, p] + d * rng.uniform(0.05, 0.6)
+
+        result = retarget_positions_to_smplx22_space(pos)
+        target_lengths = _smplx22_bone_lengths()
+
+        for i, p in enumerate(parents):
+            if p < 0:
+                continue
+            for t in range(3):
+                length = float(np.linalg.norm(result[t, i] - result[t, p]))
+                self.assertAlmostEqual(length, float(target_lengths[i]), places=4,
+                                       msg=f"frame {t}, joint {i}")
+
+    # ------------------------------------------------------------------
+    # Hand constraint tests (no kimodo env needed — mock retarget)
+    # ------------------------------------------------------------------
+
+    def test_build_anchor_catalog_hand_keyframes_adds_ee_constraints(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            pose_path = Path(tmp_dir) / "pose3d.npz"
+            sequence = _make_pose_sequence("robot_emotions_10ms_u02_tag11", x_step=0.02, z_step=0.03)
+            write_pose_sequence3d_npz(sequence, pose_path)
+            pose_manifest_path = Path(tmp_dir) / "pose3d_manifest.jsonl"
+            _write_anchor_pose_manifest(
+                pose_manifest_path,
+                clip_id="robot_emotions_10ms_u02_tag11",
+                pose_path=pose_path,
+            )
+            qwen_catalog_path = Path(tmp_dir) / "kimodo_window_prompt_catalog.jsonl"
+            _write_anchor_qwen_catalog(
+                qwen_catalog_path,
+                prompt_id="robot_emotions_10ms_u02_tag11__w000",
+                reference_clip_id="robot_emotions_10ms_u02_tag11",
+                window_payload={
+                    "window_index": 0,
+                    "prompt_id": "robot_emotions_10ms_u02_tag11__w000",
+                    "start_sec": 0.0,
+                    "end_sec": 0.4,
+                    "duration_sec": 0.4,
+                    "source_start_index": 0,
+                    "source_end_index": 8,
+                },
+            )
+
+            # Mock retarget so the test runs without the kimodo conda env.
+            fake_local_aa = np.zeros((3, 22, 3), dtype=np.float32)
+
+            def _fake_retarget(positions):
+                return positions.astype(np.float32)
+
+            def _fake_local_aa(positions):
+                return fake_local_aa[:positions.shape[0]]
+
+            import robot_emotions_vlm.retarget as retarget_mod
+            orig_retarget = retarget_mod.retarget_positions_to_smplx22_space
+            orig_aa = retarget_mod.compute_local_axis_angle_from_positions_robust
+            retarget_mod.retarget_positions_to_smplx22_space = _fake_retarget
+            retarget_mod.compute_local_axis_angle_from_positions_robust = _fake_local_aa
+            try:
+                summary = build_anchor_catalog(
+                    pose3d_manifest_path=pose_manifest_path,
+                    qwen_window_catalog_path=qwen_catalog_path,
+                    output_dir=Path(tmp_dir) / "anchors",
+                    hand_keyframes=3,
+                    runtime=_FakeAnchorRuntime(fps=20.0),
+                )
+            finally:
+                retarget_mod.retarget_positions_to_smplx22_space = orig_retarget
+                retarget_mod.compute_local_axis_angle_from_positions_robust = orig_aa
+
+            catalog_entry = json.loads(Path(summary["catalog_path"]).read_text(encoding="utf-8").strip())
+            constraints_payload = json.loads(Path(catalog_entry["constraints_path"]).read_text(encoding="utf-8"))
+            types = [c["type"] for c in constraints_payload]
+
+            self.assertIn("left-hand", types)
+            self.assertIn("right-hand", types)
+            self.assertIn("root2d", types)
+            self.assertEqual(types, ["left-hand", "right-hand", "root2d"])
+
+            for ee_type in ("left-hand", "right-hand"):
+                ee = next(c for c in constraints_payload if c["type"] == ee_type)
+                self.assertIn("frame_indices", ee)
+                self.assertIn("global_joints_positions", ee)
+                self.assertIn("smooth_root_2d", ee)
+                self.assertNotIn("local_joints_rot", ee)
+                self.assertEqual(len(ee["frame_indices"]), 3)
+                self.assertEqual(np.asarray(ee["global_joints_positions"], dtype=np.float32).shape, (3, 22, 3))
+
+            self.assertTrue(catalog_entry["constraint_summary"]["hand_keyframes_enabled"])
+            self.assertIn("left-hand", catalog_entry["constraint_summary"]["constraint_types"])
+            self.assertIn("right-hand", catalog_entry["constraint_summary"]["constraint_types"])
+            self.assertEqual(summary["hand_keyframes"], 3)
+
+    def test_build_anchor_catalog_zero_hand_keyframes_keeps_root2d_only(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            pose_path = Path(tmp_dir) / "pose3d.npz"
+            sequence = _make_pose_sequence("robot_emotions_10ms_u02_tag11")
+            write_pose_sequence3d_npz(sequence, pose_path)
+            pose_manifest_path = Path(tmp_dir) / "pose3d_manifest.jsonl"
+            _write_anchor_pose_manifest(
+                pose_manifest_path,
+                clip_id="robot_emotions_10ms_u02_tag11",
+                pose_path=pose_path,
+            )
+            qwen_catalog_path = Path(tmp_dir) / "kimodo_window_prompt_catalog.jsonl"
+            _write_anchor_qwen_catalog(
+                qwen_catalog_path,
+                prompt_id="robot_emotions_10ms_u02_tag11__w000",
+                reference_clip_id="robot_emotions_10ms_u02_tag11",
+                window_payload={
+                    "window_index": 0,
+                    "prompt_id": "robot_emotions_10ms_u02_tag11__w000",
+                    "start_sec": 0.0,
+                    "end_sec": 0.4,
+                    "duration_sec": 0.4,
+                    "source_start_index": 0,
+                    "source_end_index": 8,
+                },
+            )
+
+            summary = build_anchor_catalog(
+                pose3d_manifest_path=pose_manifest_path,
+                qwen_window_catalog_path=qwen_catalog_path,
+                output_dir=Path(tmp_dir) / "anchors",
+                hand_keyframes=0,
+                runtime=_FakeAnchorRuntime(fps=20.0),
+            )
+
+            catalog_entry = json.loads(Path(summary["catalog_path"]).read_text(encoding="utf-8").strip())
+            constraints_payload = json.loads(Path(catalog_entry["constraints_path"]).read_text(encoding="utf-8"))
+            self.assertEqual([c["type"] for c in constraints_payload], ["root2d"])
+            self.assertFalse(catalog_entry["constraint_summary"]["hand_keyframes_enabled"])
+            self.assertEqual(summary["hand_keyframes"], 0)
+
+    def test_cli_dispatches_build_anchor_catalog_with_hand_keyframes(self) -> None:
+        with patch("robot_emotions_vlm.cli.build_anchor_catalog", return_value={"status": "ok"}) as mocked:
+            with patch("builtins.print"):
+                exit_code = robot_emotions_vlm_main([
+                    "build-anchor-catalog",
+                    "--pose3d-manifest-path", "/tmp/pose3d_manifest.jsonl",
+                    "--qwen-window-catalog-path", "/tmp/catalog.jsonl",
+                    "--output-dir", "/tmp/anchors",
+                    "--hand-keyframes", "4",
+                ])
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(mocked.call_args.kwargs["hand_keyframes"], 4)
+
 
 if __name__ == "__main__":
     unittest.main()
