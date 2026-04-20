@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import traceback
 from pathlib import Path
 import time
 from typing import Any, Sequence
@@ -27,6 +28,190 @@ from .prompts import (
 from .qwen_backend import QwenGenerationConfig, QwenVideoBackend
 from .schemas import DescriptionValidationError, VideoDescription, parse_model_response
 from .window_descriptions import describe_windows
+
+
+def export_kimodo_virtual_imu(
+    *,
+    kimodo_manifest_path: str | Path,
+    output_dir: str | Path,
+    sensor_layout_path: str | None = None,
+    imu_acc_noise_std_m_s2: float | None = None,
+    imu_gyro_noise_std_rad_s: float | None = None,
+    imu_random_seed: int = 0,
+    export_bvh: bool = False,
+    skip_existing: bool = True,
+    clip_ids: Sequence[str] | None = None,
+) -> dict[str, Any]:
+    """Batch-process a Kimodo generation manifest → virtual IMU.
+
+    Reads a JSONL manifest produced by generate-kimodo (or batch_kimodo_pose3d),
+    runs metric normalisation + root estimation + IK + IMUSim on each ok entry,
+    and writes a virtual_imu_manifest.jsonl alongside a summary.
+    """
+    from pose_module.pipeline import run_virtual_imu_from_kimodo
+
+    manifest_path = Path(kimodo_manifest_path)
+    output_root = Path(output_dir)
+    output_root.mkdir(parents=True, exist_ok=True)
+
+    entries = [
+        json.loads(line)
+        for line in manifest_path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    ok_entries = [e for e in entries if e.get("status") == "ok"]
+    if clip_ids is not None:
+        clip_id_set = set(clip_ids)
+        ok_entries = [e for e in ok_entries if e.get("clip_id") in clip_id_set or e.get("prompt_id") in clip_id_set or e.get("sample_id") in clip_id_set]
+
+    t_start = time.time()
+    result_entries: list[dict[str, Any]] = []
+    num_ok = num_skip = num_fail = 0
+
+    for i, entry in enumerate(ok_entries):
+        prompt_id = str(entry.get("prompt_id", entry.get("sample_id", f"entry_{i}")))
+        sample_id = str(entry.get("sample_id") or prompt_id)
+        clip_id = sample_id
+        kimodo_npz = str(entry.get("artifacts", {}).get("kimodo_npz_path", ""))
+        gen_cfg = entry.get("artifacts", {}).get("generation_config_json_path") or None
+        clip_output_dir = output_root / prompt_id
+
+        if skip_existing and (clip_output_dir / "virtual_imu" / "virtual_imu.npz").exists():
+            result_entries.append({
+                **entry,
+                "pose_kind": "synthetic",
+                "virtual_imu_artifacts": {
+                    "virtual_imu_npz_path": str((clip_output_dir / "virtual_imu" / "virtual_imu.npz").resolve()),
+                },
+            })
+            num_skip += 1
+            continue
+
+        try:
+            result = run_virtual_imu_from_kimodo(
+                clip_id=clip_id,
+                kimodo_npz_path=kimodo_npz,
+                output_dir=clip_output_dir,
+                generation_config_path=gen_cfg,
+                export_bvh=bool(export_bvh),
+                sensor_layout_path=sensor_layout_path or None,
+                imu_acc_noise_std_m_s2=imu_acc_noise_std_m_s2,
+                imu_gyro_noise_std_rad_s=imu_gyro_noise_std_rad_s,
+                imu_random_seed=int(imu_random_seed),
+            )
+            virtual_imu_seq = result["virtual_imu_sequence"]
+            result_entries.append({
+                **entry,
+                "pose_kind": "synthetic",
+                "virtual_imu": {
+                    "fps": None if virtual_imu_seq.fps is None else float(virtual_imu_seq.fps),
+                    "num_frames": int(virtual_imu_seq.num_frames),
+                    "num_sensors": int(virtual_imu_seq.num_sensors),
+                    "sensor_names": list(virtual_imu_seq.sensor_names),
+                    "source": str(virtual_imu_seq.source),
+                },
+                "virtual_imu_artifacts": result["artifacts"],
+            })
+            num_ok += 1
+        except Exception as exc:
+            result_entries.append({
+                **entry,
+                "pose_kind": "synthetic",
+                "status": "fail",
+                "virtual_imu_error": f"{type(exc).__name__}: {exc}",
+            })
+            num_fail += 1
+            err_path = output_root / prompt_id / "virtual_imu_error.txt"
+            err_path.parent.mkdir(parents=True, exist_ok=True)
+            err_path.write_text(traceback.format_exc())
+            print(f"  FAIL [{i+1}] {prompt_id}: {exc}", flush=True)
+
+        if (i + 1) % 50 == 0:
+            elapsed = time.time() - t_start
+            rate = (i + 1) / elapsed
+            remaining = (len(ok_entries) - i - 1) / max(rate, 1e-9)
+            print(
+                f"  [{i+1}/{len(ok_entries)}] ok={num_ok} skip={num_skip} fail={num_fail}"
+                f" | {rate:.1f} it/s | ~{remaining/60:.1f} min left",
+                flush=True,
+            )
+
+    manifest_out = output_root / "virtual_imu_manifest.jsonl"
+    manifest_out.write_text(
+        "\n".join(json.dumps(e, ensure_ascii=False) for e in result_entries) + "\n",
+        encoding="utf-8",
+    )
+    summary = {
+        "kimodo_manifest_path": str(manifest_path.resolve()),
+        "output_dir": str(output_root.resolve()),
+        "num_total": len(ok_entries),
+        "num_ok": num_ok,
+        "num_skip": num_skip,
+        "num_fail": num_fail,
+        "elapsed_sec": round(time.time() - t_start, 1),
+        "virtual_imu_manifest_path": str(manifest_out.resolve()),
+    }
+    (output_root / "virtual_imu_summary.json").write_text(json.dumps(summary, indent=2))
+    return summary
+
+
+def export_mixed_virtual_imu(
+    *,
+    real_manifest_path: str | Path,
+    synthetic_manifest_path: str | Path,
+    output_dir: str | Path,
+) -> dict[str, Any]:
+    """Merge a real virtual_imu_manifest and a synthetic virtual_imu_manifest into one.
+
+    Reads both JSONL manifests, tags each entry with pose_kind=real/synthetic,
+    and writes a combined mixed_virtual_imu_manifest.jsonl. No recomputation is done.
+    """
+    output_root = Path(output_dir)
+    output_root.mkdir(parents=True, exist_ok=True)
+
+    def _load_manifest(path: Path) -> list[dict[str, Any]]:
+        return [
+            json.loads(line)
+            for line in path.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+
+    real_entries = _load_manifest(Path(real_manifest_path))
+    synthetic_entries = _load_manifest(Path(synthetic_manifest_path))
+
+    combined: list[dict[str, Any]] = []
+    for entry in real_entries:
+        combined.append({**entry, "pose_kind": entry.get("pose_kind", "real")})
+    for entry in synthetic_entries:
+        combined.append({**entry, "pose_kind": entry.get("pose_kind", "synthetic")})
+
+    num_real = len(real_entries)
+    num_synthetic = len(synthetic_entries)
+    num_valid_real = sum(1 for e in real_entries if e.get("status") in ("ok", "warning"))
+    num_valid_synthetic = sum(1 for e in synthetic_entries if e.get("status") in ("ok", "warning"))
+    num_fail_real = sum(1 for e in real_entries if e.get("status") == "fail")
+    num_fail_synthetic = sum(1 for e in synthetic_entries if e.get("status") == "fail")
+
+    manifest_out = output_root / "mixed_virtual_imu_manifest.jsonl"
+    manifest_out.write_text(
+        "\n".join(json.dumps(e, ensure_ascii=False) for e in combined) + "\n",
+        encoding="utf-8",
+    )
+    summary = {
+        "real_manifest_path": str(Path(real_manifest_path).resolve()),
+        "synthetic_manifest_path": str(Path(synthetic_manifest_path).resolve()),
+        "output_dir": str(output_root.resolve()),
+        "num_real": num_real,
+        "num_synthetic": num_synthetic,
+        "num_total": num_real + num_synthetic,
+        "num_valid_real": num_valid_real,
+        "num_valid_synthetic": num_valid_synthetic,
+        "num_fail_real": num_fail_real,
+        "num_fail_synthetic": num_fail_synthetic,
+        "mixed_virtual_imu_manifest_path": str(manifest_out.resolve()),
+    }
+    (output_root / "mixed_virtual_imu_summary.json").write_text(json.dumps(summary, indent=2))
+    return summary
 
 
 def describe_videos(
@@ -295,6 +480,57 @@ def build_parser() -> argparse.ArgumentParser:
             "0 (default) = root2d only.  Requires the kimodo conda environment."
         ),
     )
+
+    kimodo_imu_parser = subparsers.add_parser(
+        "export-kimodo-virtual-imu",
+        help=(
+            "Convert a Kimodo generation manifest to synthetic virtual IMU signals. "
+            "Applies the same temporal smoothing as the real-video pipeline "
+            "(metric normalisation + root trajectory estimation) before IK + IMUSim."
+        ),
+    )
+    kimodo_imu_parser.add_argument(
+        "--kimodo-manifest", required=True,
+        help="JSONL manifest produced by generate-kimodo (or batch_kimodo_pose3d.py).",
+    )
+    kimodo_imu_parser.add_argument(
+        "--output-dir", required=True,
+        help="Output directory. Per-clip artifacts land under <output-dir>/<prompt_id>/.",
+    )
+    kimodo_imu_parser.add_argument("--clip-id", action="append", dest="clip_ids")
+    kimodo_imu_parser.add_argument("--sensor-layout-path", default=None)
+    kimodo_imu_parser.add_argument("--imu-acc-noise-std-m-s2", type=float, default=None)
+    kimodo_imu_parser.add_argument("--imu-gyro-noise-std-rad-s", type=float, default=None)
+    kimodo_imu_parser.add_argument("--imu-random-seed", type=int, default=0)
+    kimodo_imu_parser.add_argument(
+        "--export-bvh", action="store_true",
+        help="Also export a BVH file for each pose3d clip.",
+    )
+    kimodo_imu_parser.add_argument(
+        "--no-skip-existing", action="store_true",
+        help="Reprocess clips even if virtual_imu.npz already exists.",
+    )
+
+    mixed_parser = subparsers.add_parser(
+        "export-mixed-virtual-imu",
+        help=(
+            "Merge a real virtual_imu_manifest and a synthetic virtual_imu_manifest "
+            "into a single mixed_virtual_imu_manifest.jsonl for combined experiments."
+        ),
+    )
+    mixed_parser.add_argument(
+        "--real-manifest", required=True,
+        help="JSONL manifest from export-virtual-imu (real video pipeline).",
+    )
+    mixed_parser.add_argument(
+        "--synthetic-manifest", required=True,
+        help="JSONL manifest from export-kimodo-virtual-imu.",
+    )
+    mixed_parser.add_argument(
+        "--output-dir", required=True,
+        help="Directory where mixed_virtual_imu_manifest.jsonl is written.",
+    )
+
     return parser
 
 
@@ -356,6 +592,28 @@ def main(argv: Sequence[str] | None = None) -> int:
                 model_name=args.model,
                 clip_ids=args.clip_ids,
                 hand_keyframes=args.hand_keyframes,
+            )
+            print(json.dumps(summary, indent=2, ensure_ascii=True))
+            return 0
+        if args.command == "export-kimodo-virtual-imu":
+            summary = export_kimodo_virtual_imu(
+                kimodo_manifest_path=args.kimodo_manifest,
+                output_dir=args.output_dir,
+                sensor_layout_path=args.sensor_layout_path,
+                imu_acc_noise_std_m_s2=args.imu_acc_noise_std_m_s2,
+                imu_gyro_noise_std_rad_s=args.imu_gyro_noise_std_rad_s,
+                imu_random_seed=args.imu_random_seed,
+                export_bvh=bool(args.export_bvh),
+                skip_existing=not bool(args.no_skip_existing),
+                clip_ids=args.clip_ids,
+            )
+            print(json.dumps(summary, indent=2, ensure_ascii=True))
+            return 0
+        if args.command == "export-mixed-virtual-imu":
+            summary = export_mixed_virtual_imu(
+                real_manifest_path=args.real_manifest,
+                synthetic_manifest_path=args.synthetic_manifest,
+                output_dir=args.output_dir,
             )
             print(json.dumps(summary, indent=2, ensure_ascii=True))
             return 0

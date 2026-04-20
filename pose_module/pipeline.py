@@ -526,6 +526,115 @@ def run_pose3d_from_prompt(
     }
 
 
+def run_pose3d_from_kimodo(
+    *,
+    clip_id: str,
+    kimodo_npz_path: str | Path,
+    output_dir: str | Path,
+    generation_config_path: str | Path | None = None,
+    fps: Optional[float] = None,
+    export_bvh: bool = True,
+) -> Dict[str, Any]:
+    """Convert a Kimodo motion.npz into a pipeline-ready pose3d artifact set.
+
+    Runs metric normalization and root trajectory estimation (same as the
+    prompt path) and writes pose3d.npz plus quality reports to output_dir.
+    """
+    from robot_emotions_vlm.kimodo_adapter import (
+        build_kimodo_adapter_quality_report,
+        load_kimodo_pose_sequence3d,
+    )
+    from pose_module.prompt_source.quality import build_prompt_pose_quality_report
+
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    raw_pose_sequence_3d = load_kimodo_pose_sequence3d(
+        kimodo_npz_path=kimodo_npz_path,
+        clip_id=str(clip_id),
+        generation_config_path=generation_config_path,
+        fps=fps,
+    )
+    raw_pose_path = output_dir / "pose3d_kimodo_raw.npz"
+    write_pose_sequence3d_npz(raw_pose_sequence_3d, raw_pose_path)
+
+    adapter_quality = build_kimodo_adapter_quality_report(raw_pose_sequence_3d)
+
+    metric_normalizer_result = run_metric_normalizer(raw_pose_sequence_3d)
+    metric_pose_sequence_3d = metric_normalizer_result["pose_sequence"]
+    metric_normalization = metric_normalizer_result["normalization_result"]
+    metric_quality = metric_normalizer_result["quality_report"]
+    metric_artifacts = metric_normalizer_result["artifacts"]
+    metric_pose_path = output_dir / "pose3d_metric_local.npz"
+    write_pose_sequence3d_npz(metric_pose_sequence_3d, metric_pose_path)
+    np.save(
+        output_dir / "3d_keypoints_metric.npy",
+        np.asarray(metric_normalization["joint_positions_smoothed"], dtype=np.float32),
+    )
+
+    root_result = run_root_trajectory_estimator(
+        metric_pose_sequence_3d,
+        normalization_result=metric_normalization,
+    )
+    root_pose_sequence_3d = root_result["pose_sequence"]
+    final_pose_path = output_dir / "pose3d.npz"
+    write_pose_sequence3d_npz(root_pose_sequence_3d, final_pose_path)
+    np.save(
+        output_dir / "root_translation.npy",
+        np.asarray(root_result["root_translation_m"], dtype=np.float32),
+    )
+
+    bvh_artifacts: Dict[str, Any] = {"pose3d_bvh_path": None}
+    if bool(export_bvh):
+        bvh_artifacts = export_pose_sequence3d_to_bvh(root_pose_sequence_3d, output_dir / "pose3d.bvh")
+
+    prompt_source_quality = build_prompt_pose_quality_report(
+        root_pose_sequence_3d,
+        generation_backend="kimodo",
+    )
+    merged_quality = _build_prompt_pose3d_quality_report(
+        pose_sequence=root_pose_sequence_3d,
+        generation_backend="kimodo",
+        adapter_quality=adapter_quality,
+        prompt_source_quality=prompt_source_quality,
+        metric_quality=metric_quality,
+        root_quality=root_result["quality_report"],
+    )
+    quality_report_path = output_dir / "quality_report.json"
+    write_json_file(merged_quality, quality_report_path)
+
+    artifacts: Dict[str, Any] = {
+        "pose3d_kimodo_raw_npz_path": str(raw_pose_path.resolve()),
+        "pose3d_metric_local_npz_path": str(metric_pose_path.resolve()),
+        "pose3d_npz_path": str(final_pose_path.resolve()),
+        "pose3d_metric_keypoints_path": str((output_dir / "3d_keypoints_metric.npy").resolve()),
+        "root_translation_npy_path": str((output_dir / "root_translation.npy").resolve()),
+        "pose3d_bvh_path": (
+            None
+            if bvh_artifacts.get("pose3d_bvh_path") is None
+            else str(Path(bvh_artifacts["pose3d_bvh_path"]).resolve())
+        ),
+        "quality_report_json_path": str(quality_report_path.resolve()),
+    }
+    return {
+        "clip_id": str(clip_id),
+        "pose_sequence": root_pose_sequence_3d,
+        "metric_pose_sequence": metric_pose_sequence_3d,
+        "kimodo_raw_pose_sequence": raw_pose_sequence_3d,
+        "root_translation_m": root_result["root_translation_m"],
+        "quality_report": merged_quality,
+        "kimodo_adapter_quality_report": adapter_quality,
+        "prompt_source_quality_report": prompt_source_quality,
+        "metric_normalization_quality_report": metric_quality,
+        "root_trajectory_quality_report": root_result["quality_report"],
+        "metric_normalization_result": metric_normalization,
+        "metric_normalization_artifacts": metric_artifacts,
+        "root_trajectory_result": root_result["trajectory_result"],
+        "root_trajectory_artifacts": root_result["artifacts"],
+        "artifacts": artifacts,
+    }
+
+
 def run_virtual_imu_pipeline(
     *,
     clip_id: str,
@@ -836,6 +945,134 @@ def generate_pose_from_prompt(
 
 def run_pose3d_from_video(**kwargs: Any) -> Dict[str, Any]:
     return run_pose3d_pipeline(**kwargs)
+
+
+def run_virtual_imu_from_pose3d(
+    *,
+    clip_id: str,
+    pose3d_npz_path: str | Path,
+    output_dir: str | Path,
+    sensor_layout_path: str | Path | None = None,
+    imu_acc_noise_std_m_s2: Optional[float] = None,
+    imu_gyro_noise_std_rad_s: Optional[float] = None,
+    imu_random_seed: int = 0,
+) -> Dict[str, Any]:
+    """Run IK + IMUSim on an already-computed pose3d.npz, writing virtual_imu.npz."""
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    ik_output_dir = _resolve_stage_output_dir(output_dir, "ik")
+    virtual_imu_output_dir = _resolve_stage_output_dir(output_dir, "virtual_imu")
+
+    with np.load(str(pose3d_npz_path), allow_pickle=False) as payload:
+        pose_sequence = PoseSequence3D.from_npz_payload({k: payload[k] for k in payload.files})
+    return _run_imu_stages(
+        clip_id=str(clip_id),
+        pose_sequence=pose_sequence,
+        output_dir=output_dir,
+        ik_output_dir=ik_output_dir,
+        virtual_imu_output_dir=virtual_imu_output_dir,
+        sensor_layout_path=sensor_layout_path,
+        imu_acc_noise_std_m_s2=imu_acc_noise_std_m_s2,
+        imu_gyro_noise_std_rad_s=imu_gyro_noise_std_rad_s,
+        imu_random_seed=imu_random_seed,
+    )
+
+
+def run_virtual_imu_from_kimodo(
+    *,
+    clip_id: str,
+    kimodo_npz_path: str | Path,
+    output_dir: str | Path,
+    generation_config_path: str | Path | None = None,
+    fps: Optional[float] = None,
+    export_bvh: bool = False,
+    sensor_layout_path: str | Path | None = None,
+    imu_acc_noise_std_m_s2: Optional[float] = None,
+    imu_gyro_noise_std_rad_s: Optional[float] = None,
+    imu_random_seed: int = 0,
+) -> Dict[str, Any]:
+    """Kimodo motion.npz → smoothed pose3d → IK → virtual_imu.npz.
+
+    Applies the same metric normalization and root trajectory smoothing as the
+    video pipeline before running IK + IMUSim.
+    """
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    ik_output_dir = _resolve_stage_output_dir(output_dir, "ik")
+    virtual_imu_output_dir = _resolve_stage_output_dir(output_dir, "virtual_imu")
+
+    pose3d_result = run_pose3d_from_kimodo(
+        clip_id=str(clip_id),
+        kimodo_npz_path=kimodo_npz_path,
+        output_dir=output_dir,
+        generation_config_path=generation_config_path,
+        fps=fps,
+        export_bvh=bool(export_bvh),
+    )
+    imu_result = _run_imu_stages(
+        clip_id=str(clip_id),
+        pose_sequence=pose3d_result["pose_sequence"],
+        output_dir=output_dir,
+        ik_output_dir=ik_output_dir,
+        virtual_imu_output_dir=virtual_imu_output_dir,
+        sensor_layout_path=sensor_layout_path,
+        imu_acc_noise_std_m_s2=imu_acc_noise_std_m_s2,
+        imu_gyro_noise_std_rad_s=imu_gyro_noise_std_rad_s,
+        imu_random_seed=imu_random_seed,
+    )
+    artifacts = dict(pose3d_result["artifacts"])
+    artifacts.update(imu_result["artifacts"])
+    return {
+        "clip_id": str(clip_id),
+        "pose_sequence": pose3d_result["pose_sequence"],
+        "virtual_imu_sequence": imu_result["virtual_imu_sequence"],
+        "ik_sequence": imu_result["ik_sequence"],
+        "pose3d_result": pose3d_result,
+        "imu_result": imu_result,
+        "artifacts": artifacts,
+    }
+
+
+def _run_imu_stages(
+    *,
+    clip_id: str,
+    pose_sequence: "PoseSequence3D",
+    output_dir: Path,
+    ik_output_dir: Path,
+    virtual_imu_output_dir: Path,
+    sensor_layout_path: str | Path | None,
+    imu_acc_noise_std_m_s2: Optional[float],
+    imu_gyro_noise_std_rad_s: Optional[float],
+    imu_random_seed: int,
+) -> Dict[str, Any]:
+    ik_result = run_ik(pose_sequence, output_dir=ik_output_dir)
+    imusim_result = run_imusim(
+        ik_result["ik_sequence"],
+        sensor_layout_path=DEFAULT_SENSOR_LAYOUT_PATH if sensor_layout_path is None else sensor_layout_path,
+        output_dir=virtual_imu_output_dir,
+        acc_noise_std_m_s2=imu_acc_noise_std_m_s2,
+        gyro_noise_std_rad_s=imu_gyro_noise_std_rad_s,
+        random_seed=int(imu_random_seed),
+        real_imu_reference_path=None,
+        real_imu_activity_label=None,
+    )
+    virtual_imu_sequence = imusim_result["virtual_imu_sequence"]
+
+    final_virtual_imu_path = virtual_imu_output_dir / "virtual_imu.npz"
+    np.savez_compressed(final_virtual_imu_path, **virtual_imu_sequence.to_npz_payload())
+
+    artifacts = dict(ik_result.get("artifacts", {}))
+    artifacts.update(imusim_result.get("artifacts", {}))
+    artifacts["virtual_imu_npz_path"] = str(final_virtual_imu_path.resolve())
+
+    return {
+        "clip_id": str(clip_id),
+        "virtual_imu_sequence": virtual_imu_sequence,
+        "ik_sequence": ik_result["ik_sequence"],
+        "ik_result": ik_result,
+        "imusim_result": imusim_result,
+        "artifacts": artifacts,
+    }
 
 
 def _build_prompt_pose3d_quality_report(
