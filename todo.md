@@ -1,1 +1,0 @@
-Fazer um .sh baixando todos os ambientes e dependências
