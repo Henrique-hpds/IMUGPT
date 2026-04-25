@@ -583,6 +583,8 @@ class _KimodoRuntime:
     def __init__(self) -> None:
         kimodo_module = _import_kimodo_package()
         self._kimodo = kimodo_module
+        from .kimodo_constraints_patch import apply_patch
+        apply_patch()
         from kimodo import DEFAULT_MODEL, load_model
         from kimodo.constraints import load_constraints_lst
         from kimodo.exports.motion_io import save_kimodo_npz

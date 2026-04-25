@@ -1,6 +1,3 @@
-> [Criar repositório usando este template](https://github.com/new?owner=H-IAAC&template_name=Template&template_owner=H-IAAC)
-> Preencha as seções do README, e remova comentários como este após a edição.
->
 > O README deve conter uma primeira seção abstract, sendo ela um cabeçalho de nível 1 (# Nome do projeto)
 # Framework for generating synthetic IMU based on Human Poses
 
