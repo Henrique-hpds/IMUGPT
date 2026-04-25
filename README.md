@@ -1,11 +1,12 @@
-> O README deve conter uma primeira seção abstract, sendo ela um cabeçalho de nível 1 (# Nome do projeto)
 # Framework for generating synthetic IMU based on Human Poses
 
-> Descrição do projeto, objetivos e intenções de uso
-> Deve conter ao final a Badge (imagem horizontal) do H.IAAC e das Metas associadas ao projeto
+Framework for generating synthetic Inertial Measurement Unit (IMU) data from human motion. It bridges two domains that are rarely connected: pose estimation and motion generation on one side, and wearable sensor simulation on the other. Given a video of a person moving, or a plain-text description of a movement, the framework produces synthetic accelerometer readings as if physical sensors had been attached to the body.
 
-This project was developed as part of the Cognitive Architectures research line from 
-the Hub for Artificial Intelligence and Cognitive Architectures (H.IAAC) of the State University of Campinas (UNICAMP).
+The primary motivation is the scarcity of labelled IMU datasets. Collecting real IMU data requires physical hardware, synchronized recordings, and careful placement of sensors — a process that is slow, expensive, and hard to scale. IMUGPT addresses this by deriving IMU signals from 3D skeletal trajectories, which can themselves be obtained either from video (via pose estimation) or generated from text prompts (via language-conditioned motion models). This makes it possible to produce large, diverse, and controllable datasets for training and evaluating activity recognition models without any physical sensor.
+
+The framework integrates three independent pipelines. The first takes a monocular video, lifts the detected 2D keypoints to a metric 3D skeleton using MotionBERT, and feeds the resulting trajectory into IMUSim to synthesize the sensor signals. The second pipeline replaces the video with a natural-language prompt: T2M-GPT generates a 3D motion sequence from text, which then goes through the same IMU synthesis chain. The third pipeline uses a Vision-Language Model (Qwen3-VL) to automatically describe short windows of real motion and feeds those descriptions — together with real joint positions as anchors — into Kimodo, a SMPL-X motion generator, to produce novel but physically grounded synthetic motions.
+
+This project was developed as part of the Cognitive Architectures research line from the Hub for Artificial Intelligence and Cognitive Architectures (H.IAAC) of the State University of Campinas (UNICAMP).
 See more projects from the group [here](https://h-iaac.github.io/HIAAC-Index).
 
 <!--Badges-->
@@ -21,20 +22,155 @@ See more projects from the group [here](https://h-iaac.github.io/HIAAC-Index).
 ## Repository Structure
 > Lista e descrição das pastas e arquivos importantes na raiz do repositório
 
-- \<pasta>: \<descrição>
+- `pose_module/` — core pipeline: 2D/3D pose estimation, virtual IMU synthesis, MotionBERT lifting, T2M-GPT text-to-pose backend. Runs in `.venv`.
+- `robot_emotions_vlm/` — Qwen3-VL video description, anchor catalog construction, and Kimodo batch generation. Runs in the `kimodo` conda env.
+- `kimodo/` — git submodule: SMPL-X motion generator CLI (`kimodo_gen`, `kimodo_textencoder`).
+- `imusim/` — IMU physics simulation library used to synthesize accelerometer/gyroscope readings from 3D skeleton trajectories.
+- `t2mgpt/` — T2M-GPT VQ-VAE weights and inference code for text-driven pose generation.
+- `data/` — input datasets (e.g. `data/RobotEmotions/`).
+- `output/` — per-clip outputs organized by experiment; manifests (JSONL) index all artifacts.
+- `evaluation/` — notebooks and scripts for classifier experiments and IMU quality assessment.
+- `scripts/` — utility scripts.
 
 
 ## Dependencies / Requirements
 
-> Descrição do passo-a-passo para instalação de bibliotecas, softwares e demais ferramentas
-> ncessárias para execução do projeto antes de se clonar o repositório, assim como possíveis
-> requisitos mínimos para o projeto (processador, gpu, compilador, etc).
+**Requirements:** Linux, CUDA-capable GPU (≥ 20 GB VRAM recommended).
+
+This project uses `Miniconda` to create the Python enviroments. We do not recommend to use `python-env`, because it will be necessary to configure multiple envs with diferent Python3 versions.
+
+Make sure to install it accordingly to your Linux distribution. If not, follow the [official instructions here](https://www.anaconda.com/docs/getting-started/miniconda/install/overview).
+
+Also, install `ffmpeg` for your distro. For Ubuntu/Debian, use:
+
+```bash
+sudo apt update && sudo apt install ffmpeg -y
+```
+
+Now, clone the project's repository. For using the necessary 3th-party codes, use the `--recurse-submodules` flag:  
+
+```bash
+git clone --recurse-submodules git@github.com:H-IAAC/POSE2IMU-Framework.git
+cd POSE2IMU-Framework
+```
 
 ## Installation / Usage
 
-> Passo-a-passo para execução do projeto localmente, assim como parâmetros de configuração
-> aceitos (por exemplo, como trocar o caminho para o arquivo de entrada ou saída). No caso de 
-> bibliotecas/API fornecer o link para a documentação do mesmo se disponível.
+All three environments (`pose_module`, `openmmlab`, `kimodo`) are configured by a single script:
+
+```bash
+bash config_envs.sh
+```
+
+The script creates and installs each conda environment in order, printing progress for each step. If any step fails it stops immediately.
+
+Pre-trained weights for T2M-GPT must be placed manually after running the script:
+- `pretrained/VQVAEV3_CB1024_CMT_H1024_NRES3/` — VQ-VAE decoder
+- `checkpoints/t2m/` — mean/std normalization stats
+
+Qwen3-VL weights (`Qwen/Qwen3-VL-8B-Instruct`) are downloaded automatically from Hugging Face on first use.
+
+The project supports three independent pipelines. All commands are run from the repository root.
+
+---
+
+### Pipeline 1 — Video → Virtual IMU
+
+Converts real video recordings into synthetic IMU data. The `pose_module` drives the full chain: 2D detection (OpenMMlab/ViTPose), 3D lifting (MotionBERT), metric normalization, root estimation, and physics-based IMU synthesis (IMUSim).
+
+```bash
+source .venv/bin/activate
+
+# Export 3D poses from video
+python -m pose_module.robot_emotions export-pose3d \
+  --dataset-root data/RobotEmotions \
+  --domains 10ms 30ms \
+  --output-dir output/robot_emotions_pose3d \
+  --fps-target 20
+
+# Synthesize virtual IMU signals from 3D poses
+python -m pose_module.robot_emotions export-virtual-imu \
+  --dataset-root data/RobotEmotions \
+  --domains 10ms 30ms \
+  --output-dir output/robot_emotions_virtual_imu \
+  --fps-target 20
+```
+
+Outputs per clip under `output/<experiment>/<clip_id>/`:
+- `pose/pose3d/pose3d.npz` — 3D skeleton trajectory
+- `imu/virtual_imu.npz` — synthetic accelerometer + gyroscope
+
+---
+
+### Pipeline 2 — Text Prompt → Virtual IMU
+
+Generates 3D motion from a natural-language description via T2M-GPT (VQ-VAE), then applies the same IMU synthesis chain.
+
+```bash
+source .venv/bin/activate
+
+python -m pose_module.prompt_source.generate \
+  --prompt "A person walks forward and waves" \
+  --output-dir output/text2imu
+```
+
+Requires T2M-GPT weights in `pretrained/` and `checkpoints/t2m/`.
+
+---
+
+### Pipeline 3 — Window-Anchored Kimodo Generation
+
+Uses real video windows as anchors: Qwen3-VL describes each 5-second segment; Kimodo generates new SMPL-X motion conditioned on the text and real joint positions.
+
+**Step 1 — Export real pose3d** (same as Pipeline 1, `.venv`):
+
+```bash
+source .venv/bin/activate
+python -m pose_module.robot_emotions export-pose3d \
+  --dataset-root data/RobotEmotions --domains 10ms 30ms \
+  --output-dir output/robot_emotions_pose3d --fps-target 20
+```
+
+**Step 2 — Describe windows with Qwen3-VL** (`kimodo` env):
+
+```bash
+conda activate kimodo
+python -m robot_emotions_vlm describe-windows \
+  --pose3d-manifest-path output/robot_emotions_pose3d/pose3d_manifest.jsonl \
+  --output-dir output/robot_emotions_qwen_windows
+```
+
+**Step 3 — Build anchor catalog** (`kimodo` env):
+
+```bash
+conda activate kimodo
+python -m robot_emotions_vlm build-anchor-catalog \
+  --window-manifest-path output/robot_emotions_qwen_windows/window_description_manifest.jsonl \
+  --pose3d-manifest-path output/robot_emotions_pose3d/pose3d_manifest.jsonl \
+  --output-dir output/robot_emotions_kimodo_anchors
+```
+
+**Step 4 — Generate with Kimodo** (`kimodo` env):
+
+```bash
+conda activate kimodo
+python -m robot_emotions_vlm generate-kimodo \
+  --model Kimodo-SMPLX-RP-v1 \
+  --catalog-path output/robot_emotions_kimodo_anchors/kimodo_anchor_catalog.jsonl \
+  --output-dir output/robot_emotions_kimodo
+```
+
+Each generated clip produces `motion.npz` + `motion_amass.npz` (SMPL-X) under `output/robot_emotions_kimodo/<clip_id>/`.
+
+---
+
+### Direct Kimodo generation (optional, `kimodo` env)
+
+```bash
+conda activate kimodo
+kimodo_gen "A person sits down and stands up" \
+  --model Kimodo-SMPLX-RP-v1 --duration 10.0 --output output/kimodo_direct/
+```
 
 ## Citation
 
