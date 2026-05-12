@@ -162,7 +162,7 @@ url = {https://github.com/H-IAAC/POSE2IMU-Framework}
 
 This study was financed by the São Paulo Research Foundation (FAPESP), Brasil. Process Number 2025/21964-5.
 
-This codebase was developed starting from a fork of [**IMUGPT**](https://github.com/ZikangLeng/IMUGPT) by Hancheng Zhao et al. We are grateful for their foundational work, which made this project possible.
+This codebase was developed starting from a fork of [**IMUGPT**](https://github.com/ZikangLeng/IMUGPT) by Leng et al. We are grateful for their foundational work, which made this project possible.
 
 We also gratefully acknowledge the authors of the following open-source projects, which are integrated as submodules:
 

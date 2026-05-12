@@ -1,6 +1,6 @@
 # T2M-GPT — Text-to-IMU Experimental Pipeline
 
-> **Status: Experimental.** This pipeline is not part of the main framework. It may be unstable, require manual setup, and is not covered by the standard installation script.
+> **Status: Experimental.** This pipeline is not part of the main framework.
 
 ## Overview
 
