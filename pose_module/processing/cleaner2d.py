@@ -1,4 +1,4 @@
-"""Stage 5.4: clean 2D pose tracks and adapt them to the MotionBERT contract."""
+"""Clean 2D pose tracks and adapt them to the MotionBERT contract."""
 
 from __future__ import annotations
 
@@ -62,9 +62,9 @@ def clean_pose_sequence2d(
     max_outlier_ratio: float = DEFAULT_MAX_OUTLIER_RATIO,
     max_frame_missing_joint_ratio: float = DEFAULT_MAX_FRAME_MISSING_JOINT_RATIO,
     max_frames_over_missing_ratio: float = DEFAULT_MAX_FRAMES_OVER_MISSING_RATIO,
-    max_temporal_jitter_score: float = DEFAULT_MAX_TEMPORAL_JITTER_SCORE,
+    max_temporal_jitter_score: float = DEFAULT_MAX_TEMPORAL_JITTER_SCORE
 ) -> Tuple[PoseSequence2D, Dict[str, Any], Dict[str, np.ndarray]]:
-    """Return a MotionBERT-ready 2D sequence plus stage-specific quality metrics."""
+    """Return a MotionBERT-ready 2D sequence plus quality metrics."""
 
     raw_motionbert_xy, raw_motionbert_conf = _map_vitpose_to_motionbert17(sequence)
     points = raw_motionbert_xy.copy()
@@ -298,7 +298,7 @@ def _midpoint_series(
     right_xy: np.ndarray,
     right_conf: np.ndarray,
     *,
-    fallback_conf_scale: float = 0.1,
+    fallback_conf_scale: float = 0.1
 ) -> Tuple[np.ndarray, np.ndarray]:
     output_xy = np.full_like(left_xy, np.nan, dtype=np.float32)
     output_conf = np.zeros_like(left_conf, dtype=np.float32)
@@ -406,7 +406,7 @@ def _clip_impossible_angular_velocity(
     confidence: np.ndarray,
     *,
     fps: Optional[float],
-    max_angular_velocity_deg_per_sec: float,
+    max_angular_velocity_deg_per_sec: float
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     points = np.asarray(points_xy, dtype=np.float32).copy()
     conf = np.asarray(confidence, dtype=np.float32).copy()
@@ -456,7 +456,7 @@ def _interpolate_motionbert_gaps(
     *,
     max_gap_interp: int,
     low_conf_threshold: float,
-    interpolated_confidence_cap: float,
+    interpolated_confidence_cap: float
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     points = np.asarray(points_xy, dtype=np.float32).copy()
     conf = np.asarray(confidence, dtype=np.float32).copy()
@@ -493,7 +493,7 @@ def _smooth_motionbert_sequence(
     *,
     window_length: int,
     polyorder: int,
-    low_conf_threshold: float,
+    low_conf_threshold: float
 ) -> np.ndarray:
     points = np.asarray(points_xy, dtype=np.float32).copy()
     original_points = points.copy()
@@ -511,11 +511,7 @@ def _smooth_motionbert_sequence(
     return points
 
 
-def _normalize_for_motionbert(
-    points_xy: np.ndarray,
-    confidence: np.ndarray,
-    bbox_xywh: np.ndarray,
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+def _normalize_for_motionbert(points_xy: np.ndarray, confidence: np.ndarray, bbox_xywh: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     points = np.asarray(points_xy, dtype=np.float32)
     conf = np.asarray(confidence, dtype=np.float32)
     bbox = np.asarray(bbox_xywh, dtype=np.float32)

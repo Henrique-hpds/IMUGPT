@@ -7,11 +7,7 @@ from typing import Optional
 import numpy as np
 
 
-def estimate_rotation_procrustes(
-    V: np.ndarray,
-    W: np.ndarray,
-    weights: Optional[np.ndarray] = None,
-) -> np.ndarray:
+def estimate_rotation_procrustes(V: np.ndarray, W: np.ndarray, weights: Optional[np.ndarray] = None) -> np.ndarray:
     """Estimate a proper rotation matrix solving ``W ~= R @ V``.
 
     ``V`` and ``W`` are interpreted as row-major batches of vectors with shape

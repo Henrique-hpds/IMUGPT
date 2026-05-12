@@ -17,10 +17,7 @@ _TIMESTAMP_ATOL = 1e-5
 _TIMESTAMP_RTOL = 1e-4
 
 
-def prepare_sequences_for_alignment(
-    real_sequence: IMUSequence,
-    virt_sequence: IMUSequence,
-) -> tuple[IMUSequence, IMUSequence, dict[str, float | int | bool | None]]:
+def prepare_sequences_for_alignment(real_sequence: IMUSequence, virt_sequence: IMUSequence):
     """Project the real sequence onto the virtual timestamps when needed.
 
     The geometric alignment logic operates on paired sample grids. In the real
@@ -75,12 +72,7 @@ def prepare_sequences_for_alignment(
     }
 
 
-def estimate_time_lag(
-    real_xyz: np.ndarray,
-    virt_xyz: np.ndarray,
-    max_lag: int,
-    mode: str,
-) -> int:
+def estimate_time_lag(real_xyz: np.ndarray, virt_xyz: np.ndarray, max_lag: int, mode: str) -> int:
     """Estimate the sample lag that best aligns real and virtual signal norms.
 
     The returned lag follows the convention used by :func:`align_streams_with_lag`.
@@ -114,11 +106,7 @@ def estimate_time_lag(
     return int(best_lag)
 
 
-def align_streams_with_lag(
-    real_values: np.ndarray,
-    virt_values: np.ndarray,
-    lag_samples: int,
-) -> Tuple[np.ndarray, np.ndarray]:
+def align_streams_with_lag(real_values: np.ndarray, virt_values: np.ndarray, lag_samples: int) -> Tuple[np.ndarray, np.ndarray]:
     """Return the overlapping slices implied by a discrete lag."""
 
     real = np.asarray(real_values)

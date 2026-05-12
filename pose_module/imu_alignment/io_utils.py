@@ -15,9 +15,7 @@ from pose_module.robot_emotions.metadata import resolve_sensor_names
 
 from .interfaces import AlignmentConfig, IMUSequence, SensorSubjectTransform
 
-DEFAULT_ALIGNMENT_CONFIG_PATH = (
-    Path(__file__).resolve().parent.parent / "configs" / "imu_alignment_config.yaml"
-)
+DEFAULT_ALIGNMENT_CONFIG_PATH = (Path(__file__).resolve().parent.parent / "configs" / "imu_alignment_config.yaml")
 
 
 def load_alignment_runtime_settings(config_path: str | Path | None = None) -> dict[str, Any]:
@@ -63,7 +61,7 @@ def sequence_from_virtual_imu(
     virtual_sequence: VirtualIMUSequence,
     *,
     subject_id: str,
-    capture_id: str,
+    capture_id: str
 ) -> IMUSequence:
     """Adapt a pipeline ``VirtualIMUSequence`` into the alignment package contract."""
 
@@ -83,7 +81,7 @@ def virtual_from_imu_sequence(
     *,
     clip_id: str,
     source: str,
-    fps: float | None = None,
+    fps: float | None = None
 ) -> VirtualIMUSequence:
     """Convert an :class:`IMUSequence` back into the pipeline-facing contract."""
 
@@ -102,7 +100,7 @@ def load_real_imu_sequence(
     real_imu_npz_path: str | Path,
     *,
     subject_id: str | None = None,
-    capture_id: str | None = None,
+    capture_id: str | None = None
 ) -> IMUSequence:
     """Load a real IMU clip into :class:`IMUSequence`."""
 
@@ -152,10 +150,7 @@ def load_real_imu_sequence(
     )
 
 
-def save_transforms_json(
-    transforms: Mapping[Tuple[str, str], SensorSubjectTransform],
-    path: str | Path,
-) -> None:
+def save_transforms_json(transforms: Mapping[Tuple[str, str], SensorSubjectTransform], path: str | Path) -> None:
     """Persist learned transforms in a human-readable JSON payload."""
 
     serialized = {
@@ -200,11 +195,7 @@ def load_transforms_json(path: str | Path) -> Dict[Tuple[str, str], SensorSubjec
     return transforms
 
 
-def split_sequences_by_capture_ids(
-    sequences: Sequence[IMUSequence],
-    *,
-    calibration_capture_ids: Sequence[str],
-) -> tuple[list[IMUSequence], list[IMUSequence]]:
+def split_sequences_by_capture_ids(sequences: Sequence[IMUSequence],*,calibration_capture_ids: Sequence[str]) -> tuple[list[IMUSequence], list[IMUSequence]]:
     """Split sequences into calibration and test partitions by ``capture_id``."""
 
     calibration_ids = {str(value) for value in calibration_capture_ids}

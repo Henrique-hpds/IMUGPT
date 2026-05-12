@@ -1,4 +1,4 @@
-"""Processing helpers for later pose stages and stage-5.4 quality."""
+"""Processing helpers for later pose stages and quality."""
 
 from .imu_calibration import calibrate_virtual_imu_sequence
 from .cleaner2d import clean_pose_sequence2d

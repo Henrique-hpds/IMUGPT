@@ -63,5 +63,5 @@ __all__ = [
     "sequence_from_virtual_imu",
     "split_sequences_by_capture_ids",
     "summarize_alignment_metrics",
-    "virtual_from_imu_sequence",
+    "virtual_from_imu_sequence"
 ]

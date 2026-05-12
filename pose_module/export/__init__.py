@@ -34,5 +34,5 @@ __all__ = [
     "render_pose_overlay_video",
     "render_pose3d_side_by_side_video",
     "resolve_debug_overlay_path",
-    "resolve_debug_overlay_variant_path",
+    "resolve_debug_overlay_variant_path"
 ]

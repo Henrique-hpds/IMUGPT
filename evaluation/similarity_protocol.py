@@ -23,10 +23,7 @@ from sklearn.neural_network import MLPClassifier
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 
-try:
-    from sklearn.model_selection import StratifiedGroupKFold
-except ImportError:  # pragma: no cover - depends on sklearn version
-    StratifiedGroupKFold = None
+from sklearn.model_selection import StratifiedGroupKFold
 
 from evaluation.tsne import (
     extract_selected_modalities,
@@ -34,12 +31,11 @@ from evaluation.tsne import (
     resample_real_to_synthetic_rate,
     segment_signal_windows,
 )
-from evaluation.utils import build_exported_capture_table, configure_capture_table_display, find_project_root
 
+from evaluation.utils import build_exported_capture_table, configure_capture_table_display, find_project_root
 
 CLASS_COLUMNS = ("emotion", "modality", "stimulus")
 DISTANCE_METRIC_COLUMNS = ("cfid_mean", "js_mean", "mmd_mean", "dtw_rtr", "dtw_rts", "dtw_sts")
-
 
 def _normalize_label_value(value: Any) -> str:
     if pd.isna(value):
@@ -82,8 +78,8 @@ def _balanced_sample_indices_by_label(
     labels: Sequence[str],
     indices: np.ndarray,
     rng: np.random.Generator,
-    max_total_samples: int | None = None,
-) -> np.ndarray:
+    max_total_samples: int | None = None) -> np.ndarray:
+    
     label_frame = pd.DataFrame({"label": [str(label) for label in labels], "index": np.asarray(indices, dtype=np.int64)})
     counts = label_frame["label"].value_counts()
     if counts.empty:
@@ -122,11 +118,7 @@ def load_protocol_capture_table(output_root: Path | str | None = None) -> pd.Dat
     return build_exported_capture_table(output_root)
 
 
-def get_shared_sensor_names(
-    captures_df: pd.DataFrame,
-    *,
-    synthetic_filename: str = "virtual_imu.npz",
-) -> list[str]:
+def get_shared_sensor_names(captures_df: pd.DataFrame, *, synthetic_filename: str = "virtual_imu.npz") -> list[str]:
     if captures_df.empty:
         raise ValueError("captures_df is empty.")
 
@@ -164,8 +156,8 @@ def build_paired_window_dataset(
     overlap: float = 0.5,
     max_windows_per_capture: int | None = None,
     random_state: int = 42,
-    synthetic_filename: str = "virtual_imu.npz",
-) -> dict[str, Any]:
+    synthetic_filename: str = "virtual_imu.npz") -> dict[str, Any]:
+    
     if captures_df.empty:
         raise ValueError("captures_df is empty.")
 
@@ -189,14 +181,14 @@ def build_paired_window_dataset(
             capture_pair,
             signal_groups=signal_groups,
             selected_sensors=selected_sensors_resolved,
-            selected_axes=selected_axes,
+            selected_axes=selected_axes
         )
         aligned_bundle = resample_real_to_synthetic_rate(
             real_timestamps_sec=signal_bundle["real_timestamps_sec"],
             real_values=signal_bundle["real_values"],
             synthetic_timestamps_sec=signal_bundle["synthetic_timestamps_sec"],
             synthetic_values=signal_bundle["synthetic_values"],
-            method=resample_method,
+            method=resample_method
         )
 
         real_segment = segment_signal_windows(
@@ -208,7 +200,7 @@ def build_paired_window_dataset(
             stride_or_overlap_mode=stride_or_overlap_mode,
             stride=stride,
             stride_sec=stride_sec,
-            overlap=overlap,
+            overlap=overlap
         )
         synthetic_segment = segment_signal_windows(
             aligned_bundle["synthetic_values"],
@@ -219,7 +211,7 @@ def build_paired_window_dataset(
             stride_or_overlap_mode=stride_or_overlap_mode,
             stride=stride,
             stride_sec=stride_sec,
-            overlap=overlap,
+            overlap=overlap
         )
 
         if real_segment["windows"].shape != synthetic_segment["windows"].shape:
@@ -266,7 +258,7 @@ def build_paired_window_dataset(
                 "num_windows": int(capture_real_windows.shape[0]),
                 "selected_sensors": ", ".join(selected_sensors_resolved),
                 "selected_axes": ", ".join([str(axis_name) for axis_name in selected_axes]),
-                "signal_groups": ", ".join([str(signal_group) for signal_group in signal_groups]),
+                "signal_groups": ", ".join([str(signal_group) for signal_group in signal_groups])
             }
         )
 
@@ -286,7 +278,7 @@ def build_paired_window_dataset(
                     "stimulus": row.get("stimulus"),
                     "window_index_within_capture": int(window_local_index),
                     "window_start_index": int(start_index),
-                    "window_start_time_sec": float(aligned_bundle["timestamps_sec"][start_index]),
+                    "window_start_time_sec": float(aligned_bundle["timestamps_sec"][start_index])
                 }
             )
 
@@ -317,7 +309,7 @@ def build_paired_window_dataset(
         "capture_window_summary_df": pd.DataFrame(capture_summary_rows),
         "selected_sensors": list(selected_sensors_resolved),
         "channel_labels": list(channel_labels or []),
-        "feature_names": feature_names,
+        "feature_names": feature_names
     }
 
 
@@ -326,14 +318,12 @@ def split_embedder_training_windows(
     *,
     train_fraction: float | None = 0.3,
     rare_class_threshold: int = 1,
-    random_state: int = 42,
-) -> dict[str, Any]:
+    random_state: int = 42) -> dict[str, Any]:
+    
     if metadata_df.empty:
         raise ValueError("metadata_df is empty.")
 
-    capture_df = metadata_df[
-        ["capture_id", "clip_id", "emotion", "modality", "stimulus"]
-    ].drop_duplicates("capture_id", keep="first").reset_index(drop=True)
+    capture_df = metadata_df[["capture_id", "clip_id", "emotion", "modality", "stimulus"]].drop_duplicates("capture_id", keep="first").reset_index(drop=True)
 
     if train_fraction is None or float(train_fraction) <= 0.0:
         mask = np.ones(len(metadata_df), dtype=bool)
@@ -346,7 +336,7 @@ def split_embedder_training_windows(
                     "num_eval_captures": int(capture_df["capture_id"].nunique()),
                     "num_train_windows": int(mask.sum()),
                     "num_eval_windows": int(mask.sum()),
-                    "note": "TS2Vec trained and evaluated on the same real windows. This is more practical, but leakage-prone.",
+                    "note": "TS2Vec trained and evaluated on the same real windows. This is more practical, but leakage-prone."
                 }
             ]
         )
@@ -355,7 +345,7 @@ def split_embedder_training_windows(
             "eval_mask": mask.copy(),
             "train_capture_ids": capture_df["capture_id"].astype(str).tolist(),
             "eval_capture_ids": capture_df["capture_id"].astype(str).tolist(),
-            "summary_df": summary_df,
+            "summary_df": summary_df
         }
 
     rng = np.random.default_rng(int(random_state))
@@ -385,7 +375,7 @@ def split_embedder_training_windows(
                     "num_eval_captures": int(capture_df["capture_id"].nunique()),
                     "num_train_windows": int(mask.sum()),
                     "num_eval_windows": int(mask.sum()),
-                    "note": "All captures were protected for evaluation; the embedder fell back to using all real windows.",
+                    "note": "All captures were protected for evaluation; the embedder fell back to using all real windows."
                 }
             ]
         )
@@ -394,7 +384,7 @@ def split_embedder_training_windows(
             "eval_mask": mask.copy(),
             "train_capture_ids": all_capture_ids,
             "eval_capture_ids": all_capture_ids,
-            "summary_df": summary_df,
+            "summary_df": summary_df
         }
 
     train_capture_ids = sorted(rng.choice(np.asarray(eligible_capture_ids), size=desired_train_captures, replace=False).tolist())
@@ -418,7 +408,7 @@ def split_embedder_training_windows(
                 "num_train_windows": int(train_mask.sum()),
                 "num_eval_windows": int(eval_mask.sum()),
                 "protected_eval_captures": int(len(protected_eval_captures)),
-                "note": "TS2Vec is trained only on real windows from the training captures; all protocol metrics are computed on evaluation captures only.",
+                "note": "TS2Vec is trained only on real windows from the training captures; all protocol metrics are computed on evaluation captures only."
             }
         ]
     )
@@ -428,7 +418,7 @@ def split_embedder_training_windows(
         "eval_mask": eval_mask,
         "train_capture_ids": train_capture_ids,
         "eval_capture_ids": eval_capture_ids,
-        "summary_df": summary_df,
+        "summary_df": summary_df
     }
 
 
@@ -438,8 +428,8 @@ def build_metric_groups(
     max_samples_per_group: int | None = None,
     include_category_global: bool = True,
     include_overall: bool = True,
-    random_state: int = 42,
-) -> list[dict[str, Any]]:
+    random_state: int = 42) -> list[dict[str, Any]]:
+    
     if metadata_df.empty:
         raise ValueError("metadata_df is empty.")
 
@@ -454,7 +444,7 @@ def build_metric_groups(
                 "group_key": "overall::all",
                 "class_category": "overall",
                 "class_value": "all",
-                "indices": overall_indices.tolist(),
+                "indices": overall_indices.tolist()
             }
         )
 
@@ -468,7 +458,7 @@ def build_metric_groups(
                     "group_key": f"{class_column}::{class_value}",
                     "class_category": class_column,
                     "class_value": class_value,
-                    "indices": sampled_indices.tolist(),
+                    "indices": sampled_indices.tolist()
                 }
             )
 
@@ -477,14 +467,14 @@ def build_metric_groups(
                 labels=normalized_labels.tolist(),
                 indices=metadata_df.index.to_numpy(dtype=np.int64),
                 rng=rng,
-                max_total_samples=max_samples_per_group,
+                max_total_samples=max_samples_per_group
             )
             groups.append(
                 {
                     "group_key": f"{class_column}::__global__",
                     "class_category": class_column,
                     "class_value": "__global__",
-                    "indices": balanced_indices.tolist(),
+                    "indices": balanced_indices.tolist()
                 }
             )
 
@@ -502,7 +492,7 @@ def summarize_metric_groups(groups: Sequence[dict[str, Any]], metadata_df: pd.Da
                 "class_category": str(group["class_category"]),
                 "class_value": str(group["class_value"]),
                 "num_pairs": int(len(indices)),
-                "num_captures": int(subset["capture_id"].nunique()) if not subset.empty else 0,
+                "num_captures": int(subset["capture_id"].nunique()) if not subset.empty else 0
             }
         )
     return pd.DataFrame(rows)
@@ -534,8 +524,8 @@ def run_ts2vec_protocol_worker(
     gru_patience: int = 4,
     cv_folds: int = 10,
     random_state: int = 42,
-    verbose: bool = True,
-) -> dict[str, Any]:
+    verbose: bool = True) -> dict[str, Any]:
+    
     resolved_conda = Path(conda_executable) if conda_executable is not None else None
     if resolved_conda is None:
         conda_path = shutil.which("conda")
@@ -616,7 +606,7 @@ def run_ts2vec_protocol_worker(
             "--cv-folds",
             str(int(cv_folds)),
             "--random-state",
-            str(int(random_state)),
+            str(int(random_state))
             ]
         )
 
@@ -625,7 +615,7 @@ def run_ts2vec_protocol_worker(
                 command,
                 check=True,
                 capture_output=not verbose,
-                text=True,
+                text=True
             )
         except subprocess.CalledProcessError as error:
             stderr = "" if error.stderr is None else str(error.stderr).strip()
@@ -654,12 +644,7 @@ def run_ts2vec_protocol_worker(
             }
 
 
-def compute_frechet_distance(
-    real_embeddings: np.ndarray,
-    synthetic_embeddings: np.ndarray,
-    *,
-    eps: float = 1e-6,
-) -> float:
+def compute_frechet_distance(real_embeddings: np.ndarray, synthetic_embeddings: np.ndarray, *, eps: float = 1e-6) -> float:
     real = np.asarray(real_embeddings, dtype=np.float64)
     synthetic = np.asarray(synthetic_embeddings, dtype=np.float64)
     if real.shape[0] < 2 or synthetic.shape[0] < 2:
@@ -680,12 +665,7 @@ def compute_frechet_distance(
     return float(np.real_if_close(fid))
 
 
-def compute_js_distance(
-    real_embeddings: np.ndarray,
-    synthetic_embeddings: np.ndarray,
-    *,
-    num_bins: int = 32,
-) -> float:
+def compute_js_distance(real_embeddings: np.ndarray, synthetic_embeddings: np.ndarray, *, num_bins: int = 32) -> float:
     real = np.asarray(real_embeddings, dtype=np.float64)
     synthetic = np.asarray(synthetic_embeddings, dtype=np.float64)
     if real.shape[0] < 2 or synthetic.shape[0] < 2:
@@ -709,9 +689,7 @@ def compute_js_distance(
             continue
 
         real_prob = (real_hist.astype(np.float64) + 1e-12) / float(real_hist.sum() + (1e-12 * real_hist.size))
-        synthetic_prob = (synthetic_hist.astype(np.float64) + 1e-12) / float(
-            synthetic_hist.sum() + (1e-12 * synthetic_hist.size)
-        )
+        synthetic_prob = (synthetic_hist.astype(np.float64) + 1e-12) / float(synthetic_hist.sum() + (1e-12 * synthetic_hist.size))
         distances.append(float(jensenshannon(real_prob, synthetic_prob)))
 
     if not distances:
@@ -724,8 +702,8 @@ def _resolve_mmd_gamma(
     synthetic_embeddings: np.ndarray,
     *,
     max_samples_for_heuristic: int = 256,
-    gamma: float | None = None,
-) -> float:
+    gamma: float | None = None) -> float:
+    
     if gamma is not None:
         return float(gamma)
 
@@ -743,12 +721,7 @@ def _resolve_mmd_gamma(
     return float(1.0 / median_distance)
 
 
-def compute_mmd_rbf(
-    real_embeddings: np.ndarray,
-    synthetic_embeddings: np.ndarray,
-    *,
-    gamma: float | None = None,
-) -> float:
+def compute_mmd_rbf(real_embeddings: np.ndarray, synthetic_embeddings: np.ndarray, *, gamma: float | None = None) -> float:
     real = np.asarray(real_embeddings, dtype=np.float64)
     synthetic = np.asarray(synthetic_embeddings, dtype=np.float64)
     if real.shape[0] < 2 or synthetic.shape[0] < 2:
@@ -773,8 +746,8 @@ def bootstrap_distribution_metric(
     *,
     n_bootstrap: int = 500,
     sample_size: int | None = 256,
-    random_state: int = 42,
-) -> dict[str, Any]:
+    random_state: int = 42) -> dict[str, Any]:
+    
     real = np.asarray(real_values)
     synthetic = np.asarray(synthetic_values)
     if real.shape[0] < 2 or synthetic.shape[0] < 2:
@@ -803,16 +776,11 @@ def bootstrap_distribution_metric(
         "mean": float(np.mean(scores)),
         "std": float(np.std(scores, ddof=ddof)),
         "num_bootstrap": int(len(scores)),
-        "warning": None,
+        "warning": None
     }
 
 
-def dtw_distance_multivariate(
-    real_sequence: np.ndarray,
-    synthetic_sequence: np.ndarray,
-    *,
-    band_radius: int | None = None,
-) -> float:
+def dtw_distance_multivariate(real_sequence: np.ndarray, synthetic_sequence: np.ndarray, *, band_radius: int | None = None) -> float:
     real = np.asarray(real_sequence, dtype=np.float64)
     synthetic = np.asarray(synthetic_sequence, dtype=np.float64)
     if real.ndim != 2 or synthetic.ndim != 2:
@@ -869,8 +837,8 @@ def compute_dtw_summary(
     random_state: int = 42,
     group_key: str,
     class_category: str,
-    class_value: str,
-) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    class_value: str) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+   
     real = np.asarray(real_windows, dtype=np.float32)
     synthetic = np.asarray(synthetic_windows, dtype=np.float32)
     if real.ndim != 3 or synthetic.ndim != 3:
@@ -895,7 +863,7 @@ def compute_dtw_summary(
                     "scenario": "rts",
                     "pair_order": int(pair_order),
                     "distance": float(distance),
-                    "capture_id": str(metadata_df.iloc[window_index]["capture_id"]),
+                    "capture_id": str(metadata_df.iloc[window_index]["capture_id"])
                 }
             )
 
@@ -912,7 +880,7 @@ def compute_dtw_summary(
                     "scenario": scenario_name,
                     "pair_order": int(pair_order),
                     "distance": float(distance),
-                    "capture_id": str(metadata_df.iloc[first_index]["capture_id"]),
+                    "capture_id": str(metadata_df.iloc[first_index]["capture_id"])
                 }
             )
 
@@ -920,18 +888,12 @@ def compute_dtw_summary(
         "rtr": _as_optional_float(np.mean(scenario_to_scores["rtr"])) if scenario_to_scores["rtr"] else None,
         "rts": _as_optional_float(np.mean(scenario_to_scores["rts"])) if scenario_to_scores["rts"] else None,
         "sts": _as_optional_float(np.mean(scenario_to_scores["sts"])) if scenario_to_scores["sts"] else None,
-        "warning": None if any(scenario_to_scores.values()) else "No DTW pairs were available for this group.",
+        "warning": None if any(scenario_to_scores.values()) else "No DTW pairs were available for this group."
     }
     return summary, detail_rows
 
 
-def _resolve_classification_splits(
-    labels: np.ndarray,
-    groups: np.ndarray,
-    *,
-    requested_splits: int,
-    random_state: int,
-) -> tuple[str, list[tuple[np.ndarray, np.ndarray]]]:
+def _resolve_classification_splits(labels: np.ndarray, groups: np.ndarray, *, requested_splits: int, random_state: int) -> tuple[str, list[tuple[np.ndarray, np.ndarray]]]:
     if labels.size < 2:
         return "unavailable", []
 
@@ -968,8 +930,8 @@ def compute_discriminative_score(
     capture_ids: Sequence[str],
     *,
     cv_folds: int = 10,
-    random_state: int = 42,
-) -> dict[str, Any]:
+    random_state: int = 42) -> dict[str, Any]:
+    
     real = np.asarray(real_windows, dtype=np.float32)
     synthetic = np.asarray(synthetic_windows, dtype=np.float32)
     if real.shape != synthetic.shape:
@@ -983,24 +945,20 @@ def compute_discriminative_score(
             "num_splits": 0,
             "cv_strategy": "unavailable",
             "fold_scores": [],
-            "warning": "At least 2 windows are required for discriminative score.",
+            "warning": "At least 2 windows are required for discriminative score."
         }
 
     features = np.concatenate([real.reshape(num_samples, -1), synthetic.reshape(num_samples, -1)], axis=0)
-    labels = np.concatenate(
-        [
-            np.zeros(num_samples, dtype=np.int64),
-            np.ones(num_samples, dtype=np.int64),
-        ]
-    )
+    labels = np.concatenate([np.zeros(num_samples, dtype=np.int64), np.ones(num_samples, dtype=np.int64)])
     repeated_groups = np.concatenate([_string_array(capture_ids), _string_array(capture_ids)], axis=0)
 
     strategy, splits = _resolve_classification_splits(
         labels=labels,
         groups=repeated_groups,
         requested_splits=int(cv_folds),
-        random_state=int(random_state),
+        random_state=int(random_state)
     )
+    
     if not splits:
         return {
             "mean": None,
@@ -1008,7 +966,7 @@ def compute_discriminative_score(
             "num_splits": 0,
             "cv_strategy": strategy,
             "fold_scores": [],
-            "warning": "Could not build cross-validation folds for discriminative score.",
+            "warning": "Could not build cross-validation folds for discriminative score."
         }
 
     scores: list[float] = []
@@ -1022,9 +980,9 @@ def compute_discriminative_score(
                         hidden_layer_sizes=(128, 64),
                         max_iter=300,
                         early_stopping=False,
-                        random_state=int(random_state) + fold_index,
-                    ),
-                ),
+                        random_state=int(random_state) + fold_index
+                    )
+                )
             ]
         )
         with warnings.catch_warnings():
@@ -1040,7 +998,7 @@ def compute_discriminative_score(
         "num_splits": int(len(scores)),
         "cv_strategy": strategy,
         "fold_scores": [float(score) for score in scores],
-        "warning": None,
+        "warning": None
     }
 
 
@@ -1053,8 +1011,8 @@ def compute_pearson_summary(
     channel_labels: Sequence[str],
     group_key: str,
     class_category: str,
-    class_value: str,
-) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    class_value: str) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    
     real = np.asarray(real_windows_4d, dtype=np.float64)
     synthetic = np.asarray(synthetic_windows_4d, dtype=np.float64)
     if real.shape != synthetic.shape:
@@ -1082,7 +1040,7 @@ def compute_pearson_summary(
                         "capture_id": str(metadata_df.iloc[window_index]["capture_id"]),
                         "sensor_name": str(sensor_name),
                         "channel_label": str(channel_label),
-                        "pearson": None if not np.isfinite(score_value) else float(score_value),
+                        "pearson": None if not np.isfinite(score_value) else float(score_value)
                     }
                 )
         if channel_scores:
@@ -1099,11 +1057,7 @@ def compute_pearson_summary(
     }, detail_rows
 
 
-def build_embedding_dataframe(
-    real_embeddings: np.ndarray,
-    synthetic_embeddings: np.ndarray,
-    metadata_df: pd.DataFrame,
-) -> pd.DataFrame:
+def build_embedding_dataframe(real_embeddings: np.ndarray, synthetic_embeddings: np.ndarray, metadata_df: pd.DataFrame) -> pd.DataFrame:
     embedding_dim = int(real_embeddings.shape[1])
     embedding_columns = [f"embedding_{dimension:03d}" for dimension in range(embedding_dim)]
 
@@ -1138,8 +1092,8 @@ def evaluate_protocol_groups(
     dtw_pairs: int = 64,
     dtw_band_radius: int | None = None,
     cv_folds: int = 10,
-    random_state: int = 42,
-) -> dict[str, Any]:
+    random_state: int = 42) -> dict[str, Any]:
+    
     result_rows: list[dict[str, Any]] = []
     pearson_rows: list[dict[str, Any]] = []
     dtw_rows: list[dict[str, Any]] = []
@@ -1165,7 +1119,7 @@ def evaluate_protocol_groups(
             lambda real_value, synthetic_value: compute_frechet_distance(real_value, synthetic_value),
             n_bootstrap=int(bootstrap_iterations),
             sample_size=bootstrap_sample_size,
-            random_state=bootstrap_seed,
+            random_state=bootstrap_seed
         )
         js = bootstrap_distribution_metric(
             group_real_embeddings,
@@ -1173,7 +1127,7 @@ def evaluate_protocol_groups(
             lambda real_value, synthetic_value: compute_js_distance(real_value, synthetic_value, num_bins=int(js_bins)),
             n_bootstrap=int(bootstrap_iterations),
             sample_size=bootstrap_sample_size,
-            random_state=bootstrap_seed + 1,
+            random_state=bootstrap_seed + 1
         )
         mmd = bootstrap_distribution_metric(
             group_real_embeddings,
@@ -1181,7 +1135,7 @@ def evaluate_protocol_groups(
             lambda real_value, synthetic_value: compute_mmd_rbf(real_value, synthetic_value, gamma=mmd_gamma),
             n_bootstrap=int(bootstrap_iterations),
             sample_size=bootstrap_sample_size,
-            random_state=bootstrap_seed + 2,
+            random_state=bootstrap_seed + 2
         )
         dtw_summary, dtw_detail_rows = compute_dtw_summary(
             group_real_windows,
@@ -1192,14 +1146,14 @@ def evaluate_protocol_groups(
             random_state=bootstrap_seed + 3,
             group_key=group_key,
             class_category=class_category,
-            class_value=class_value,
+            class_value=class_value
         )
         ds = compute_discriminative_score(
             group_real_windows,
             group_synthetic_windows,
             group_metadata["capture_id"].astype(str).to_numpy(),
             cv_folds=int(cv_folds),
-            random_state=bootstrap_seed + 4,
+            random_state=bootstrap_seed + 4
         )
         pearson_summary, pearson_detail_rows = compute_pearson_summary(
             group_real_windows_4d,
@@ -1209,7 +1163,7 @@ def evaluate_protocol_groups(
             channel_labels=channel_labels,
             group_key=group_key,
             class_category=class_category,
-            class_value=class_value,
+            class_value=class_value
         )
         predictive_summary = dict(predictive_results.get(group_key, {}))
 
@@ -1222,7 +1176,7 @@ def evaluate_protocol_groups(
                 dtw_summary.get("warning"),
                 ds.get("warning"),
                 pearson_summary.get("warning"),
-                predictive_summary.get("warning"),
+                predictive_summary.get("warning")
             )
             if warning
         ]
@@ -1261,14 +1215,14 @@ def evaluate_protocol_groups(
                 "ps_cv_strategy": predictive_summary.get("cv_strategy"),
                 "pearson_mean": pearson_summary.get("mean"),
                 "pearson_std": pearson_summary.get("std"),
-                "warnings": " | ".join(warning_messages) if warning_messages else None,
+                "warnings": " | ".join(warning_messages) if warning_messages else None
             }
         )
 
     return {
         "results_df": pd.DataFrame(result_rows),
         "pearson_detail_df": pd.DataFrame(pearson_rows),
-        "dtw_detail_df": pd.DataFrame(dtw_rows),
+        "dtw_detail_df": pd.DataFrame(dtw_rows)
     }
 
 
@@ -1292,9 +1246,9 @@ def results_to_protocol_records(results_df: pd.DataFrame) -> list[dict[str, Any]
                     "ps": {"mean": _as_optional_float(row.get("ps_mean")), "std": _as_optional_float(row.get("ps_std"))},
                     "pearson": {
                         "mean": _as_optional_float(row.get("pearson_mean")),
-                        "std": _as_optional_float(row.get("pearson_std")),
-                    },
-                },
+                        "std": _as_optional_float(row.get("pearson_std"))
+                    }
+                }
             }
         )
     return protocol_records
@@ -1404,8 +1358,8 @@ def plot_pearson_histograms(
     pearson_detail_df: pd.DataFrame,
     class_category: str,
     *,
-    bins: int = 20,
-) -> plt.Figure | None:
+    bins: int = 20) -> plt.Figure | None:
+   
     subset = pearson_detail_df[pearson_detail_df["class_category"] == str(class_category)].copy()
     if subset.empty:
         return None
@@ -1482,8 +1436,8 @@ def run_similarity_protocol(
     gru_weight_decay: float = 1e-4,
     gru_patience: int = 4,
     random_state: int = 42,
-    verbose: bool = True,
-) -> dict[str, Any]:
+    verbose: bool = True) -> dict[str, Any]:
+   
     configure_capture_table_display()
 
     if captures_df is None:
@@ -1539,7 +1493,7 @@ def run_similarity_protocol(
         max_samples_per_group=max_samples_per_group,
         include_category_global=True,
         include_overall=True,
-        random_state=random_state,
+        random_state=random_state
     )
     group_summary_df = summarize_metric_groups(groups, evaluation_metadata_df)
 
@@ -1568,7 +1522,7 @@ def run_similarity_protocol(
         gru_patience=gru_patience,
         cv_folds=cv_folds,
         random_state=random_state,
-        verbose=verbose,
+        verbose=verbose
     )
 
     evaluation_result = evaluate_protocol_groups(
@@ -1590,7 +1544,7 @@ def run_similarity_protocol(
         dtw_pairs=dtw_pairs,
         dtw_band_radius=dtw_band_radius,
         cv_folds=cv_folds,
-        random_state=random_state,
+        random_state=random_state
     )
 
     results_df = evaluation_result["results_df"]
@@ -1600,7 +1554,7 @@ def run_similarity_protocol(
     embedding_df = build_embedding_dataframe(
         worker_result["real_embeddings"],
         worker_result["synthetic_embeddings"],
-        evaluation_metadata_df,
+        evaluation_metadata_df
     )
 
     window_summary_df = pd.DataFrame(
@@ -1614,7 +1568,7 @@ def run_similarity_protocol(
                 "channel_labels": ", ".join(paired_dataset["channel_labels"]),
                 "ts2vec_repr_dims": int(ts2vec_repr_dims),
                 "bootstrap_iterations": int(bootstrap_iterations),
-                "cv_folds": int(cv_folds),
+                "cv_folds": int(cv_folds)
             }
         ]
     )
@@ -1635,14 +1589,8 @@ def run_similarity_protocol(
         "ps_mean",
         "pearson_mean",
     ]
-    radar_figures = {
-        metric_column: plot_metric_spider(results_df, metric_column)
-        for metric_column in metric_spider_columns
-    }
-    dtw_figures = {
-        class_column: plot_dtw_curves(results_df, class_column)
-        for class_column in CLASS_COLUMNS
-    }
+    radar_figures = {metric_column: plot_metric_spider(results_df, metric_column) for metric_column in metric_spider_columns}
+    dtw_figures = {class_column: plot_dtw_curves(results_df, class_column) for class_column in CLASS_COLUMNS}
     pearson_histogram_figures = {
         class_column: plot_pearson_histograms(pearson_detail_df, class_column)
         for class_column in CLASS_COLUMNS
@@ -1671,5 +1619,5 @@ def run_similarity_protocol(
         "radar_figures": radar_figures,
         "metric_spider_figures": radar_figures,
         "dtw_figures": dtw_figures,
-        "pearson_histogram_figures": pearson_histogram_figures,
+        "pearson_histogram_figures": pearson_histogram_figures
     }

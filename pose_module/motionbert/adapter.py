@@ -32,7 +32,7 @@ def build_motionbert_window_batch(
     *,
     window_size: int,
     window_overlap: float,
-    include_confidence: bool = True,
+    include_confidence: bool = True
 ) -> MotionBERTWindowBatch:
     _validate_motionbert_sequence(sequence)
     num_frames = int(sequence.num_frames)
@@ -82,7 +82,7 @@ def canonicalize_motionbert_output(
     raw_output: np.ndarray | Mapping[str, Any],
     *,
     expected_batch_size: int,
-    expected_window_size: int,
+    expected_window_size: int
 ) -> np.ndarray:
     joint_names: Optional[Sequence[str]] = None
     if isinstance(raw_output, Mapping):
@@ -120,12 +120,7 @@ def canonicalize_motionbert_output(
     return predictions[:, :, ordered_indices, :3].astype(np.float32, copy=False)
 
 
-def merge_motionbert_window_predictions(
-    predictions: np.ndarray,
-    batch: MotionBERTWindowBatch,
-    *,
-    num_frames: int,
-) -> np.ndarray:
+def merge_motionbert_window_predictions(predictions: np.ndarray, batch: MotionBERTWindowBatch, *, num_frames: int) -> np.ndarray:
     fused = np.zeros((int(num_frames), predictions.shape[2], 3), dtype=np.float32)
     weight_sum = np.zeros((int(num_frames), 1, 1), dtype=np.float32)
 
@@ -158,9 +153,7 @@ def write_pose_sequence3d_npz(sequence: PoseSequence3D, pose3d_npz_path: str | P
 def _validate_motionbert_sequence(sequence: PoseSequence2D) -> None:
     joint_names = [str(name) for name in sequence.joint_names_2d]
     if joint_names != list(MOTIONBERT_17_JOINT_NAMES):
-        raise ValueError(
-            "MotionBERT lifting expects stage-5.4 output ordered as MOTIONBERT_17_JOINT_NAMES."
-        )
+        raise ValueError("MotionBERT lifting expects output ordered as MOTIONBERT_17_JOINT_NAMES.")
     points = np.asarray(sequence.keypoints_xy, dtype=np.float32)
     confidence = np.asarray(sequence.confidence, dtype=np.float32)
     if points.ndim != 3 or points.shape[1:] != (len(MOTIONBERT_17_JOINT_NAMES), 2):

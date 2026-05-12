@@ -51,7 +51,7 @@ def apply_sensor_subject_transform(
             virt_acc=virt_acc,
             real_gyro=real_gyro,
             virt_gyro=virt_gyro,
-            config=config,
+            config=config
         )
 
         aligned_real_acc, aligned_virt_acc = align_streams_with_lag(real_acc, virt_acc, lag_samples)
@@ -60,7 +60,7 @@ def apply_sensor_subject_transform(
             real_acc=aligned_real_acc,
             estimate_acc=aligned_virt_acc,
             real_gyro=aligned_real_gyro,
-            estimate_gyro=aligned_virt_gyro,
+            estimate_gyro=aligned_virt_gyro
         )
         metrics_before["timebase_summary"] = dict(timebase_summary)
 
@@ -68,19 +68,19 @@ def apply_sensor_subject_transform(
             aligned_virt_acc,
             rotation=transform.rotation,
             scale=transform.acc_scale,
-            bias=transform.acc_bias,
+            bias=transform.acc_bias
         )
         aligned_gyro = _apply_transform_to_values(
             aligned_virt_gyro,
             rotation=transform.rotation,
             scale=transform.gyro_scale,
-            bias=transform.gyro_bias,
+            bias=transform.gyro_bias
         )
         metrics_after = summarize_alignment_metrics(
             real_acc=aligned_real_acc,
             estimate_acc=aligned_acc,
             real_gyro=aligned_real_gyro,
-            estimate_gyro=aligned_gyro,
+            estimate_gyro=aligned_gyro
         )
         metrics_after["timebase_summary"] = dict(timebase_summary)
         results.append(
@@ -92,16 +92,13 @@ def apply_sensor_subject_transform(
                 acc_aligned=aligned_acc,
                 gyro_aligned=aligned_gyro,
                 metrics_before=metrics_before,
-                metrics_after=metrics_after,
+                metrics_after=metrics_after
             )
         )
     return results
 
 
-def apply_transforms_to_imu_sequence(
-    virt_seq: IMUSequence,
-    transforms: Dict[Tuple[str, str], SensorSubjectTransform],
-) -> IMUSequence:
+def apply_transforms_to_imu_sequence(virt_seq: IMUSequence, transforms: Dict[Tuple[str, str], SensorSubjectTransform]) -> IMUSequence:
     """Apply learned spatial transforms to the full virtual sequence.
 
     Temporal lag is intentionally not baked into the returned sequence because lag
@@ -120,13 +117,13 @@ def apply_transforms_to_imu_sequence(
             transformed_acc[:, sensor_index, :],
             rotation=transform.rotation,
             scale=transform.acc_scale,
-            bias=transform.acc_bias,
+            bias=transform.acc_bias
         )
         transformed_gyro[:, sensor_index, :] = _apply_transform_to_values(
             transformed_gyro[:, sensor_index, :],
             rotation=transform.rotation,
             scale=transform.gyro_scale,
-            bias=transform.gyro_bias,
+            bias=transform.gyro_bias
         )
     return IMUSequence(
         subject_id=str(virt_seq.subject_id),
@@ -135,7 +132,7 @@ def apply_transforms_to_imu_sequence(
         fps=virt_seq.fps,
         timestamps=np.asarray(virt_seq.timestamps, dtype=np.float32),
         acc=transformed_acc,
-        gyro=transformed_gyro,
+        gyro=transformed_gyro
     )
 
 
@@ -154,17 +151,9 @@ def _estimate_capture_lag(
     return estimate_time_lag(real_gyro, virt_gyro, int(config.max_lag_samples), str(config.lag_signal))
 
 
-def _apply_transform_to_values(
-    values_xyz: np.ndarray,
-    *,
-    rotation: np.ndarray,
-    scale: np.ndarray,
-    bias: np.ndarray,
-) -> np.ndarray:
+def _apply_transform_to_values(values_xyz: np.ndarray, *, rotation: np.ndarray, scale: np.ndarray, bias: np.ndarray) -> np.ndarray:
     rotated = apply_rotation(values_xyz, rotation)
-    return (
-        rotated * np.asarray(scale, dtype=np.float32)[None, :] + np.asarray(bias, dtype=np.float32)[None, :]
-    ).astype(np.float32, copy=False)
+    return (rotated * np.asarray(scale, dtype=np.float32)[None, :] + np.asarray(bias, dtype=np.float32)[None, :]).astype(np.float32, copy=False)
 
 
 def _sensor_index(sensor_names: Sequence[str], sensor_name: str) -> int | None:

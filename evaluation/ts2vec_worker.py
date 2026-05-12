@@ -11,28 +11,17 @@ import torch
 from sklearn.metrics import mean_absolute_error, r2_score
 from sklearn.model_selection import GroupKFold, KFold
 
-try:
-    from sklearn.model_selection import StratifiedGroupKFold
-except ImportError:  # pragma: no cover - depends on sklearn version
-    StratifiedGroupKFold = None
-
+from sklearn.model_selection import StratifiedGroupKFold
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 TS2VEC_ROOT = PROJECT_ROOT / "ts2vec"
 if str(TS2VEC_ROOT) not in sys.path:
     sys.path.insert(0, str(TS2VEC_ROOT))
 
-from ts2vec import TS2Vec  # noqa: E402
-
+from ts2vec import TS2Vec
 
 class SequenceGRUPredictor(torch.nn.Module):
-    def __init__(
-        self,
-        input_size: int,
-        hidden_size: int = 64,
-        num_layers: int = 1,
-        dropout: float = 0.0,
-    ) -> None:
+    def __init__(self, input_size: int, hidden_size: int = 64, num_layers: int = 1, dropout: float = 0.0):
         super().__init__()
         effective_dropout = float(dropout) if int(num_layers) > 1 else 0.0
         self.gru = torch.nn.GRU(
@@ -40,7 +29,7 @@ class SequenceGRUPredictor(torch.nn.Module):
             hidden_size=int(hidden_size),
             num_layers=int(num_layers),
             dropout=effective_dropout,
-            batch_first=True,
+            batch_first=True
         )
         self.head = torch.nn.Linear(int(hidden_size), int(input_size))
 
@@ -89,7 +78,7 @@ def load_worker_payload(input_npz: str | Path) -> dict[str, Any]:
             "embedder_train_windows": np.asarray(payload["embedder_train_windows"], dtype=np.float32),
             "eval_real_windows": np.asarray(payload["eval_real_windows"], dtype=np.float32),
             "eval_synthetic_windows": np.asarray(payload["eval_synthetic_windows"], dtype=np.float32),
-            "capture_ids": np.asarray(payload["capture_ids"]).astype(str),
+            "capture_ids": np.asarray(payload["capture_ids"]).astype(str)
         }
 
 
@@ -104,8 +93,8 @@ def fit_ts2vec_embeddings(
     batch_size: int,
     n_iters: int,
     temporal_unit: int,
-    device: str,
-) -> dict[str, Any]:
+    device: str) -> dict[str, Any]:
+   
     if train_windows.ndim != 3:
         raise ValueError("embedder_train_windows must have shape [n_windows, time, features].")
     if train_windows.shape[0] < 2:
@@ -118,7 +107,7 @@ def fit_ts2vec_embeddings(
         depth=int(depth),
         device=device,
         batch_size=int(batch_size),
-        temporal_unit=int(temporal_unit),
+        temporal_unit=int(temporal_unit)
     )
     loss_log = model.fit(train_windows, n_iters=int(n_iters), verbose=True)
     real_embeddings = model.encode(eval_real_windows, encoding_window="full_series")
@@ -127,14 +116,11 @@ def fit_ts2vec_embeddings(
     return {
         "loss_log": np.asarray(loss_log, dtype=np.float32),
         "real_embeddings": np.asarray(real_embeddings, dtype=np.float32),
-        "synthetic_embeddings": np.asarray(synthetic_embeddings, dtype=np.float32),
+        "synthetic_embeddings": np.asarray(synthetic_embeddings, dtype=np.float32)
     }
 
 
-def _normalize_windows(
-    train_windows: np.ndarray,
-    *other_windows: np.ndarray,
-) -> tuple[np.ndarray, ...]:
+def _normalize_windows(train_windows: np.ndarray, *other_windows: np.ndarray) -> tuple[np.ndarray, ...]:
     mean = train_windows.mean(axis=(0, 1), keepdims=True)
     std = train_windows.std(axis=(0, 1), keepdims=True)
     std = np.where(std < 1e-6, 1.0, std)
@@ -151,12 +137,7 @@ def _make_sequence_io(windows: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     return inputs, targets
 
 
-def _build_group_folds(
-    num_samples: int,
-    capture_ids: np.ndarray,
-    requested_splits: int,
-    random_state: int,
-) -> tuple[str, list[tuple[np.ndarray, np.ndarray]]]:
+def _build_group_folds(num_samples: int, capture_ids: np.ndarray, requested_splits: int, random_state: int) -> tuple[str, list[tuple[np.ndarray, np.ndarray]]]:
     if num_samples < 2:
         return "unavailable", []
 
@@ -195,8 +176,8 @@ def _train_gru_fold(
     learning_rate: float,
     weight_decay: float,
     patience: int,
-    seed: int,
-) -> dict[str, float]:
+    seed: int) -> dict[str, float]:
+   
     torch.manual_seed(int(seed))
     np.random.seed(int(seed))
 
@@ -225,12 +206,12 @@ def _train_gru_fold(
         input_size=int(train_inputs.shape[-1]),
         hidden_size=int(hidden_size),
         num_layers=int(num_layers),
-        dropout=float(dropout),
+        dropout=float(dropout)
     ).to(device)
     optimizer = torch.optim.Adam(
         model.parameters(),
         lr=float(learning_rate),
-        weight_decay=float(weight_decay),
+        weight_decay=float(weight_decay)
     )
     criterion = torch.nn.MSELoss()
 
@@ -288,10 +269,7 @@ def _train_gru_fold(
 
     r2 = float(r2_score(flattened_target, flattened_prediction, multioutput="uniform_average"))
     mae = float(mean_absolute_error(flattened_target, flattened_prediction))
-    return {
-        "r2": r2,
-        "mae": mae,
-    }
+    return {"r2": r2, "mae": mae}
 
 
 def compute_predictive_score(
@@ -309,8 +287,8 @@ def compute_predictive_score(
     epochs: int,
     learning_rate: float,
     weight_decay: float,
-    patience: int,
-) -> dict[str, Any]:
+    patience: int) -> dict[str, Any]:
+    
     num_samples = int(min(synthetic_windows.shape[0], real_windows.shape[0]))
     if num_samples < 2:
         return {
@@ -323,7 +301,7 @@ def compute_predictive_score(
             "fold_scores": [],
             "fold_mae": [],
             "warning": "At least 2 windows are required for predictive score.",
-            "metric_name": "r2",
+            "metric_name": "r2"
         }
 
     syn = np.asarray(synthetic_windows[:num_samples], dtype=np.float32)
@@ -347,7 +325,7 @@ def compute_predictive_score(
             "fold_scores": [],
             "fold_mae": [],
             "warning": "Could not build cross-validation folds for predictive score.",
-            "metric_name": "r2",
+            "metric_name": "r2"
         }
 
     fold_scores: list[float] = []
@@ -367,7 +345,7 @@ def compute_predictive_score(
             learning_rate=float(learning_rate),
             weight_decay=float(weight_decay),
             patience=int(patience),
-            seed=int(random_state) + fold_index,
+            seed=int(random_state) + fold_index
         )
         fold_scores.append(float(metrics["r2"]))
         fold_mae.append(float(metrics["mae"]))
@@ -383,7 +361,7 @@ def compute_predictive_score(
             "fold_scores": [],
             "fold_mae": [],
             "warning": "All predictive-score folds were discarded because of insufficient data.",
-            "metric_name": "r2",
+            "metric_name": "r2"
         }
 
     ddof = 1 if len(fold_scores) > 1 else 0
@@ -397,11 +375,11 @@ def compute_predictive_score(
         "fold_scores": [float(score) for score in fold_scores],
         "fold_mae": [float(score) for score in fold_mae],
         "warning": None,
-        "metric_name": "r2",
+        "metric_name": "r2"
     }
 
 
-def main() -> None:
+def main():
     args = parse_args()
     payload = load_worker_payload(args.input_npz)
     groups = json.loads(Path(args.groups_json).read_text(encoding="utf-8"))
@@ -417,7 +395,7 @@ def main() -> None:
         batch_size=int(args.batch_size),
         n_iters=int(args.n_iters),
         temporal_unit=int(args.temporal_unit),
-        device=device,
+        device=device
     )
 
     predictive_results: dict[str, Any] = {}
@@ -438,14 +416,14 @@ def main() -> None:
             epochs=int(args.gru_epochs),
             learning_rate=float(args.gru_learning_rate),
             weight_decay=float(args.gru_weight_decay),
-            patience=int(args.gru_patience),
+            patience=int(args.gru_patience)
         )
 
     summary = {
         "ts2vec_device": device,
         "repr_dims": int(args.repr_dims),
         "train_windows": int(payload["embedder_train_windows"].shape[0]),
-        "eval_windows": int(payload["eval_real_windows"].shape[0]),
+        "eval_windows": int(payload["eval_real_windows"].shape[0])
     }
 
     np.savez_compressed(
@@ -454,7 +432,7 @@ def main() -> None:
         synthetic_embeddings=np.asarray(embedding_result["synthetic_embeddings"], dtype=np.float32),
         loss_log=np.asarray(embedding_result["loss_log"], dtype=np.float32),
         predictive_results_json=np.asarray(json.dumps(predictive_results), dtype=f"<U{max(1, len(json.dumps(predictive_results)))}"),
-        worker_summary_json=np.asarray(json.dumps(summary), dtype=f"<U{max(1, len(json.dumps(summary)))}"),
+        worker_summary_json=np.asarray(json.dumps(summary), dtype=f"<U{max(1, len(json.dumps(summary)))}")
     )
 
 

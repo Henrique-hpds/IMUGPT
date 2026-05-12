@@ -1,4 +1,4 @@
-"""Stage 5.7: normalize mapped 3D poses into a local metric body frame."""
+"""Normalize mapped 3D poses into a local metric body frame."""
 
 from __future__ import annotations
 
@@ -270,7 +270,7 @@ def _build_metric_normalizer_quality_report(
 def _validate_imugpt22_sequence(sequence: PoseSequence3D) -> None:
     joint_names = [str(name) for name in sequence.joint_names_3d]
     if joint_names != list(IMUGPT_22_JOINT_NAMES):
-        raise ValueError("Metric normalizer expects stage-5.6 output ordered as IMUGPT_22_JOINT_NAMES.")
+        raise ValueError("Metric normalizer expects output ordered as IMUGPT_22_JOINT_NAMES.")
     points = np.asarray(sequence.joint_positions_xyz, dtype=np.float32)
     confidence = np.asarray(sequence.joint_confidence, dtype=np.float32)
     if points.ndim != 3 or points.shape[1:] != (len(IMUGPT_22_JOINT_NAMES), 3):

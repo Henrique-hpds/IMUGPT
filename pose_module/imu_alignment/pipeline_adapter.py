@@ -39,7 +39,7 @@ def run_geometric_alignment(
     *,
     subject_id: str | None = None,
     capture_id: str | None = None,
-    transforms: Mapping[Tuple[str, str], Any] | None = None,
+    transforms: Mapping[Tuple[str, str], Any] | None = None
 ) -> Dict[str, Any]:
     """Apply optional geometric alignment between virtual and real IMU."""
 
@@ -47,10 +47,7 @@ def run_geometric_alignment(
     output_dir_path = Path(output_dir)
     output_dir_path.mkdir(parents=True, exist_ok=True)
 
-    disabled_result = _build_disabled_result(
-        virtual_imu_sequence=virtual_imu_sequence,
-        settings=settings,
-    )
+    disabled_result = _build_disabled_result(virtual_imu_sequence=virtual_imu_sequence, settings=settings)
     if not bool(settings.get("enable", False)):
         return disabled_result
 
@@ -207,11 +204,7 @@ def run_geometric_alignment(
     return result
 
 
-def _build_disabled_result(
-    *,
-    virtual_imu_sequence: VirtualIMUSequence,
-    settings: Dict[str, Any],
-) -> Dict[str, Any]:
+def _build_disabled_result(*, virtual_imu_sequence: VirtualIMUSequence, settings: Dict[str, Any]) -> Dict[str, Any]:
     return {
         "status": "not_enabled",
         "enabled": False,
@@ -258,7 +251,7 @@ def _build_skipped_result(
     subject_id: str,
     capture_id: str,
     real_imu_npz_path: Path | None,
-    skip_reason: str,
+    skip_reason: str
 ) -> Dict[str, Any]:
     aligned_virtual_sequence = VirtualIMUSequence(
         clip_id=str(virtual_imu_sequence.clip_id),
@@ -323,12 +316,7 @@ def _infer_subject_id(real_imu_npz_path: Path | None, *, clip_id: str) -> str:
     return str(clip_id)
 
 
-def _write_result_artifacts(
-    result: Dict[str, Any],
-    output_dir: Path,
-    *,
-    save_metrics: bool,
-) -> None:
+def _write_result_artifacts(result: Dict[str, Any], output_dir: Path, *, save_metrics: bool) -> None:
     aligned_path = output_dir / DEFAULT_GEOMETRIC_ALIGNED_IMU_FILENAME
     np.savez_compressed(aligned_path, **result["aligned_virtual_imu_sequence"].to_npz_payload())
     result["artifacts"]["virtual_imu_geometric_aligned_npz_path"] = str(aligned_path.resolve())

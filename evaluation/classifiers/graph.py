@@ -10,24 +10,13 @@ from pose_module.interfaces import IMUGPT_22_PARENT_INDICES, MOTIONBERT_17_PAREN
 def _build_edges_from_parents(parents: Sequence[int]) -> tuple[int, list[tuple[int, int]], int]:
     num_nodes = int(len(parents))
     self_links = [(node_index, node_index) for node_index in range(num_nodes)]
-    neighbor_links = [
-        (node_index, int(parent_index))
-        for node_index, parent_index in enumerate(parents)
-        if int(parent_index) >= 0
-    ]
+    neighbor_links = [(node_index, int(parent_index)) for node_index, parent_index in enumerate(parents) if int(parent_index) >= 0]
     return num_nodes, self_links + neighbor_links, 0
-
 
 class Graph:
     """Graph definition adapted from the ST-GCN reference implementation."""
 
-    def __init__(
-        self,
-        layout: str = "imugpt22",
-        strategy: str = "spatial",
-        max_hop: int = 1,
-        dilation: int = 1,
-    ) -> None:
+    def __init__(self, layout: str = "imugpt22", strategy: str = "spatial", max_hop: int = 1, dilation: int = 1) -> None:
         self.max_hop = int(max_hop)
         self.dilation = int(dilation)
         self.get_edge(layout)
@@ -67,7 +56,7 @@ class Graph:
                 (15, 0),
                 (14, 0),
                 (17, 15),
-                (16, 14),
+                (16, 14)
             ]
             self.edge = self_link + neighbor_link
             self.center = 1
@@ -77,6 +66,7 @@ class Graph:
     def get_adjacency(self, strategy: str) -> None:
         valid_hop = range(0, self.max_hop + 1, self.dilation)
         adjacency = np.zeros((self.num_node, self.num_node))
+        
         for hop in valid_hop:
             adjacency[self.hop_dis == hop] = 1
         normalized_adjacency = normalize_digraph(adjacency)
@@ -120,7 +110,6 @@ class Graph:
 
         raise ValueError(f"Unsupported graph strategy: {strategy}")
 
-
 def get_hop_distance(num_node: int, edge: Sequence[tuple[int, int]], max_hop: int = 1) -> np.ndarray:
     adjacency = np.zeros((num_node, num_node))
     for source_index, target_index in edge:
@@ -133,7 +122,6 @@ def get_hop_distance(num_node: int, edge: Sequence[tuple[int, int]], max_hop: in
     for depth in range(max_hop, -1, -1):
         hop_distance[arrival_matrix[depth]] = depth
     return hop_distance
-
 
 def normalize_digraph(adjacency: np.ndarray) -> np.ndarray:
     degree = np.sum(adjacency, axis=0)

@@ -11,11 +11,7 @@ from scipy.fft import rfft, rfftfreq
 from scipy.signal import resample, resample_poly
 from sklearn.manifold import TSNE
 
-from evaluation.utils import (
-    load_real_capture,
-    load_virtual_capture,
-    select_capture_row,
-)
+from evaluation.utils import load_real_capture, load_virtual_capture, select_capture_row
 from pose_module.processing.frequency_alignment import estimate_sampling_frequency_hz
 
 AXIS_TO_INDEX = {"x": 0, "y": 1, "z": 2}
@@ -56,8 +52,8 @@ def _validate_axes(selected_axes: Sequence[str]) -> list[str]:
 def _resolve_selected_sensors(
     requested_sensors: Sequence[str] | None,
     real_sensor_names: Sequence[str],
-    synthetic_sensor_names: Sequence[str],
-) -> list[str]:
+    synthetic_sensor_names: Sequence[str]) -> list[str]:
+    
     common_sensors = [sensor for sensor in real_sensor_names if sensor in set(synthetic_sensor_names)]
     if len(common_sensors) == 0:
         raise ValueError("There are no sensors shared by the real and synthetic signals.")
@@ -79,11 +75,7 @@ def _flatten_for_interpolation(values: np.ndarray) -> tuple[np.ndarray, tuple[in
     return values.reshape(values.shape[0], -1), trailing_shape
 
 
-def _interpolate_multichannel(
-    source_timestamps_sec: np.ndarray,
-    source_values: np.ndarray,
-    target_timestamps_sec: np.ndarray,
-) -> np.ndarray:
+def _interpolate_multichannel(source_timestamps_sec: np.ndarray, source_values: np.ndarray, target_timestamps_sec: np.ndarray) -> np.ndarray:
     flat_values, trailing_shape = _flatten_for_interpolation(source_values)
     interpolated = np.empty((target_timestamps_sec.shape[0], flat_values.shape[1]), dtype=np.float64)
 
@@ -91,7 +83,7 @@ def _interpolate_multichannel(
         interpolated[:, channel_index] = np.interp(
             target_timestamps_sec,
             source_timestamps_sec,
-            flat_values[:, channel_index],
+            flat_values[:, channel_index]
         )
 
     return interpolated.reshape((target_timestamps_sec.shape[0], *trailing_shape)).astype(np.float32)
@@ -104,8 +96,7 @@ def load_capture_pair(
     user_id: int,
     tag_number: int,
     take_id: str | None = None,
-    synthetic_filename: str = "virtual_imu.npz",
-) -> dict[str, Any]:
+    synthetic_filename: str = "virtual_imu.npz") -> dict[str, Any]:
     capture_row = select_capture_row(
         captures_df,
         domain=domain,
@@ -124,18 +115,14 @@ def load_capture_pair(
     }
 
 
-def load_capture_pair_from_row(
-    capture_row: pd.Series | dict[str, Any],
-    *,
-    synthetic_filename: str = "virtual_imu.npz",
-) -> dict[str, Any]:
+def load_capture_pair_from_row(capture_row: pd.Series | dict[str, Any], *, synthetic_filename: str = "virtual_imu.npz") -> dict[str, Any]:
     row = pd.Series(capture_row).copy()
     real_capture = load_real_capture(row["clip_dir"])
     synthetic_capture = load_virtual_capture(row["pose_dir"], filename=synthetic_filename)
     return {
         "capture_row": row,
         "real": real_capture,
-        "synthetic": synthetic_capture,
+        "synthetic": synthetic_capture
     }
 
 
@@ -144,8 +131,8 @@ def extract_selected_modalities(
     *,
     signal_groups: Sequence[str] = ("acc",),
     selected_sensors: Sequence[str] | None = None,
-    selected_axes: Sequence[str] = ("x", "y", "z"),
-) -> dict[str, Any]:
+    selected_axes: Sequence[str] = ("x", "y", "z")) -> dict[str, Any]:
+   
     real_capture = dict(capture_pair["real"])
     synthetic_capture = dict(capture_pair["synthetic"])
 
@@ -154,7 +141,7 @@ def extract_selected_modalities(
     resolved_sensors = _resolve_selected_sensors(
         requested_sensors=selected_sensors,
         real_sensor_names=real_capture["sensor_names"],
-        synthetic_sensor_names=synthetic_capture["sensor_names"],
+        synthetic_sensor_names=synthetic_capture["sensor_names"]
     )
 
     real_sensor_indices = [real_capture["sensor_names"].index(sensor) for sensor in resolved_sensors]
@@ -195,7 +182,7 @@ def extract_selected_modalities(
         "selected_sensors": list(resolved_sensors),
         "selected_axes": normalized_axes,
         "signal_groups": normalized_groups,
-        "channel_labels": channel_labels,
+        "channel_labels": channel_labels
     }
 
 
@@ -212,7 +199,7 @@ def summarize_selected_signals(signal_bundle: dict[str, Any]) -> pd.DataFrame:
             "sampling_frequency_hz": float(estimate_sampling_frequency_hz(signal_bundle["real_timestamps_sec"])),
             "selected_sensors": ", ".join(signal_bundle["selected_sensors"]),
             "selected_axes": ", ".join(signal_bundle["selected_axes"]),
-            "signal_groups": ", ".join(signal_bundle["signal_groups"]),
+            "signal_groups": ", ".join(signal_bundle["signal_groups"])
         },
         {
             "domain": "synthetic",
@@ -222,7 +209,7 @@ def summarize_selected_signals(signal_bundle: dict[str, Any]) -> pd.DataFrame:
             "sampling_frequency_hz": float(estimate_sampling_frequency_hz(signal_bundle["synthetic_timestamps_sec"])),
             "selected_sensors": ", ".join(signal_bundle["selected_sensors"]),
             "selected_axes": ", ".join(signal_bundle["selected_axes"]),
-            "signal_groups": ", ".join(signal_bundle["signal_groups"]),
+            "signal_groups": ", ".join(signal_bundle["signal_groups"])
         },
     ]
     return pd.DataFrame(rows)
@@ -235,8 +222,8 @@ def resample_real_to_synthetic_rate(
     synthetic_timestamps_sec: np.ndarray,
     synthetic_values: np.ndarray,
     method: str = "resample_poly",
-    max_denominator: int = 1000,
-) -> dict[str, Any]:
+    max_denominator: int = 1000) -> dict[str, Any]:
+
     real_timestamps = np.asarray(real_timestamps_sec, dtype=np.float64)
     synthetic_timestamps = np.asarray(synthetic_timestamps_sec, dtype=np.float64)
     real_block = np.asarray(real_values, dtype=np.float32)
@@ -247,9 +234,7 @@ def resample_real_to_synthetic_rate(
     if synthetic_block.shape[0] != synthetic_timestamps.shape[0]:
         raise ValueError("synthetic_values and synthetic_timestamps_sec must have the same number of frames.")
     if real_block.shape[1:] != synthetic_block.shape[1:]:
-        raise ValueError(
-            "real_values and synthetic_values must have the same sensors/channels after selection."
-        )
+        raise ValueError("real_values and synthetic_values must have the same sensors/channels after selection.")
 
     overlap_start_sec = float(max(real_timestamps[0], synthetic_timestamps[0]))
     overlap_end_sec = float(min(real_timestamps[-1], synthetic_timestamps[-1]))
@@ -274,9 +259,7 @@ def resample_real_to_synthetic_rate(
         raise ValueError("method must be either 'resample' or 'resample_poly'.")
 
     if normalized_method == "resample":
-        resampled_real_values = resample(real_overlap_values, num=synthetic_overlap_timestamps.size, axis=0).astype(
-            np.float32
-        )
+        resampled_real_values = resample(real_overlap_values, num=synthetic_overlap_timestamps.size, axis=0).astype(np.float32)
         effective_method = "resample"
     else:
         ratio = Fraction(synthetic_frequency_hz / real_frequency_hz).limit_denominator(max_denominator)
@@ -284,7 +267,7 @@ def resample_real_to_synthetic_rate(
             real_overlap_values,
             up=ratio.numerator,
             down=ratio.denominator,
-            axis=0,
+            axis=0
         ).astype(np.float32)
         uniform_timestamps_sec = overlap_start_sec + (
             np.arange(resampled_uniform_values.shape[0], dtype=np.float64) / synthetic_frequency_hz
@@ -299,7 +282,7 @@ def resample_real_to_synthetic_rate(
         resampled_real_values = _interpolate_multichannel(
             source_timestamps_sec=uniform_timestamps_sec,
             source_values=resampled_uniform_values,
-            target_timestamps_sec=synthetic_overlap_timestamps,
+            target_timestamps_sec=synthetic_overlap_timestamps
         )
         effective_method = f"resample_poly(up={ratio.numerator}, down={ratio.denominator})"
 
@@ -317,7 +300,7 @@ def resample_real_to_synthetic_rate(
         "synthetic_frequency_hz": synthetic_frequency_hz,
         "overlap_start_sec": overlap_start_sec,
         "overlap_end_sec": overlap_end_sec,
-        "resample_method": effective_method,
+        "resample_method": effective_method
     }
 
 
@@ -333,7 +316,7 @@ def summarize_alignment(aligned_bundle: dict[str, Any]) -> pd.DataFrame:
                 "overlap_start_sec": float(aligned_bundle["overlap_start_sec"]),
                 "overlap_end_sec": float(aligned_bundle["overlap_end_sec"]),
                 "overlap_duration_sec": float(aligned_bundle["overlap_end_sec"] - aligned_bundle["overlap_start_sec"]),
-                "resample_method": str(aligned_bundle["resample_method"]),
+                "resample_method": str(aligned_bundle["resample_method"])
             }
         ]
     )
@@ -344,8 +327,8 @@ def resolve_window_spec(
     sampling_frequency_hz: float | None = None,
     window_type: str | None = None,
     window_size: int | None = None,
-    window_duration_sec: float | None = None,
-) -> dict[str, Any]:
+    window_duration_sec: float | None = None) -> dict[str, Any]:
+    
     normalized_window_type = None if window_type is None else str(window_type).strip().lower()
     if normalized_window_type not in {None, "n_samples", "seconds"}:
         raise ValueError("window_type must be either 'n_samples' or 'seconds'.")
@@ -379,7 +362,7 @@ def resolve_window_spec(
         return {
             "window_type": "seconds",
             "window_size_samples": window_size_samples,
-            "window_duration_sec": duration_sec,
+            "window_duration_sec": duration_sec
         }
 
     if int(window_size) <= 1:
@@ -389,7 +372,7 @@ def resolve_window_spec(
     return {
         "window_type": "n_samples",
         "window_size_samples": int(window_size),
-        "window_duration_sec": duration_sec,
+        "window_duration_sec": duration_sec
     }
 
 
@@ -403,8 +386,8 @@ def resolve_stride_or_overlap_spec(
     overlap: float = 0.5,
     stride: int | None = None,
     stride_sec: float | None = None,
-    stride_or_overlap: float | None = None,
-) -> dict[str, Any]:
+    stride_or_overlap: float | None = None) -> dict[str, Any]:
+    
     normalized_mode = None if stride_or_overlap_mode is None else str(stride_or_overlap_mode).strip().lower()
     if normalized_mode not in {None, "stride", "overlap"}:
         raise ValueError("stride_or_overlap_mode must be either 'stride' or 'overlap'.")
@@ -425,7 +408,7 @@ def resolve_stride_or_overlap_spec(
                 "step_size_samples": step_size_samples,
                 "step_duration_sec": step_duration_sec,
                 "overlap_ratio": float(value),
-                "stride_value": None,
+                "stride_value": None
             }
 
         if step_value is not None:
@@ -456,7 +439,7 @@ def resolve_stride_or_overlap_spec(
                 "step_size_samples": step_size_samples,
                 "step_duration_sec": float(value),
                 "overlap_ratio": overlap_ratio,
-                "stride_value": float(value),
+                "stride_value": float(value)
             }
 
         step_size_samples = int(round(value))
@@ -468,7 +451,7 @@ def resolve_stride_or_overlap_spec(
             "step_size_samples": step_size_samples,
             "step_duration_sec": None if sampling_frequency_hz is None else float(step_size_samples / sampling_frequency_hz),
             "overlap_ratio": overlap_ratio,
-            "stride_value": int(step_size_samples),
+            "stride_value": int(step_size_samples)
         }
 
     if stride_or_overlap is not None:
@@ -482,7 +465,7 @@ def resolve_stride_or_overlap_spec(
                 "step_size_samples": step_size_samples,
                 "step_duration_sec": step_duration_sec,
                 "overlap_ratio": overlap_ratio,
-                "stride_value": None,
+                "stride_value": None
             }
 
         if value <= 0.0:
@@ -500,7 +483,7 @@ def resolve_stride_or_overlap_spec(
                 "step_size_samples": step_size_samples,
                 "step_duration_sec": float(value),
                 "overlap_ratio": overlap_ratio,
-                "stride_value": float(value),
+                "stride_value": float(value)
             }
 
         step_size_samples = int(round(value))
@@ -512,7 +495,7 @@ def resolve_stride_or_overlap_spec(
             "step_size_samples": step_size_samples,
             "step_duration_sec": None if sampling_frequency_hz is None else float(step_size_samples / sampling_frequency_hz),
             "overlap_ratio": overlap_ratio,
-            "stride_value": int(step_size_samples),
+            "stride_value": int(step_size_samples)
         }
 
     if stride is not None:
@@ -525,7 +508,7 @@ def resolve_stride_or_overlap_spec(
             "step_size_samples": step_size_samples,
             "step_duration_sec": None if sampling_frequency_hz is None else float(step_size_samples / sampling_frequency_hz),
             "overlap_ratio": overlap_ratio,
-            "stride_value": int(step_size_samples),
+            "stride_value": int(step_size_samples)
         }
 
     if stride_sec is not None:
@@ -543,7 +526,7 @@ def resolve_stride_or_overlap_spec(
             "step_size_samples": step_size_samples,
             "step_duration_sec": stride_sec,
             "overlap_ratio": overlap_ratio,
-            "stride_value": stride_sec,
+            "stride_value": stride_sec
         }
 
     if not 0.0 <= float(overlap) < 1.0:
@@ -556,7 +539,7 @@ def resolve_stride_or_overlap_spec(
         "step_size_samples": step_size_samples,
         "step_duration_sec": step_duration_sec,
         "overlap_ratio": float(overlap),
-        "stride_value": None,
+        "stride_value": None
     }
 
 
@@ -572,8 +555,9 @@ def segment_signal_windows(
     overlap: float = 0.5,
     stride: int | None = None,
     stride_sec: float | None = None,
-    stride_or_overlap: float | None = None,
+    stride_or_overlap: float | None = None
 ) -> dict[str, Any]:
+    
     block = np.asarray(values, dtype=np.float32)
     if block.ndim != 3:
         raise ValueError("values must have shape [frames, sensors, channels].")
@@ -582,7 +566,7 @@ def segment_signal_windows(
         sampling_frequency_hz=sampling_frequency_hz,
         window_type=window_type,
         window_size=window_size,
-        window_duration_sec=window_duration_sec,
+        window_duration_sec=window_duration_sec
     )
     window_size = int(window_spec["window_size_samples"])
     step_spec = resolve_stride_or_overlap_spec(
@@ -594,7 +578,7 @@ def segment_signal_windows(
         overlap=overlap,
         stride=stride,
         stride_sec=stride_sec,
-        stride_or_overlap=stride_or_overlap,
+        stride_or_overlap=stride_or_overlap
     )
     step_size = int(step_spec["step_size_samples"])
     if block.shape[0] < window_size:
@@ -616,7 +600,7 @@ def segment_signal_windows(
         "window_size": window_size,
         "window_type": window_spec["window_type"],
         "window_duration_sec": window_spec["window_duration_sec"],
-        "overlap": step_spec["overlap_ratio"],
+        "overlap": step_spec["overlap_ratio"]
     }
 
 
@@ -626,8 +610,9 @@ def transform_windows_to_frequency_domain(
     sampling_frequency_hz: float,
     normalization: str = "zscore",
     use_log_power: bool = True,
-    drop_dc: bool = False,
+    drop_dc: bool = False
 ) -> dict[str, Any]:
+    
     window_block = np.asarray(windows, dtype=np.float32)
     if window_block.ndim != 4:
         raise ValueError("windows must have shape [windows, frames, sensors, channels].")
@@ -664,10 +649,7 @@ def transform_windows_to_frequency_domain(
     }
 
 
-def build_frequency_dataset(
-    real_features: np.ndarray,
-    synthetic_features: np.ndarray,
-) -> dict[str, Any]:
+def build_frequency_dataset(real_features: np.ndarray, synthetic_features: np.ndarray) -> dict[str, Any]:
     real_matrix = np.asarray(real_features, dtype=np.float32)
     synthetic_matrix = np.asarray(synthetic_features, dtype=np.float32)
 
@@ -685,15 +667,11 @@ def build_frequency_dataset(
             np.full(real_matrix.shape[0], DOMAIN_TO_LABEL["real"], dtype=np.int32),
             np.full(synthetic_matrix.shape[0], DOMAIN_TO_LABEL["synthetic"], dtype=np.int32),
         ],
-        axis=0,
+        axis=0
     )
     domains = np.array([LABEL_TO_DOMAIN[label] for label in labels], dtype=object)
 
-    return {
-        "features": features,
-        "labels": labels,
-        "domains": domains,
-    }
+    return {"features": features, "labels": labels, "domains": domains}
 
 
 def fit_tsne_embedding(
@@ -701,7 +679,7 @@ def fit_tsne_embedding(
     *,
     perplexity: float = 30.0,
     init: str = "pca",
-    random_state: int = 42,
+    random_state: int = 42
 ) -> np.ndarray:
     feature_matrix = np.asarray(features, dtype=np.float32)
     if feature_matrix.ndim != 2:
@@ -715,17 +693,12 @@ def fit_tsne_embedding(
         perplexity=safe_perplexity,
         init=init,
         random_state=int(random_state),
-        learning_rate="auto",
+        learning_rate="auto"
     )
     return tsne.fit_transform(feature_matrix).astype(np.float32)
 
 
-def build_embedding_frame(
-    embedding: np.ndarray,
-    labels: np.ndarray,
-    *,
-    window_size: int,
-) -> pd.DataFrame:
+def build_embedding_frame(embedding: np.ndarray, labels: np.ndarray, *, window_size: int) -> pd.DataFrame:
     embedding_matrix = np.asarray(embedding, dtype=np.float32)
     label_array = np.asarray(labels, dtype=np.int32)
 
@@ -739,7 +712,7 @@ def build_embedding_frame(
             "tsne_2": embedding_matrix[:, 1],
             "label": label_array,
             "domain": domain_names,
-            "window_size": int(window_size),
+            "window_size": int(window_size)
         }
     )
 
@@ -750,7 +723,7 @@ def plot_tsne_embedding(
     ax: plt.Axes | None = None,
     title: str | None = None,
     point_size: float = 40.0,
-    alpha: float = 0.8,
+    alpha: float = 0.8
 ) -> plt.Axes:
     if ax is None:
         _, ax = plt.subplots(figsize=(8, 6))
@@ -763,7 +736,7 @@ def plot_tsne_embedding(
             label=domain_name,
             c=DOMAIN_COLORS[domain_name],
             alpha=float(alpha),
-            s=float(point_size),
+            s=float(point_size)
         )
 
     ax.set_xlabel("t-SNE 1")
@@ -801,6 +774,7 @@ def plot_tsne_class_highlight_grid(
     max_columns: int = 3,
     subplot_size: tuple[float, float] = (4.8, 4.1),
 ) -> tuple[plt.Figure, np.ndarray]:
+    
     if category not in embedding_df.columns:
         raise ValueError(f"Category column '{category}' is not available in embedding_df.")
     if "domain" not in embedding_df.columns:
@@ -819,7 +793,7 @@ def plot_tsne_class_highlight_grid(
         figsize=(subplot_size[0] * num_columns, subplot_size[1] * num_rows),
         squeeze=False,
         sharex=True,
-        sharey=True,
+        sharey=True
     )
     axes_flat = axes.ravel()
 
@@ -843,10 +817,7 @@ def plot_tsne_class_highlight_grid(
         real_highlight_mask = highlight_mask & (domain_series == "real")
         synthetic_highlight_mask = highlight_mask & (domain_series == "synthetic")
 
-        for domain_name, domain_mask in (
-            ("real", real_background_mask),
-            ("synthetic", synthetic_background_mask),
-        ):
+        for domain_name, domain_mask in (("real", real_background_mask), ("synthetic", synthetic_background_mask)):
             axis.scatter(
                 embedding_df.loc[domain_mask, "tsne_1"],
                 embedding_df.loc[domain_mask, "tsne_2"],
@@ -854,13 +825,10 @@ def plot_tsne_class_highlight_grid(
                 alpha=float(background_alpha),
                 s=float(point_size),
                 linewidths=0.0,
-                marker=CLASS_HIGHLIGHT_MARKER,
+                marker=CLASS_HIGHLIGHT_MARKER
             )
 
-        for domain_name, domain_mask in (
-            ("real", real_highlight_mask),
-            ("synthetic", synthetic_highlight_mask),
-        ):
+        for domain_name, domain_mask in (("real", real_highlight_mask), ("synthetic", synthetic_highlight_mask)):
             axis.scatter(
                 embedding_df.loc[domain_mask, "tsne_1"],
                 embedding_df.loc[domain_mask, "tsne_2"],
@@ -868,7 +836,7 @@ def plot_tsne_class_highlight_grid(
                 alpha=float(highlight_alpha),
                 s=float(point_size),
                 linewidths=0.0,
-                marker=CLASS_HIGHLIGHT_MARKER,
+                marker=CLASS_HIGHLIGHT_MARKER
             )
 
         axis.set_title(
@@ -892,7 +860,7 @@ def plot_tsne_class_highlight_grid(
             markerfacecolor=CLASS_HIGHLIGHT_DOMAIN_COLORS["real"],
             markeredgecolor=CLASS_HIGHLIGHT_DOMAIN_COLORS["real"],
             markersize=8,
-            label="real",
+            label="real"
         ),
         Line2D(
             [0],
@@ -902,8 +870,8 @@ def plot_tsne_class_highlight_grid(
             markerfacecolor=CLASS_HIGHLIGHT_DOMAIN_COLORS["synthetic"],
             markeredgecolor=CLASS_HIGHLIGHT_DOMAIN_COLORS["synthetic"],
             markersize=8,
-            label="synthetic",
-        ),
+            label="synthetic"
+        )
     ]
 
     figure.suptitle(title or f"2D t-SNE real vs synthetic by {category}")
@@ -939,7 +907,7 @@ def summarize_windows(
                 "overlap": None if overlap is None else float(overlap),
                 "real_num_windows": int(real_windows.shape[0]),
                 "synthetic_num_windows": int(synthetic_windows.shape[0]),
-                "feature_dim": int(feature_dim),
+                "feature_dim": int(feature_dim)
             }
         ]
     )
@@ -965,11 +933,12 @@ def _prepare_frequency_domain_tsne_capture(
     use_log_power: bool = True,
     drop_dc: bool = False,
 ) -> dict[str, Any]:
+    
     selected_bundle = extract_selected_modalities(
         capture_pair,
         signal_groups=signal_groups,
         selected_sensors=selected_sensors,
-        selected_axes=selected_axes,
+        selected_axes=selected_axes
     )
     selected_summary_df = summarize_selected_signals(selected_bundle)
 
@@ -978,7 +947,7 @@ def _prepare_frequency_domain_tsne_capture(
         real_values=selected_bundle["real_values"],
         synthetic_timestamps_sec=selected_bundle["synthetic_timestamps_sec"],
         synthetic_values=selected_bundle["synthetic_values"],
-        method=resample_method,
+        method=resample_method
     )
     alignment_summary_df = summarize_alignment(aligned_bundle)
     aligned_frequency_hz = float(alignment_summary_df.loc[0, "aligned_sampling_frequency_hz"])
@@ -986,7 +955,7 @@ def _prepare_frequency_domain_tsne_capture(
         sampling_frequency_hz=aligned_frequency_hz,
         window_type=window_type,
         window_size=window_size,
-        window_duration_sec=window_duration_sec,
+        window_duration_sec=window_duration_sec
     )
     resolved_window_size = int(resolved_window_spec["window_size_samples"])
     resolved_window_duration_sec = resolved_window_spec["window_duration_sec"]
@@ -1003,7 +972,7 @@ def _prepare_frequency_domain_tsne_capture(
         stride_or_overlap=stride_or_overlap,
         overlap=overlap,
         stride=stride,
-        stride_sec=stride_sec,
+        stride_sec=stride_sec
     )
     synthetic_windows_bundle = segment_signal_windows(
         aligned_bundle["synthetic_values"],
@@ -1016,7 +985,7 @@ def _prepare_frequency_domain_tsne_capture(
         stride_or_overlap=stride_or_overlap,
         overlap=overlap,
         stride=stride,
-        stride_sec=stride_sec,
+        stride_sec=stride_sec
     )
 
     if real_windows_bundle["windows"].shape != synthetic_windows_bundle["windows"].shape:
@@ -1030,14 +999,14 @@ def _prepare_frequency_domain_tsne_capture(
         sampling_frequency_hz=aligned_frequency_hz,
         normalization=normalization,
         use_log_power=use_log_power,
-        drop_dc=drop_dc,
+        drop_dc=drop_dc
     )
     synthetic_frequency_bundle = transform_windows_to_frequency_domain(
         synthetic_windows_bundle["windows"],
         sampling_frequency_hz=aligned_frequency_hz,
         normalization=normalization,
         use_log_power=use_log_power,
-        drop_dc=drop_dc,
+        drop_dc=drop_dc
     )
 
     window_summary_df = summarize_windows(
@@ -1051,7 +1020,7 @@ def _prepare_frequency_domain_tsne_capture(
         step_duration_sec=real_windows_bundle["step_duration_sec"],
         overlap_ratio=real_windows_bundle["overlap"],
         overlap=real_windows_bundle["overlap"],
-        feature_dim=real_frequency_bundle["features"].shape[1],
+        feature_dim=real_frequency_bundle["features"].shape[1]
     )
 
     return {
@@ -1068,16 +1037,11 @@ def _prepare_frequency_domain_tsne_capture(
         "window_type": resolved_window_type,
         "window_size": resolved_window_size,
         "window_duration_sec": resolved_window_duration_sec,
-        "frequencies_hz": real_frequency_bundle["frequencies_hz"],
+        "frequencies_hz": real_frequency_bundle["frequencies_hz"]
     }
 
 
-def _sample_feature_indices(
-    num_rows: int,
-    *,
-    max_samples: int | None,
-    rng: np.random.Generator,
-) -> np.ndarray:
+def _sample_feature_indices(num_rows: int, *, max_samples: int | None, rng: np.random.Generator) -> np.ndarray:
     if max_samples is None or int(max_samples) >= int(num_rows):
         return np.arange(num_rows, dtype=np.int32)
     return np.sort(rng.choice(num_rows, size=int(max_samples), replace=False)).astype(np.int32)
@@ -1110,7 +1074,7 @@ def run_frequency_domain_tsne_all_captures(
     skip_invalid_captures: bool = False,
     figsize: tuple[float, float] = (9.5, 7.0),
     title: str | None = None,
-    show: bool = True,
+    show: bool = True
 ) -> dict[str, Any]:
     capture_frame = captures_df.copy().reset_index(drop=True)
     if capture_frame.empty:
@@ -1151,7 +1115,7 @@ def run_frequency_domain_tsne_all_captures(
                 stride_sec=stride_sec,
                 normalization=normalization,
                 use_log_power=use_log_power,
-                drop_dc=drop_dc,
+                drop_dc=drop_dc
             )
         except Exception as exc:
             failed_row = pd.Series(capture_row).to_dict()
@@ -1187,24 +1151,19 @@ def run_frequency_domain_tsne_all_captures(
         sampled_real_indices = _sample_feature_indices(
             real_features.shape[0],
             max_samples=max_windows_per_capture_per_domain,
-            rng=rng,
+            rng=rng
         )
         sampled_synthetic_indices = _sample_feature_indices(
             synthetic_features.shape[0],
             max_samples=max_windows_per_capture_per_domain,
-            rng=rng,
+            rng=rng
         )
 
-        feature_blocks.extend(
-            [
-                real_features[sampled_real_indices],
-                synthetic_features[sampled_synthetic_indices],
-            ]
-        )
+        feature_blocks.extend([real_features[sampled_real_indices], synthetic_features[sampled_synthetic_indices]])
         label_blocks.extend(
             [
                 np.full(sampled_real_indices.size, DOMAIN_TO_LABEL["real"], dtype=np.int32),
-                np.full(sampled_synthetic_indices.size, DOMAIN_TO_LABEL["synthetic"], dtype=np.int32),
+                np.full(sampled_synthetic_indices.size, DOMAIN_TO_LABEL["synthetic"], dtype=np.int32)
             ]
         )
 
@@ -1225,7 +1184,7 @@ def run_frequency_domain_tsne_all_captures(
             else str(capture_result["capture_row"].get("modality")),
             "stimulus": None
             if pd.isna(capture_result["capture_row"].get("stimulus"))
-            else str(capture_result["capture_row"].get("stimulus")),
+            else str(capture_result["capture_row"].get("stimulus"))
         }
         metadata_frames.extend(
             [
@@ -1233,34 +1192,30 @@ def run_frequency_domain_tsne_all_captures(
                     {
                         **base_metadata,
                         "sample_index_within_capture": sampled_real_indices.astype(np.int32),
-                        "sampled_domain": "real",
+                        "sampled_domain": "real"
                     }
                 ),
                 pd.DataFrame(
                     {
                         **base_metadata,
                         "sample_index_within_capture": sampled_synthetic_indices.astype(np.int32),
-                        "sampled_domain": "synthetic",
+                        "sampled_domain": "synthetic"
                     }
-                ),
+                )
             ]
         )
 
         capture_summary_rows.append(
             {
                 **base_metadata,
-                "aligned_sampling_frequency_hz": float(
-                    capture_result["alignment_summary_df"].loc[0, "aligned_sampling_frequency_hz"]
-                ),
-                "window_size_samples": int(
-                    capture_result["window_summary_df"].loc[0, "window_size_samples"]
-                ),
+                "aligned_sampling_frequency_hz": float(capture_result["alignment_summary_df"].loc[0, "aligned_sampling_frequency_hz"]),
+                "window_size_samples": int(capture_result["window_summary_df"].loc[0, "window_size_samples"]),
                 "window_duration_sec": capture_result["window_summary_df"].loc[0, "window_duration_sec"],
                 "real_num_windows_total": int(real_features.shape[0]),
                 "synthetic_num_windows_total": int(synthetic_features.shape[0]),
                 "sampled_real_num_windows": int(sampled_real_indices.size),
                 "sampled_synthetic_num_windows": int(sampled_synthetic_indices.size),
-                "feature_dim": current_feature_dim,
+                "feature_dim": current_feature_dim
             }
         )
 
@@ -1269,18 +1224,18 @@ def run_frequency_domain_tsne_all_captures(
 
     dataset_bundle = {
         "features": np.concatenate(feature_blocks, axis=0).astype(np.float32),
-        "labels": np.concatenate(label_blocks, axis=0).astype(np.int32),
+        "labels": np.concatenate(label_blocks, axis=0).astype(np.int32)
     }
     embedding = fit_tsne_embedding(
         dataset_bundle["features"],
         perplexity=perplexity,
         init=init,
-        random_state=random_state,
+        random_state=random_state
     )
     embedding_df = build_embedding_frame(
         embedding,
         dataset_bundle["labels"],
-        window_size=int(reference_window_size),
+        window_size=int(reference_window_size)
     )
     embedding_metadata_df = pd.concat(metadata_frames, axis=0, ignore_index=True)
     embedding_df = pd.concat([embedding_df, embedding_metadata_df], axis=1)
@@ -1301,7 +1256,7 @@ def run_frequency_domain_tsne_all_captures(
         ax=axis,
         title=title or auto_title,
         point_size=18.0,
-        alpha=0.45,
+        alpha=0.45
     )
     figure.tight_layout()
     if show:
@@ -1320,7 +1275,7 @@ def run_frequency_domain_tsne_all_captures(
             embedding_df,
             category=category_name,
             title=f"2D t-SNE real vs synthetic by {category_name}",
-            point_size=18.0,
+            point_size=18.0
         )
         class_highlight_figures[category_name] = class_figure
         class_highlight_axes[category_name] = class_axes
@@ -1339,13 +1294,11 @@ def run_frequency_domain_tsne_all_captures(
                 "num_real_points": int((embedding_df["domain"] == "real").sum()),
                 "num_synthetic_points": int((embedding_df["domain"] == "synthetic").sum()),
                 "max_windows_per_capture_per_domain": (
-                    None
-                    if max_windows_per_capture_per_domain is None
-                    else int(max_windows_per_capture_per_domain)
+                    None if max_windows_per_capture_per_domain is None else int(max_windows_per_capture_per_domain)
                 ),
                 "window_size_samples": int(reference_window_size),
                 "window_duration_sec": reference_window_duration_sec,
-                "feature_dim": int(reference_feature_dim),
+                "feature_dim": int(reference_feature_dim)
             }
         ]
     )
@@ -1395,7 +1348,7 @@ def run_frequency_domain_tsne(
     drop_dc: bool = False,
     figsize: tuple[float, float] = (8.5, 6.5),
     title: str | None = None,
-    show: bool = True,
+    show: bool = True
 ) -> dict[str, Any]:
     capture_pair = load_capture_pair(
         captures_df,
@@ -1403,7 +1356,7 @@ def run_frequency_domain_tsne(
         user_id=user_id,
         tag_number=tag_number,
         take_id=take_id,
-        synthetic_filename=synthetic_filename,
+        synthetic_filename=synthetic_filename
     )
     capture_result = _prepare_frequency_domain_tsne_capture(
         capture_pair,
@@ -1422,23 +1375,23 @@ def run_frequency_domain_tsne(
         stride_sec=stride_sec,
         normalization=normalization,
         use_log_power=use_log_power,
-        drop_dc=drop_dc,
+        drop_dc=drop_dc
     )
 
     dataset_bundle = build_frequency_dataset(
         real_features=capture_result["real_frequency_bundle"]["features"],
-        synthetic_features=capture_result["synthetic_frequency_bundle"]["features"],
+        synthetic_features=capture_result["synthetic_frequency_bundle"]["features"]
     )
     embedding = fit_tsne_embedding(
         dataset_bundle["features"],
         perplexity=perplexity,
         init=init,
-        random_state=random_state,
+        random_state=random_state
     )
     embedding_df = build_embedding_frame(
         embedding,
         dataset_bundle["labels"],
-        window_size=int(capture_result["window_size"]),
+        window_size=int(capture_result["window_size"])
     )
 
     figure, axis = plt.subplots(figsize=figsize)
@@ -1466,5 +1419,5 @@ def run_frequency_domain_tsne(
         "figure": figure,
         "axis": axis,
         "selected_bundle": capture_result["selected_bundle"],
-        "aligned_bundle": capture_result["aligned_bundle"],
+        "aligned_bundle": capture_result["aligned_bundle"]
     }

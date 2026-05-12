@@ -1,4 +1,4 @@
-"""Stage 5.8: estimate a smooth pseudo-global root trajectory."""
+"""Estimate a smooth pseudo-global root trajectory."""
 
 from __future__ import annotations
 
@@ -126,10 +126,10 @@ def run_root_trajectory_estimator(
 def _validate_metric_pose_sequence(sequence: PoseSequence3D) -> None:
     joint_names = [str(name) for name in sequence.joint_names_3d]
     if joint_names != list(IMUGPT_22_JOINT_NAMES):
-        raise ValueError("Root estimator expects stage-5.7 output ordered as IMUGPT_22_JOINT_NAMES.")
+        raise ValueError("Root estimator expects output ordered as IMUGPT_22_JOINT_NAMES.")
     if str(sequence.coordinate_space) != BODY_METRIC_LOCAL_COORDINATE_SPACE:
         raise ValueError(
-            "Root estimator expects stage-5.7 output in the body_metric_local coordinate space."
+            "Root estimator expects output in the body_metric_local coordinate space."
         )
     points = np.asarray(sequence.joint_positions_xyz, dtype=np.float32)
     confidence = np.asarray(sequence.joint_confidence, dtype=np.float32)
@@ -138,7 +138,7 @@ def _validate_metric_pose_sequence(sequence: PoseSequence3D) -> None:
     if confidence.shape != points.shape[:2]:
         raise ValueError("Root estimator expects joint_confidence with shape [T, 22].")
     if not np.isfinite(points).all():
-        raise ValueError("Root estimator expects finite stage-5.7 metric positions.")
+        raise ValueError("Root estimator expects finite metric positions.")
 
 
 def _compute_root_statistics(root_translation: np.ndarray) -> Dict[str, float]:

@@ -44,7 +44,7 @@ def fit_sensor_subject_transforms(
                 subject_id=str(subject_id),
                 sensor_name=str(sensor_name),
                 paired_sequences=subject_pairs,
-                config=config,
+                config=config
             )
             transforms[(str(subject_id), str(sensor_name))] = transform
     return transforms
@@ -55,7 +55,7 @@ def _fit_single_sensor_subject_transform(
     subject_id: str,
     sensor_name: str,
     paired_sequences: Sequence[tuple[IMUSequence, IMUSequence]],
-    config: AlignmentConfig,
+    config: AlignmentConfig
 ) -> SensorSubjectTransform:
     rotation_virtual_blocks: list[np.ndarray] = []
     rotation_real_blocks: list[np.ndarray] = []
@@ -70,10 +70,7 @@ def _fit_single_sensor_subject_transform(
     total_gyro_samples = 0
 
     for real_sequence, virtual_sequence in paired_sequences:
-        aligned_real_sequence, aligned_virtual_sequence, timebase_summary = prepare_sequences_for_alignment(
-            real_sequence,
-            virtual_sequence,
-        )
+        aligned_real_sequence, aligned_virtual_sequence, timebase_summary = prepare_sequences_for_alignment(real_sequence, virtual_sequence)
         real_index = _sensor_index(aligned_real_sequence.sensor_names, sensor_name)
         virtual_index = _sensor_index(aligned_virtual_sequence.sensor_names, sensor_name)
         if real_index is None or virtual_index is None:
@@ -86,17 +83,17 @@ def _fit_single_sensor_subject_transform(
             virt_acc=np.asarray(aligned_virtual_sequence.acc[:, virtual_index, :], dtype=np.float32),
             real_gyro=np.asarray(aligned_real_sequence.gyro[:, real_index, :], dtype=np.float32),
             virt_gyro=np.asarray(aligned_virtual_sequence.gyro[:, virtual_index, :], dtype=np.float32),
-            config=config,
+            config=config
         )
         aligned_real_acc, aligned_virt_acc = align_streams_with_lag(
             np.asarray(aligned_real_sequence.acc[:, real_index, :], dtype=np.float32),
             np.asarray(aligned_virtual_sequence.acc[:, virtual_index, :], dtype=np.float32),
-            lag_samples,
+            lag_samples
         )
         aligned_real_gyro, aligned_virt_gyro = align_streams_with_lag(
             np.asarray(aligned_real_sequence.gyro[:, real_index, :], dtype=np.float32),
             np.asarray(aligned_virtual_sequence.gyro[:, virtual_index, :], dtype=np.float32),
-            lag_samples,
+            lag_samples
         )
 
         valid_acc_mask = _finite_mask(aligned_real_acc, aligned_virt_acc)
@@ -107,13 +104,13 @@ def _fit_single_sensor_subject_transform(
             real_gyro=aligned_real_gyro,
             virt_gyro=aligned_virt_gyro,
             valid_mask=valid_acc_mask,
-            config=config,
+            config=config
         )
         gyro_mask = _select_gyro_samples(
             real_gyro=aligned_real_gyro,
             virt_gyro=aligned_virt_gyro,
             valid_mask=valid_gyro_mask,
-            config=config,
+            config=config
         )
 
         if bool(config.use_acc) and int(np.count_nonzero(acc_mask)) > 0:
@@ -142,7 +139,7 @@ def _fit_single_sensor_subject_transform(
                 "num_gyro_samples": int(np.count_nonzero(gyro_mask)),
                 "num_acc_valid_frames": int(np.count_nonzero(residual_acc_mask)),
                 "num_gyro_valid_frames": int(np.count_nonzero(residual_gyro_mask)),
-                "timebase_summary": dict(timebase_summary),
+                "timebase_summary": dict(timebase_summary)
             }
         )
         fitted_capture_ids.append(str(real_sequence.capture_id))
@@ -164,7 +161,7 @@ def _fit_single_sensor_subject_transform(
             f"Low sample count while fitting subject '{subject_id}' sensor '{sensor_name}': "
             f"{virtual_vectors.shape[0]} samples.",
             RuntimeWarning,
-            stacklevel=2,
+            stacklevel=2
         )
 
     rotation = estimate_rotation_procrustes(virtual_vectors, real_vectors)
@@ -199,7 +196,7 @@ def _fit_single_sensor_subject_transform(
             residual_real_acc,
             use_bias=bool(config.use_bias),
             use_scale=bool(config.use_scale),
-            ridge_lambda=float(config.ridge_lambda),
+            ridge_lambda=float(config.ridge_lambda)
         )
     if residual_real_gyro is not None and residual_virtual_gyro is not None and (
         bool(config.use_bias) or bool(config.use_scale)
@@ -210,7 +207,7 @@ def _fit_single_sensor_subject_transform(
             residual_real_gyro,
             use_bias=bool(config.use_bias),
             use_scale=bool(config.use_scale),
-            ridge_lambda=float(config.ridge_lambda),
+            ridge_lambda=float(config.ridge_lambda)
         )
 
     if residual_real_acc is not None or residual_real_gyro is not None:
@@ -226,13 +223,13 @@ def _fit_single_sensor_subject_transform(
             real_acc=residual_real_acc,
             estimate_acc=before_acc,
             real_gyro=residual_real_gyro,
-            estimate_gyro=before_gyro,
+            estimate_gyro=before_gyro
         )
         calibration_metrics_after = summarize_alignment_metrics(
             real_acc=residual_real_acc,
             estimate_acc=after_acc,
             real_gyro=residual_real_gyro,
-            estimate_gyro=after_gyro,
+            estimate_gyro=after_gyro
         )
 
     singular_values = np.linalg.svd(real_vectors.T @ virtual_vectors, compute_uv=False)
@@ -249,7 +246,7 @@ def _fit_single_sensor_subject_transform(
         "condition_number": None if not np.isfinite(condition_number) else float(condition_number),
         "det_rotation": float(np.linalg.det(rotation)),
         "calibration_metrics_before": calibration_metrics_before,
-        "calibration_metrics_after": calibration_metrics_after,
+        "calibration_metrics_after": calibration_metrics_after
     }
     return SensorSubjectTransform(
         subject_id=str(subject_id),
@@ -260,14 +257,11 @@ def _fit_single_sensor_subject_transform(
         acc_scale=acc_scale,
         gyro_scale=gyro_scale,
         fitted_capture_ids=fitted_capture_ids,
-        diagnostics=diagnostics,
+        diagnostics=diagnostics
     )
 
 
-def _pair_sequences(
-    real_sequences: Sequence[IMUSequence],
-    virtual_sequences: Sequence[IMUSequence],
-) -> list[tuple[IMUSequence, IMUSequence]]:
+def _pair_sequences(real_sequences: Sequence[IMUSequence], virtual_sequences: Sequence[IMUSequence]) -> list[tuple[IMUSequence, IMUSequence]]:
     if len(real_sequences) == 0 or len(virtual_sequences) == 0:
         raise AlignmentFittingError("real_sequences and virtual_sequences must both be non-empty.")
 
@@ -306,9 +300,7 @@ def _index_sequences(sequences: Sequence[IMUSequence], label: str) -> dict[tuple
     return indexed
 
 
-def _collect_common_sensor_names(
-    paired_sequences: Sequence[tuple[IMUSequence, IMUSequence]],
-) -> list[str]:
+def _collect_common_sensor_names(paired_sequences: Sequence[tuple[IMUSequence, IMUSequence]]) -> list[str]:
     sensor_sets = [set(real_sequence.sensor_names) for real_sequence, _ in paired_sequences]
     common_names = set.intersection(*sensor_sets)
     return sorted(str(name) for name in common_names)
@@ -336,20 +328,12 @@ def _estimate_capture_lag(
     return estimate_time_lag(real_gyro, virt_gyro, int(config.max_lag_samples), str(config.lag_signal))
 
 
-def _select_gyro_samples(
-    *,
-    real_gyro: np.ndarray,
-    virt_gyro: np.ndarray,
-    valid_mask: np.ndarray,
-    config: AlignmentConfig,
-) -> np.ndarray:
+def _select_gyro_samples(*, real_gyro: np.ndarray, virt_gyro: np.ndarray, valid_mask: np.ndarray, config: AlignmentConfig) -> np.ndarray:
     if not bool(config.use_gyro):
         return np.zeros_like(valid_mask, dtype=bool)
     real_norm = np.linalg.norm(real_gyro, axis=1)
     virt_norm = np.linalg.norm(virt_gyro, axis=1)
-    informative = (real_norm >= float(config.min_motion_norm_gyro)) & (
-        virt_norm >= float(config.min_motion_norm_gyro)
-    )
+    informative = (real_norm >= float(config.min_motion_norm_gyro)) & (virt_norm >= float(config.min_motion_norm_gyro))
     return np.asarray(valid_mask & informative, dtype=bool)
 
 

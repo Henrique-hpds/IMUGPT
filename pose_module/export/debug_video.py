@@ -11,23 +11,13 @@ import numpy as np
 from pose_module.interfaces import MOTIONBERT_17_PARENT_INDICES
 
 
-def resolve_debug_overlay_path(
-    output_dir: str | Path,
-    *,
-    filename: str = "debug_overlay.mp4",
-    enabled: bool = True,
-) -> Optional[Path]:
+def resolve_debug_overlay_path(output_dir: str | Path, *, filename: str = "debug_overlay.mp4", enabled: bool = True) -> Optional[Path]:
     if not bool(enabled):
         return None
     return Path(output_dir) / str(filename)
 
 
-def resolve_debug_overlay_variant_path(
-    output_dir: str | Path,
-    *,
-    variant: str,
-    enabled: bool = True,
-) -> Optional[Path]:
+def resolve_debug_overlay_variant_path(output_dir: str | Path, *, variant: str, enabled: bool = True) -> Optional[Path]:
     if not bool(enabled):
         return None
     safe_variant = str(variant).strip().replace(" ", "_")
@@ -88,14 +78,14 @@ def render_pose_overlay_video(
                     line_color=line_color,
                     joint_color=joint_color,
                     bbox_xywh=current_bbox,
-                    bbox_color=bbox_color,
+                    bbox_color=bbox_color
                 )
                 if encoder is None:
                     encoder = _open_ffmpeg_encoder(
                         output_path=output_path,
                         width=int(overlay_frame.shape[1]),
                         height=int(overlay_frame.shape[0]),
-                        fps=float(target_fps),
+                        fps=float(target_fps)
                     )
                 assert encoder.stdin is not None
                 encoder.stdin.write(overlay_frame.astype(np.uint8, copy=False).tobytes())
@@ -187,7 +177,7 @@ def render_pose3d_side_by_side_video(
                         joint_confidence_3d,
                         width=int(frame_rgb.shape[1]),
                         height=int(frame_rgb.shape[0]),
-                        coordinate_space=str(coordinate_space),
+                        coordinate_space=str(coordinate_space)
                     )
 
                 left_panel = frame_rgb.copy()
@@ -202,7 +192,7 @@ def render_pose3d_side_by_side_video(
                     line_color=line_color_2d,
                     joint_color=joint_color_2d,
                     bbox_xywh=current_bbox,
-                    bbox_color=bbox_color,
+                    bbox_color=bbox_color
                 )
 
                 right_panel = np.full_like(frame_rgb, fill_value=np.asarray([18, 20, 28], dtype=np.uint8))
@@ -211,7 +201,7 @@ def render_pose3d_side_by_side_video(
                     projected_points_3d[selected_position],
                     projected_depth_3d[selected_position],
                     joint_confidence_3d[selected_position],
-                    skeleton_edges_3d,
+                    skeleton_edges_3d
                 )
 
                 combined_frame = np.concatenate((left_panel, right_panel), axis=1)
@@ -220,7 +210,7 @@ def render_pose3d_side_by_side_video(
                         output_path=output_path,
                         width=int(combined_frame.shape[1]),
                         height=int(combined_frame.shape[0]),
-                        fps=float(target_fps),
+                        fps=float(target_fps)
                     )
                 assert encoder.stdin is not None
                 encoder.stdin.write(combined_frame.astype(np.uint8, copy=False).tobytes())
@@ -265,7 +255,7 @@ def _resolve_skeleton_edges(joint_names: Sequence[str]) -> list[tuple[int, int]]
         "left_knee",
         "right_knee",
         "left_ankle",
-        "right_ankle",
+        "right_ankle"
     ]:
         return [
             (5, 6),
@@ -283,7 +273,7 @@ def _resolve_skeleton_edges(joint_names: Sequence[str]) -> list[tuple[int, int]]
             (0, 1),
             (0, 2),
             (1, 3),
-            (2, 4),
+            (2, 4)
         ]
 
     joint_name_to_index = {name: index for index, name in enumerate(normalized_joint_names)}
@@ -304,7 +294,7 @@ def _resolve_skeleton_edges(joint_names: Sequence[str]) -> list[tuple[int, int]]
         "left_elbow",
         "right_elbow",
         "left_wrist",
-        "right_wrist",
+        "right_wrist"
     ]
     if all(name in joint_name_to_index for name in motionbert_expected):
         edges = []
@@ -324,11 +314,7 @@ def _overlay_palette(overlay_variant: str) -> tuple[tuple[int, int, int], tuple[
     return (80, 255, 120), (255, 220, 80), (255, 120, 120)
 
 
-def _resolve_3d_skeleton_edges(
-    *,
-    joint_names: Sequence[str],
-    skeleton_parents: Sequence[int] | None,
-) -> list[tuple[int, int]]:
+def _resolve_3d_skeleton_edges(*, joint_names: Sequence[str], skeleton_parents: Sequence[int] | None) -> list[tuple[int, int]]:
     if skeleton_parents is not None:
         edges = []
         for child_index, parent_index in enumerate(skeleton_parents):
@@ -346,7 +332,7 @@ def _project_pose3d_sequence_to_panel(
     *,
     width: int,
     height: int,
-    coordinate_space: str = "camera",
+    coordinate_space: str = "camera"
 ) -> tuple[np.ndarray, np.ndarray]:
     points_xyz = np.asarray(joint_positions_xyz, dtype=np.float32)
     confidence = np.asarray(joint_confidence, dtype=np.float32)
@@ -415,9 +401,9 @@ def _rotation_matrix_x(angle_rad: float) -> np.ndarray:
         [
             [1.0, 0.0, 0.0],
             [0.0, np.cos(angle), -np.sin(angle)],
-            [0.0, np.sin(angle), np.cos(angle)],
+            [0.0, np.sin(angle), np.cos(angle)]
         ],
-        dtype=np.float32,
+        dtype=np.float32
     )
 
 
@@ -427,9 +413,9 @@ def _rotation_matrix_y(angle_rad: float) -> np.ndarray:
         [
             [np.cos(angle), 0.0, np.sin(angle)],
             [0.0, 1.0, 0.0],
-            [-np.sin(angle), 0.0, np.cos(angle)],
+            [-np.sin(angle), 0.0, np.cos(angle)]
         ],
-        dtype=np.float32,
+        dtype=np.float32
     )
 
 
@@ -444,7 +430,7 @@ def _open_ffmpeg_decoder(video_path: str | Path) -> subprocess.Popen:
         "image2pipe",
         "-vcodec",
         "ppm",
-        "-",
+        "-"
     ]
     try:
         return subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
@@ -452,13 +438,7 @@ def _open_ffmpeg_decoder(video_path: str | Path) -> subprocess.Popen:
         raise RuntimeError("ffmpeg_not_found_for_debug_render") from exc
 
 
-def _open_ffmpeg_encoder(
-    *,
-    output_path: Path,
-    width: int,
-    height: int,
-    fps: float,
-) -> subprocess.Popen:
+def _open_ffmpeg_encoder(*, output_path: Path, width: int, height: int, fps: float) -> subprocess.Popen:
     command = [
         "ffmpeg",
         "-y",
@@ -481,7 +461,7 @@ def _open_ffmpeg_encoder(
         "libx264",
         "-pix_fmt",
         "yuv420p",
-        str(output_path.resolve()),
+        str(output_path.resolve())
     ]
     try:
         return subprocess.Popen(command, stdin=subprocess.PIPE, stderr=subprocess.PIPE)
@@ -563,7 +543,7 @@ def _draw_pose_overlay(
             int(round(x + width)),
             int(round(y + height)),
             color=bbox_color,
-            thickness=2,
+            thickness=2
         )
 
     valid_joint_mask = np.isfinite(joints_xy).all(axis=1) & (joint_confidence > 0.0)
@@ -579,7 +559,7 @@ def _draw_pose_overlay(
             int(round(end_point[0])),
             int(round(end_point[1])),
             color=line_color,
-            thickness=2,
+            thickness=2
         )
 
     for joint_index, joint_xy in enumerate(joints_xy):
@@ -590,7 +570,7 @@ def _draw_pose_overlay(
             int(round(joint_xy[0])),
             int(round(joint_xy[1])),
             radius=3,
-            color=joint_color,
+            color=joint_color
         )
 
 
@@ -599,18 +579,10 @@ def _draw_pose3d_panel(
     joints_xy: np.ndarray,
     joint_depth: np.ndarray,
     joint_confidence: np.ndarray,
-    skeleton_edges: Sequence[tuple[int, int]],
+    skeleton_edges: Sequence[tuple[int, int]]
 ) -> None:
     height, width = frame_rgb.shape[:2]
-    _draw_rectangle(
-        frame_rgb,
-        1,
-        1,
-        width - 2,
-        height - 2,
-        color=(42, 48, 64),
-        thickness=1,
-    )
+    _draw_rectangle(frame_rgb, 1, 1, width - 2, height - 2, color=(42, 48, 64), thickness=1)
 
     valid_joint_mask = np.isfinite(joints_xy).all(axis=1) & np.isfinite(joint_depth) & (joint_confidence > 0.0)
     if not np.any(valid_joint_mask):
@@ -632,7 +604,7 @@ def _draw_pose3d_panel(
         depth_ratio = _normalize_depth(
             float(joint_depth[parent_index] + joint_depth[child_index]) * 0.5,
             min_depth=min_depth,
-            max_depth=max_depth,
+            max_depth=max_depth
         )
         _draw_line(
             frame_rgb,
@@ -641,7 +613,7 @@ def _draw_pose3d_panel(
             int(round(joints_xy[child_index, 0])),
             int(round(joints_xy[child_index, 1])),
             color=_blend_depth_color(depth_ratio, far_color=(88, 120, 255), near_color=(255, 140, 92)),
-            thickness=2,
+            thickness=2
         )
 
     joint_order = np.argsort(joint_depth[valid_joint_mask])
@@ -651,14 +623,14 @@ def _draw_pose3d_panel(
         depth_ratio = _normalize_depth(
             float(joint_depth[joint_index]),
             min_depth=min_depth,
-            max_depth=max_depth,
+            max_depth=max_depth
         )
         _draw_circle(
             frame_rgb,
             int(round(joints_xy[joint_index, 0])),
             int(round(joints_xy[joint_index, 1])),
             radius=4,
-            color=_blend_depth_color(depth_ratio, far_color=(170, 210, 255), near_color=(255, 222, 120)),
+            color=_blend_depth_color(depth_ratio, far_color=(170, 210, 255), near_color=(255, 222, 120))
         )
 
 
@@ -668,12 +640,7 @@ def _normalize_depth(value: float, *, min_depth: float, max_depth: float) -> flo
     return float((value - min_depth) / (max_depth - min_depth))
 
 
-def _blend_depth_color(
-    depth_ratio: float,
-    *,
-    far_color: tuple[int, int, int],
-    near_color: tuple[int, int, int],
-) -> tuple[int, int, int]:
+def _blend_depth_color(depth_ratio: float, *, far_color: tuple[int, int, int], near_color: tuple[int, int, int]) -> tuple[int, int, int]:
     ratio = float(np.clip(depth_ratio, 0.0, 1.0))
     far_rgb = np.asarray(far_color, dtype=np.float32)
     near_rgb = np.asarray(near_color, dtype=np.float32)
@@ -681,53 +648,22 @@ def _blend_depth_color(
     return tuple(int(round(value)) for value in blended.tolist())
 
 
-def _draw_rectangle(
-    frame_rgb: np.ndarray,
-    x1: int,
-    y1: int,
-    x2: int,
-    y2: int,
-    *,
-    color: tuple[int, int, int],
-    thickness: int,
-) -> None:
+def _draw_rectangle(frame_rgb: np.ndarray, x1: int, y1: int, x2: int, y2: int, *, color: tuple[int, int, int], thickness: int):
     _draw_line(frame_rgb, x1, y1, x2, y1, color=color, thickness=thickness)
     _draw_line(frame_rgb, x2, y1, x2, y2, color=color, thickness=thickness)
     _draw_line(frame_rgb, x2, y2, x1, y2, color=color, thickness=thickness)
     _draw_line(frame_rgb, x1, y2, x1, y1, color=color, thickness=thickness)
 
 
-def _draw_line(
-    frame_rgb: np.ndarray,
-    x1: int,
-    y1: int,
-    x2: int,
-    y2: int,
-    *,
-    color: tuple[int, int, int],
-    thickness: int,
-) -> None:
+def _draw_line(frame_rgb: np.ndarray, x1: int, y1: int, x2: int, y2: int, *, color: tuple[int, int, int], thickness: int) -> None:
     num_steps = int(max(abs(x2 - x1), abs(y2 - y1), 1))
     x_values = np.linspace(x1, x2, num_steps + 1)
     y_values = np.linspace(y1, y2, num_steps + 1)
     for x_value, y_value in zip(x_values, y_values):
-        _draw_circle(
-            frame_rgb,
-            int(round(x_value)),
-            int(round(y_value)),
-            radius=max(int(thickness) - 1, 1),
-            color=color,
-        )
+        _draw_circle( frame_rgb, int(round(x_value)), int(round(y_value)), radius=max(int(thickness) - 1, 1), color=color)
 
 
-def _draw_circle(
-    frame_rgb: np.ndarray,
-    center_x: int,
-    center_y: int,
-    *,
-    radius: int,
-    color: tuple[int, int, int],
-) -> None:
+def _draw_circle(frame_rgb: np.ndarray, center_x: int, center_y: int, *, radius: int, color: tuple[int, int, int]) -> None:
     height, width = frame_rgb.shape[:2]
     x_min = max(0, int(center_x) - int(radius))
     x_max = min(width - 1, int(center_x) + int(radius))

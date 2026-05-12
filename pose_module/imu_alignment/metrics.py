@@ -71,7 +71,7 @@ def summarize_alignment_metrics(
     real_acc: np.ndarray | None = None,
     estimate_acc: np.ndarray | None = None,
     real_gyro: np.ndarray | None = None,
-    estimate_gyro: np.ndarray | None = None,
+    estimate_gyro: np.ndarray | None = None
 ) -> dict[str, Any]:
     """Summarize per-modality alignment metrics in a JSON-friendly structure."""
 

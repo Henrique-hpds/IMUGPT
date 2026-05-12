@@ -17,12 +17,7 @@ _DEFAULT_FPS = 20.0
 _EPSILON = 1e-6
 
 
-def export_pose_sequence3d_to_bvh(
-    sequence: PoseSequence3D,
-    output_path: str | Path,
-    *,
-    ground_to_floor: bool = True,
-) -> Dict[str, Any]:
+def export_pose_sequence3d_to_bvh(sequence: PoseSequence3D, output_path: str | Path, *, ground_to_floor: bool = True) -> Dict[str, Any]:
     """Export an IMUGPT22 pose sequence to BVH for interactive viewing."""
 
     joint_names, parents, root_index = _validate_bvh_export_sequence(sequence)
@@ -46,7 +41,7 @@ def export_pose_sequence3d_to_bvh(
         parents,
         children,
         traversal_order,
-        root_index=root_index,
+        root_index=root_index
     )
     fps = _resolve_sequence_fps(sequence)
     _write_bvh_file(
@@ -59,7 +54,7 @@ def export_pose_sequence3d_to_bvh(
         local_rotations_zyx=local_rotations_zyx,
         traversal_order=traversal_order,
         root_index=root_index,
-        frame_time_sec=1.0 / float(fps),
+        frame_time_sec=1.0 / float(fps)
     )
 
     return {
@@ -69,7 +64,7 @@ def export_pose_sequence3d_to_bvh(
         "ground_to_floor": bool(ground_to_floor),
         "ground_offset_m": float(ground_offset_m),
         "joint_format": list(joint_names),
-        "coordinate_space": str(sequence.coordinate_space),
+        "coordinate_space": str(sequence.coordinate_space)
     }
 
 
@@ -79,29 +74,25 @@ def main(argv: Sequence[str] | None = None) -> int:
         "--pose3d-npz",
         type=Path,
         required=True,
-        help="Path to the input pose3d.npz file.",
+        help="Path to the input pose3d.npz file."
     )
     parser.add_argument(
         "--output-bvh",
         type=Path,
         required=True,
-        help="Path to the output BVH file.",
+        help="Path to the output BVH file."
     )
     parser.add_argument(
         "--no-ground-to-floor",
         action="store_true",
-        help="Disable vertical offset normalization that places the lowest point on the floor.",
+        help="Disable vertical offset normalization that places the lowest point on the floor."
     )
     args = parser.parse_args(list(argv) if argv is not None else None)
 
     with np.load(args.pose3d_npz, allow_pickle=False) as payload:
         sequence = PoseSequence3D.from_npz_payload(payload)
 
-    artifacts = export_pose_sequence3d_to_bvh(
-        sequence,
-        args.output_bvh,
-        ground_to_floor=bool(not args.no_ground_to_floor),
-    )
+    artifacts = export_pose_sequence3d_to_bvh(sequence, args.output_bvh, ground_to_floor=bool(not args.no_ground_to_floor))
     print(json.dumps(artifacts, indent=2, ensure_ascii=True))
     return 0
 
@@ -299,7 +290,7 @@ def _align_single_vector(source_vector: np.ndarray, target_vector: np.ndarray) -
         [
             [0.0, -cross_product[2], cross_product[1]],
             [cross_product[2], 0.0, -cross_product[0]],
-            [-cross_product[1], cross_product[0], 0.0],
+            [-cross_product[1], cross_product[0], 0.0]
         ],
         dtype=np.float64,
     )
@@ -338,7 +329,7 @@ def _write_bvh_file(
     local_rotations_zyx: np.ndarray,
     traversal_order: Sequence[int],
     root_index: int,
-    frame_time_sec: float,
+    frame_time_sec: float
 ) -> None:
     with output_path.open("w", encoding="utf-8") as handle:
         handle.write("HIERARCHY\n")
@@ -349,7 +340,7 @@ def _write_bvh_file(
             parents=parents,
             children=children,
             offsets=offsets,
-            indent="",
+            indent=""
         )
         handle.write("MOTION\n")
         handle.write(f"Frames: {int(root_positions.shape[0])}\n")
@@ -371,7 +362,7 @@ def _write_joint_hierarchy(
     parents: Sequence[int],
     children: Sequence[Sequence[int]],
     offsets: np.ndarray,
-    indent: str,
+    indent: str
 ) -> None:
     joint_label = "ROOT" if int(parents[joint_index]) == -1 else "JOINT"
     handle.write(f"{indent}{joint_label} {joint_names[joint_index]}\n")
@@ -414,10 +405,7 @@ def _build_end_site_offset(offsets: np.ndarray, joint_index: int, parents: Seque
         parent_offset = offsets[joint_index]
         parent_norm = float(np.linalg.norm(parent_offset))
         if parent_norm > _EPSILON:
-            return (parent_offset / np.float32(parent_norm) * np.float32(parent_norm * 0.35)).astype(
-                np.float32,
-                copy=False,
-            )
+            return (parent_offset / np.float32(parent_norm) * np.float32(parent_norm * 0.35)).astype(np.float32, copy=False)
     return np.asarray([0.0, 0.05, 0.0], dtype=np.float32)
 
 

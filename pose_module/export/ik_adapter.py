@@ -1,4 +1,4 @@
-"""Stage 5.9: adapt pseudo-global IMUGPT22 poses to an IK-style contract."""
+"""Adapt pseudo-global IMUGPT22 poses to an IK-style contract."""
 
 from __future__ import annotations
 
@@ -55,7 +55,7 @@ def run_ik(
         fps_original=fps_original,
         frame_indices=frame_indices,
         timestamps_sec=timestamps_sec,
-        root_translation_m=root_translation_m,
+        root_translation_m=root_translation_m
     )
 
     positions = metadata["joint_positions_global_m"]
@@ -72,14 +72,14 @@ def run_ik(
         parents=parents,
         children=children,
         traversal_order=traversal_order,
-        root_index=root_index,
+        root_index=root_index
     )
     local_joint_rotations = _rotation_matrices_to_wxyz_quaternions(local_rotation_matrices)
     reconstructed_positions = _forward_kinematics_positions(
         local_rotation_matrices=local_rotation_matrices,
         root_translation_m=root_translation,
         joint_offsets_m=offsets,
-        parents=parents,
+        parents=parents
     )
     reconstruction_errors = np.linalg.norm(reconstructed_positions - positions, axis=2)
     reconstruction_error_mean_m = float(np.mean(reconstruction_errors))
@@ -88,9 +88,7 @@ def run_ik(
     ik_sequence = IKSequence(
         clip_id=str(metadata["clip_id"]),
         fps=None if metadata["fps"] is None else float(metadata["fps"]),
-        fps_original=(
-            None if metadata["fps_original"] is None else float(metadata["fps_original"])
-        ),
+        fps_original=(None if metadata["fps_original"] is None else float(metadata["fps_original"])),
         joint_names_3d=list(joint_names),
         local_joint_rotations=local_joint_rotations.astype(np.float32, copy=False),
         root_translation_m=root_translation.astype(np.float32, copy=False),
@@ -99,21 +97,21 @@ def run_ik(
         frame_indices=np.asarray(metadata["frame_indices"], dtype=np.int32),
         timestamps_sec=np.asarray(metadata["timestamps_sec"], dtype=np.float32),
         source=str(metadata["source"]),
-        rotation_representation="quaternion_wxyz",
+        rotation_representation="quaternion_wxyz"
     )
 
     quality_report = _build_ik_quality_report(
         ik_sequence=ik_sequence,
         reconstruction_error_mean_m=reconstruction_error_mean_m,
         reconstruction_error_max_m=reconstruction_error_max_m,
-        reconstruction_warning_m=float(reconstruction_warning_m),
+        reconstruction_warning_m=float(reconstruction_warning_m)
     )
 
     output_dir_path = None if output_dir is None else Path(output_dir)
     artifacts: Dict[str, Any] = {
         "ik_sequence_npz_path": None,
         "ik_report_json_path": None,
-        "ik_bvh_path": None,
+        "ik_bvh_path": None
     }
     if output_dir_path is not None:
         output_dir_path.mkdir(parents=True, exist_ok=True)
@@ -140,7 +138,7 @@ def run_ik(
                 local_rotations_zyx=local_rotations_zyx.astype(np.float32, copy=False),
                 traversal_order=traversal_order,
                 root_index=root_index,
-                frame_time_sec=1.0 / float(metadata["fps_resolved"]),
+                frame_time_sec=1.0 / float(metadata["fps_resolved"])
             )
             artifacts["ik_bvh_path"] = str(bvh_path.resolve())
 
@@ -153,27 +151,23 @@ def run_ik(
         "global_rotation_matrices": global_rotation_matrices.astype(np.float32, copy=False),
         "quality_report": quality_report,
         "artifacts": artifacts,
-        "bvh_path": artifacts["ik_bvh_path"],
+        "bvh_path": artifacts["ik_bvh_path"]
     }
 
 
-def forward_kinematics_from_ik_sequence(
-    ik_sequence: IKSequence,
-) -> Dict[str, np.ndarray]:
+def forward_kinematics_from_ik_sequence(ik_sequence: IKSequence) -> Dict[str, np.ndarray]:
     """Reconstruct global joint positions and orientations from an IKSequence."""
 
-    local_rotation_matrices = _wxyz_quaternions_to_rotation_matrices(
-        np.asarray(ik_sequence.local_joint_rotations, dtype=np.float32)
-    )
+    local_rotation_matrices = _wxyz_quaternions_to_rotation_matrices(np.asarray(ik_sequence.local_joint_rotations, dtype=np.float32))
     global_positions, global_rotations = _forward_kinematics(
         local_rotation_matrices=local_rotation_matrices,
         root_translation_m=np.asarray(ik_sequence.root_translation_m, dtype=np.float32),
         joint_offsets_m=np.asarray(ik_sequence.joint_offsets_m, dtype=np.float32),
-        parents=[int(parent) for parent in ik_sequence.skeleton_parents],
+        parents=[int(parent) for parent in ik_sequence.skeleton_parents]
     )
     return {
         "joint_positions_global_m": global_positions.astype(np.float32, copy=False),
-        "joint_rotation_global_matrices": global_rotations.astype(np.float32, copy=False),
+        "joint_rotation_global_matrices": global_rotations.astype(np.float32, copy=False)
     }
 
 
@@ -229,14 +223,10 @@ def _normalize_ik_inputs(
             if fps_resolved is None or float(fps_resolved) <= 0.0:
                 timestamps_resolved = np.arange(positions.shape[0], dtype=np.float32)
             else:
-                timestamps_resolved = (
-                    np.arange(positions.shape[0], dtype=np.float32) / np.float32(float(fps_resolved))
-                )
+                timestamps_resolved = (np.arange(positions.shape[0], dtype=np.float32) / np.float32(float(fps_resolved)))
         else:
             timestamps_resolved = np.asarray(timestamps_sec, dtype=np.float32)
-        root_translation_resolved = (
-            None if root_translation_m is None else np.asarray(root_translation_m, dtype=np.float32)
-        )
+        root_translation_resolved = (None if root_translation_m is None else np.asarray(root_translation_m, dtype=np.float32))
         source = "pose3d_ik"
 
     if positions.ndim != 3 or positions.shape[-1] != 3:
@@ -274,7 +264,7 @@ def _normalize_ik_inputs(
         timestamps_sec=np.asarray(timestamps_resolved, dtype=np.float32),
         source=str(source),
         coordinate_space="pseudo_global_metric",
-        root_translation_m=root_translation_resolved,
+        root_translation_m=root_translation_resolved
     )
     fps_final = _resolve_sequence_fps(fps_stub_sequence)
     return {
@@ -288,7 +278,7 @@ def _normalize_ik_inputs(
         "frame_indices": np.asarray(frame_indices_resolved, dtype=np.int32),
         "timestamps_sec": np.asarray(timestamps_resolved, dtype=np.float32),
         "root_translation_m": root_translation_resolved.astype(np.float32, copy=False),
-        "source": str(source),
+        "source": str(source)
     }
 
 
@@ -356,13 +346,13 @@ def _forward_kinematics_positions(
     local_rotation_matrices: np.ndarray,
     root_translation_m: np.ndarray,
     joint_offsets_m: np.ndarray,
-    parents: Sequence[int],
+    parents: Sequence[int]
 ) -> np.ndarray:
     positions, _ = _forward_kinematics(
         local_rotation_matrices=local_rotation_matrices,
         root_translation_m=root_translation_m,
         joint_offsets_m=joint_offsets_m,
-        parents=parents,
+        parents=parents
     )
     return positions
 
@@ -372,7 +362,7 @@ def _forward_kinematics(
     local_rotation_matrices: np.ndarray,
     root_translation_m: np.ndarray,
     joint_offsets_m: np.ndarray,
-    parents: Sequence[int],
+    parents: Sequence[int]
 ) -> tuple[np.ndarray, np.ndarray]:
     local_rotations = np.asarray(local_rotation_matrices, dtype=np.float32)
     root_translation = np.asarray(root_translation_m, dtype=np.float32)
@@ -412,7 +402,7 @@ def _build_ik_quality_report(
     ik_sequence: IKSequence,
     reconstruction_error_mean_m: float,
     reconstruction_error_max_m: float,
-    reconstruction_warning_m: float,
+    reconstruction_warning_m: float
 ) -> Dict[str, Any]:
     notes = []
     finite_rotations = np.isfinite(np.asarray(ik_sequence.local_joint_rotations, dtype=np.float32)).all()
@@ -449,11 +439,11 @@ def _build_ik_quality_report(
         "assumptions": [
             "tree_skeleton_with_single_root",
             "positions_are_pseudo_global_metric",
-            "local_rotations_estimated_from_best_fit_bone_alignment",
+            "local_rotations_estimated_from_best_fit_bone_alignment"
         ],
         "limitations": [
             "rest_offsets_are_estimated_from_motion",
-            "leaf_joint_rotations_can_be_ambiguous",
+            "leaf_joint_rotations_can_be_ambiguous"
         ],
-        "notes": list(dict.fromkeys(notes)),
+        "notes": list(dict.fromkeys(notes))
     }

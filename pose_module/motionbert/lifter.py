@@ -1,4 +1,4 @@
-"""Stage 5.5: lift MotionBERT-ready 2D skeletons into a temporal 3D sequence."""
+"""Lift MotionBERT-ready 2D skeletons into a temporal 3D sequence."""
 
 from __future__ import annotations
 
@@ -149,14 +149,12 @@ def run_motionbert_lifter(
     env_name: str = "openmmlab",
     allow_fallback_backend: bool = False,
     image_width: Optional[int] = None,
-    image_height: Optional[int] = None,
+    image_height: Optional[int] = None
 ) -> Dict[str, Any]:
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    requested_backend_name = str(
-        backend_name or ("motionbert_callable_backend" if predictor is not None else DEFAULT_BACKEND_NAME)
-    )
+    requested_backend_name = str(backend_name or ("motionbert_callable_backend" if predictor is not None else DEFAULT_BACKEND_NAME))
     resolved_artifacts = (
         None
         if predictor is not None
@@ -188,16 +186,12 @@ def run_motionbert_lifter(
             sequence,
             job=job,
             predictor=predictor,
-            backend_name=requested_backend_name,
+            backend_name=requested_backend_name
         )
         write_json_file(result["run_report"], job.run_report_path)
         return result
 
-    backend_run = run_motionbert_backend_job(
-        job=job,
-        env_name=str(env_name),
-        output_dir=output_dir,
-    )
+    backend_run = run_motionbert_backend_job(job=job, env_name=str(env_name), output_dir=output_dir)
     if backend_run.get("status") == "ok":
         return {
             "status": str(backend_run["status"]),
@@ -234,12 +228,7 @@ def run_motionbert_lifter(
     return result
 
 
-def run_motionbert_backend_job(
-    *,
-    job: MotionBERTJob,
-    env_name: str,
-    output_dir: str | Path,
-) -> Dict[str, Any]:
+def run_motionbert_backend_job(*, job: MotionBERTJob, env_name: str, output_dir: str | Path) -> Dict[str, Any]:
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     job_json_path = output_dir / "motionbert_backend_job.json"
@@ -645,7 +634,7 @@ def _inference_pose_lifter_model_with_fixed_targets(
     init_default_scope: Callable[..., Any],
     PoseDataSample: Any,
     image_size: tuple[int, int] | None = None,
-    norm_pose_2d: bool = False,
+    norm_pose_2d: bool = False
 ) -> list[Any]:
     """Local copy of MMPose pose-lifter inference with temporal target fix.
 
@@ -714,11 +703,7 @@ def _inference_pose_lifter_model_with_fixed_targets(
             pose_res_copy.append(data_sample_copy)
         pose_results_2d_copy.append(pose_res_copy)
 
-    pose_sequences_2d = collate_pose_sequence(
-        pose_results_2d_copy,
-        with_track_id=True,
-        target_frame=target_idx,
-    )
+    pose_sequences_2d = collate_pose_sequence(pose_results_2d_copy, with_track_id=True, target_frame=target_idx)
     if not pose_sequences_2d:
         return []
 
@@ -773,7 +758,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                 "checkpoint_path": job.checkpoint,
                 "device": str(job.device),
             },
-            "error": str(exc),
+            "error": str(exc)
         }
 
     args.result_json.parent.mkdir(parents=True, exist_ok=True)
@@ -786,7 +771,7 @@ def _run_motionbert_callable_backend(
     *,
     job: MotionBERTJob,
     predictor: Optional[MotionBERTPredictor],
-    backend_name: str,
+    backend_name: str
 ) -> Dict[str, Any]:
     batch = build_motionbert_window_batch(
         sequence,
@@ -794,19 +779,13 @@ def _run_motionbert_callable_backend(
         window_overlap=float(job.window_overlap),
         include_confidence=bool(job.include_confidence),
     )
-    raw_backend_output = (
-        _heuristic_motionbert_predict(batch.inputs) if predictor is None else predictor(batch.inputs)
-    )
+    raw_backend_output = (_heuristic_motionbert_predict(batch.inputs) if predictor is None else predictor(batch.inputs))
     canonical_predictions = canonicalize_motionbert_output(
         raw_backend_output,
         expected_batch_size=batch.num_windows,
         expected_window_size=batch.window_size,
     )
-    fused_predictions = merge_motionbert_window_predictions(
-        canonical_predictions,
-        batch,
-        num_frames=int(sequence.num_frames),
-    )
+    fused_predictions = merge_motionbert_window_predictions( canonical_predictions, batch, num_frames=int(sequence.num_frames))
 
     pose_sequence = PoseSequence3D(
         clip_id=str(sequence.clip_id),
@@ -821,7 +800,7 @@ def _run_motionbert_callable_backend(
         source=f"{sequence.source}_{backend_name}",
         coordinate_space="camera",
         observed_mask=np.asarray(sequence.resolved_observed_mask(), dtype=bool),
-        imputed_mask=np.asarray(sequence.resolved_imputed_mask(), dtype=bool),
+        imputed_mask=np.asarray(sequence.resolved_imputed_mask(), dtype=bool)
     )
 
     np.save(job.raw_keypoints_3d_path, np.asarray(pose_sequence.joint_positions_xyz, dtype=np.float32))
@@ -868,7 +847,7 @@ def _extract_backend_window_predictions(
     results: Sequence[Any],
     *,
     expected_window_size: int,
-    joint_names: Sequence[str] | None = None,
+    joint_names: Sequence[str] | None = None
 ) -> List[np.ndarray]:
     predictions: List[np.ndarray] = []
     for result in results:
@@ -903,10 +882,7 @@ def _extract_backend_window_predictions(
     return predictions
 
 
-def _resolve_lifter_joint_names(
-    dataset_meta: Mapping[str, Any],
-    joint_count: int,
-) -> List[str]:
+def _resolve_lifter_joint_names(dataset_meta: Mapping[str, Any],joint_count: int) -> List[str]:
     keypoint_id2name = dataset_meta.get("keypoint_id2name")
     if isinstance(keypoint_id2name, Mapping) and len(keypoint_id2name) > 0:
         try:
@@ -990,7 +966,7 @@ def _derive_linear_conversion_weights(
     src_joint_count: int,
     src_dataset_name: str,
     dst_dataset_name: str,
-    convert_keypoint_definition: Callable[..., Any],
+    convert_keypoint_definition: Callable[..., Any]
 ) -> np.ndarray:
     if not dst_dataset_name or src_dataset_name == dst_dataset_name:
         return np.eye(src_joint_count, dtype=np.float32)
@@ -1026,7 +1002,7 @@ def _build_lifter_input_conversion(
     *,
     src_joint_names: Sequence[str],
     dst_dataset_name: str,
-    convert_keypoint_definition: Callable[..., Any],
+    convert_keypoint_definition: Callable[..., Any]
 ) -> tuple[tuple[str, ...], np.ndarray]:
     src_dataset_name = _infer_sequence_dataset_name(src_joint_names)
     dst_dataset_name_normalized = _normalize_lifter_dataset_name(dst_dataset_name)
@@ -1086,12 +1062,7 @@ def _convert_mask(mask_src: np.ndarray, weights: np.ndarray) -> np.ndarray:
     return out
 
 
-def _convert_confidence(
-    confidence_src: np.ndarray,
-    *,
-    weights: np.ndarray,
-    converted_mask: np.ndarray,
-) -> np.ndarray:
+def _convert_confidence(confidence_src: np.ndarray, *, weights: np.ndarray, converted_mask: np.ndarray) -> np.ndarray:
     confidence = np.asarray(confidence_src, dtype=np.float32).reshape(-1)
     matrix = np.asarray(weights, dtype=np.float32)
     if confidence.shape[0] != matrix.shape[1]:
@@ -1134,7 +1105,7 @@ def _build_pose_lifter_2d_sample(
     keypoints: np.ndarray,
     confidence: np.ndarray,
     mask: np.ndarray,
-    track_id: int,
+    track_id: int
 ) -> Any:
     sample = PoseDataSample()
     pred_instances = InstanceData()
@@ -1213,10 +1184,7 @@ def _resolve_image_size_hw(*, job: MotionBERTJob, sequence: PoseSequence2D) -> t
     return _DEFAULT_IMAGE_SIZE_HW
 
 
-def _fill_missing_keypoints_for_lifter(
-    keypoints_xy: np.ndarray,
-    confidence: np.ndarray,
-) -> np.ndarray:
+def _fill_missing_keypoints_for_lifter(keypoints_xy: np.ndarray, confidence: np.ndarray) -> np.ndarray:
     points = np.asarray(keypoints_xy, dtype=np.float32)
     conf = np.asarray(confidence, dtype=np.float32)
     if points.ndim != 3 or points.shape[-1] != 2:
@@ -1241,11 +1209,7 @@ def _fill_missing_keypoints_for_lifter(
             if not np.any(dim_valid):
                 filled[:, joint_index, dim_index] = 0.0
                 continue
-            filled[:, joint_index, dim_index] = np.interp(
-                frame_axis,
-                frame_axis[dim_valid],
-                dim_values[dim_valid],
-            )
+            filled[:, joint_index, dim_index] = np.interp(frame_axis, frame_axis[dim_valid], dim_values[dim_valid])
     return filled.astype(np.float32, copy=False)
 
 
@@ -1289,12 +1253,7 @@ def _apply_lifter_imputation_confidence_policy(
     return effective_confidence.astype(np.float32, copy=False), imputed_mask.astype(bool, copy=False)
 
 
-def _select_lifter_output_timestep(
-    values: np.ndarray,
-    *,
-    causal: bool,
-    temporal_ndim: int,
-) -> np.ndarray:
+def _select_lifter_output_timestep(values: np.ndarray, *, causal: bool, temporal_ndim: int) -> np.ndarray:
     array = np.asarray(values, dtype=np.float32)
     while array.ndim > temporal_ndim and array.shape[0] == 1:
         array = array[0]
@@ -1304,16 +1263,8 @@ def _select_lifter_output_timestep(
     return array.astype(np.float32, copy=False)
 
 
-def _postprocess_lifter_keypoints_3d(
-    keypoints: np.ndarray,
-    *,
-    causal: bool,
-) -> np.ndarray:
-    array = _select_lifter_output_timestep(
-        keypoints,
-        causal=causal,
-        temporal_ndim=3,
-    )
+def _postprocess_lifter_keypoints_3d(keypoints: np.ndarray, *, causal: bool) -> np.ndarray:
+    array = _select_lifter_output_timestep(keypoints, causal=causal, temporal_ndim=3)
     if array.ndim != 2 or array.shape[1] < 3:
         return np.full((0, 3), np.nan, dtype=np.float32)
 
@@ -1354,11 +1305,7 @@ def _resolve_mb17_reorder_indices(joint_names: Sequence[str]) -> List[int]:
     return ordered_indices
 
 
-def _canonicalize_backend_vector_to_mb17(
-    values: np.ndarray,
-    *,
-    joint_names: Sequence[str] | None,
-) -> np.ndarray:
+def _canonicalize_backend_vector_to_mb17(values: np.ndarray, *, joint_names: Sequence[str] | None) -> np.ndarray:
     array = np.asarray(values, dtype=np.float32).reshape(-1)
     if joint_names is None:
         return array
@@ -1371,11 +1318,7 @@ def _canonicalize_backend_vector_to_mb17(
     return array[ordered_indices].astype(np.float32, copy=False)
 
 
-def _canonicalize_backend_prediction_array(
-    prediction: np.ndarray,
-    *,
-    joint_names: Sequence[str] | None,
-) -> np.ndarray:
+def _canonicalize_backend_prediction_array(prediction: np.ndarray,*,joint_names: Sequence[str] | None) -> np.ndarray:
     array = np.asarray(prediction, dtype=np.float32)
     if joint_names is None:
         return array
@@ -1453,7 +1396,7 @@ def _build_motionbert_quality_report(
     effective_window_size: int,
     num_windows: int,
     input_channels: int,
-    notes: Sequence[str],
+    notes: Sequence[str]
 ) -> Dict[str, Any]:
     joint_confidence = np.asarray(pose_sequence.joint_confidence, dtype=np.float32)
     visible_joint_ratio = (

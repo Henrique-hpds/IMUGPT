@@ -165,13 +165,13 @@ def _build_arg_parser() -> argparse.ArgumentParser:
 
     export_pose_parser = subparsers.add_parser(
         "export-pose2d",
-        help="Export stage-5.3 pose2d artifacts alongside the extracted IMU artifacts.",
+        help="Export pose2d artifacts alongside the extracted IMU artifacts.",
     )
     _add_pose_export_arguments(export_pose_parser, include_motionbert_arguments=False)
 
     export_pose3d_parser = subparsers.add_parser(
         "export-pose3d",
-        help="Export stage-5.8 pose3d artifacts, including BVH, alongside the extracted IMU artifacts.",
+        help="Export pose3d artifacts, including BVH, alongside the extracted IMU artifacts.",
     )
     _add_pose_export_arguments(export_pose3d_parser, include_motionbert_arguments=True)
 
@@ -239,7 +239,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
 
     export_virtual_imu_parser = subparsers.add_parser(
         "export-virtual-imu",
-        help="Export the full stage-5.10 virtual IMU pipeline alongside the extracted real IMU artifacts.",
+        help="Export the full virtual IMU pipeline alongside the extracted real IMU artifacts.",
     )
     _add_pose_export_arguments(export_virtual_imu_parser, include_motionbert_arguments=True)
     export_virtual_imu_parser.add_argument(

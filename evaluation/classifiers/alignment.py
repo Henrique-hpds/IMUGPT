@@ -1,37 +1,12 @@
 from __future__ import annotations
 
-from typing import Any
-
 import numpy as np
-try:
-    from scipy.signal import correlate, correlation_lags
-except ImportError:  # pragma: no cover - exercised when scipy is unavailable
-    def correlate(
-        in1: np.ndarray,
-        in2: np.ndarray,
-        *,
-        mode: str = "full",
-        method: str = "auto",
-    ) -> np.ndarray:
-        if mode != "full":
-            raise ValueError("NumPy fallback only supports mode='full'.")
-        del method
-        return np.correlate(in1, in2, mode="full")
 
-    def correlation_lags(
-        in1_len: int,
-        in2_len: int,
-        *,
-        mode: str = "full",
-    ) -> np.ndarray:
-        if mode != "full":
-            raise ValueError("NumPy fallback only supports mode='full'.")
-        return np.arange(-(int(in2_len) - 1), int(in1_len), dtype=np.int64)
-
+from typing import Any
+from scipy.signal import correlate, correlation_lags
 from pose_module.processing.frequency_alignment import estimate_sampling_frequency_hz
 
-_EPSILON = 1e-8
-
+_EPSILON = 1e-8  # Guard against division by zero in normalizations
 
 def _as_time_series(values: np.ndarray, *, name: str) -> np.ndarray:
     array = np.asarray(values, dtype=np.float32)
@@ -40,7 +15,6 @@ def _as_time_series(values: np.ndarray, *, name: str) -> np.ndarray:
     if array.shape[0] < 2:
         raise ValueError(f"{name} must contain at least 2 frames.")
     return array
-
 
 def _as_timestamps(timestamps_sec: np.ndarray, *, name: str) -> np.ndarray:
     timestamps = np.asarray(timestamps_sec, dtype=np.float64)
@@ -54,20 +28,12 @@ def _as_timestamps(timestamps_sec: np.ndarray, *, name: str) -> np.ndarray:
         raise ValueError(f"{name} must be sorted in ascending order.")
     return timestamps
 
-
 def _flatten_channels(values: np.ndarray) -> tuple[np.ndarray, tuple[int, ...]]:
     block = np.asarray(values, dtype=np.float32)
     trailing_shape = tuple(block.shape[1:])
     return block.reshape(block.shape[0], -1), trailing_shape
 
-
-def resample_values_to_reference(
-    source_timestamps_sec: np.ndarray,
-    source_values: np.ndarray,
-    reference_timestamps_sec: np.ndarray,
-    *,
-    method: str = "linear",
-) -> np.ndarray:
+def resample_values_to_reference(source_timestamps_sec: np.ndarray, source_values: np.ndarray, reference_timestamps_sec: np.ndarray, *, method: str = "linear") -> np.ndarray:
     source_timestamps = _as_timestamps(source_timestamps_sec, name="source_timestamps_sec")
     reference_timestamps = _as_timestamps(reference_timestamps_sec, name="reference_timestamps_sec")
     values = _as_time_series(source_values, name="source_values")
@@ -103,8 +69,10 @@ def resample_values_to_reference(
 
     return resampled_flat.reshape((reference_timestamps.shape[0], *trailing_shape)).astype(np.float32, copy=False)
 
-
 def collapse_alignment_signal(values: np.ndarray) -> np.ndarray:
+    # Reduce multi-channel signal to a single 1-D energy envelope for lag/DTW alignment.
+    # Each channel is z-scored so high-variance axes don't dominate; then mean absolute
+    # value across channels gives a frame-level activity scalar.
     block = _as_time_series(values, name="values").astype(np.float64, copy=False)
     flat_block = block.reshape(block.shape[0], -1)
     if flat_block.shape[1] == 1:
@@ -115,7 +83,6 @@ def collapse_alignment_signal(values: np.ndarray) -> np.ndarray:
     standardized = centered / np.maximum(std, _EPSILON)
     summary = np.nanmean(np.abs(standardized), axis=1)
     return np.asarray(summary, dtype=np.float32)
-
 
 def pearson_correlation(x: np.ndarray, y: np.ndarray) -> float | None:
     x_array = np.asarray(x, dtype=np.float64)
@@ -130,11 +97,13 @@ def pearson_correlation(x: np.ndarray, y: np.ndarray) -> float | None:
         return None
     return float(np.dot(x_centered, y_centered) / denominator)
 
-
 def shift_values_with_nan(values: np.ndarray, lag_samples: int) -> np.ndarray:
+    # Shift array by lag_samples, filling vacated positions with NaN so callers
+    # can detect and mask the undefined region after the shift.
     block = np.asarray(values, dtype=np.float32)
     shifted = np.full_like(block, np.nan, dtype=np.float32)
     lag = int(lag_samples)
+    
     if lag == 0:
         shifted[:] = block
         return shifted
@@ -147,17 +116,15 @@ def shift_values_with_nan(values: np.ndarray, lag_samples: int) -> np.ndarray:
     else:
         lag_abs = abs(lag)
         shifted[:-lag_abs] = block[lag_abs:]
+    
     return shifted
 
 
-def estimate_lag_cross_correlation(
-    reference_signal: np.ndarray,
-    target_signal: np.ndarray,
-    *,
-    max_lag_samples: int = 20,
-) -> dict[str, Any]:
+def estimate_lag_cross_correlation(reference_signal: np.ndarray, target_signal: np.ndarray, *, max_lag_samples: int = 20) -> dict[str, Any]:
+    
     reference = np.asarray(reference_signal, dtype=np.float64).reshape(-1)
     target = np.asarray(target_signal, dtype=np.float64).reshape(-1)
+    
     if reference.shape != target.shape:
         raise ValueError("reference_signal and target_signal must have the same shape.")
     if reference.shape[0] < 3:
@@ -168,9 +135,10 @@ def estimate_lag_cross_correlation(
         return {
             "lag_samples": 0,
             "correlation": None,
-            "num_valid_samples": int(np.count_nonzero(valid_mask)),
+            "num_valid_samples": int(np.count_nonzero(valid_mask))
         }
 
+    # Impute NaN/inf with channel mean so cross-correlation isn't disrupted by gaps.
     reference_valid = reference.copy()
     target_valid = target.copy()
     reference_valid[~valid_mask] = float(np.nanmean(reference[valid_mask]))
@@ -186,6 +154,8 @@ def estimate_lag_cross_correlation(
             "num_valid_samples": int(np.count_nonzero(valid_mask)),
         }
 
+    # Normalize full cross-correlation by signal norms → values in [-1, 1].
+    # Restrict search to ±max_lag_samples to avoid spurious matches far from zero.
     full_corr = correlate(reference_centered, target_centered, mode="full", method="auto")
     full_lags = correlation_lags(reference_centered.size, target_centered.size, mode="full")
     bounded_mask = np.abs(full_lags) <= int(max_lag_samples)
@@ -196,21 +166,19 @@ def estimate_lag_cross_correlation(
     return {
         "lag_samples": int(bounded_lags[best_index]),
         "correlation": float(bounded_corr[best_index]),
-        "num_valid_samples": int(np.count_nonzero(valid_mask)),
+        "num_valid_samples": int(np.count_nonzero(valid_mask))
     }
 
-
-def compute_constrained_dtw(
-    reference_signal: np.ndarray,
-    target_signal: np.ndarray,
-    *,
-    radius: int | None = None,
-) -> dict[str, Any]:
+def compute_constrained_dtw(reference_signal: np.ndarray, target_signal: np.ndarray, *, radius: int | None = None) -> dict[str, Any]:
+    
     reference = np.asarray(reference_signal, dtype=np.float64).reshape(-1)
     target = np.asarray(target_signal, dtype=np.float64).reshape(-1)
+    
     if reference.size == 0 or target.size == 0:
         raise ValueError("DTW requires non-empty input signals.")
 
+    # Sakoe-Chiba band: limit warping to ±radius_value to keep DTW O(N·radius).
+    # None → unconstrained (full N×M matrix).
     radius_value = max(reference.size, target.size) if radius is None else max(1, int(radius))
     cost = np.full((reference.size + 1, target.size + 1), np.inf, dtype=np.float64)
     predecessor = np.full((reference.size + 1, target.size + 1, 2), -1, dtype=np.int32)
@@ -224,7 +192,7 @@ def compute_constrained_dtw(
             candidate_offsets = (
                 (ref_index - 1, target_index),
                 (ref_index, target_index - 1),
-                (ref_index - 1, target_index - 1),
+                (ref_index - 1, target_index - 1)
             )
             prev_costs = [cost[i, j] for i, j in candidate_offsets]
             best_prev_offset = int(np.argmin(prev_costs))
@@ -238,6 +206,7 @@ def compute_constrained_dtw(
     path_pairs: list[tuple[int, int]] = []
     current_i = reference.size
     current_j = target.size
+    
     while current_i > 0 and current_j > 0:
         path_pairs.append((current_i - 1, current_j - 1))
         current_i, current_j = predecessor[current_i, current_j]
@@ -247,6 +216,7 @@ def compute_constrained_dtw(
     path_pairs.reverse()
     path = np.asarray(path_pairs, dtype=np.int32)
     path_length = max(1, path.shape[0])
+    
     return {
         "path": path,
         "path_length": int(path_length),
@@ -257,9 +227,12 @@ def compute_constrained_dtw(
 
 def warp_target_to_reference(values: np.ndarray, dtw_path: np.ndarray, reference_length: int) -> np.ndarray:
     block = np.asarray(values, dtype=np.float32)
+    
     if block.shape[0] == 0:
         raise ValueError("values must not be empty.")
+    
     path = np.asarray(dtw_path, dtype=np.int32)
+    
     if path.ndim != 2 or path.shape[1] != 2:
         raise ValueError("dtw_path must have shape [path_length, 2].")
     if reference_length <= 0:
@@ -274,9 +247,11 @@ def warp_target_to_reference(values: np.ndarray, dtw_path: np.ndarray, reference
         counts[int(ref_index)] += 1.0
 
     valid_indices = counts > 0.0
+
     if not np.all(valid_indices):
         raise ValueError("DTW path did not cover every reference frame.")
 
+    # Average multiple target frames mapped to the same reference frame.
     warped = warped / counts[:, None]
     return warped.reshape((int(reference_length), *trailing_shape)).astype(np.float32, copy=False)
 
@@ -291,12 +266,13 @@ def align_target_to_reference(
     target_summary: np.ndarray | None = None,
     resample_method: str = "linear",
     max_lag_samples: int = 20,
-    dtw_radius: int = 20,
-) -> dict[str, Any]:
+    dtw_radius: int = 20) -> dict[str, Any]:
+    
     reference_timestamps = _as_timestamps(reference_timestamps_sec, name="reference_timestamps_sec")
     target_timestamps = _as_timestamps(target_timestamps_sec, name="target_timestamps_sec")
     reference_block = _as_time_series(reference_values, name="reference_values")
     target_block = _as_time_series(target_values, name="target_values")
+    
     if reference_block.shape[0] != reference_timestamps.shape[0]:
         raise ValueError("reference_values and reference_timestamps_sec must share the same frame count.")
     if target_block.shape[0] != target_timestamps.shape[0]:
@@ -304,6 +280,7 @@ def align_target_to_reference(
 
     overlap_start_sec = float(max(reference_timestamps[0], target_timestamps[0]))
     overlap_end_sec = float(min(reference_timestamps[-1], target_timestamps[-1]))
+    
     if overlap_end_sec <= overlap_start_sec:
         raise ValueError("There is no temporal overlap between the reference and target signals.")
 
@@ -321,36 +298,39 @@ def align_target_to_reference(
         target_overlap_timestamps,
         target_overlap_values,
         reference_overlap_timestamps,
-        method=resample_method,
+        method=resample_method
     )
+    
     reference_summary_overlap = (
-        collapse_alignment_signal(reference_overlap_values)
-        if reference_summary is None
+        collapse_alignment_signal(reference_overlap_values) if reference_summary is None
         else np.asarray(reference_summary, dtype=np.float32)[reference_overlap_mask]
     )
+    
     target_summary_overlap = (
-        collapse_alignment_signal(target_overlap_values)
-        if target_summary is None
+        collapse_alignment_signal(target_overlap_values) if target_summary is None
         else np.asarray(target_summary, dtype=np.float32)[target_overlap_mask]
     )
+    
     target_summary_resampled = resample_values_to_reference(
         target_overlap_timestamps,
         target_summary_overlap[:, None],
         reference_overlap_timestamps,
-        method=resample_method,
+        method=resample_method
     )[:, 0]
 
     lag_report = estimate_lag_cross_correlation(
         reference_summary_overlap,
         target_summary_resampled,
-        max_lag_samples=max_lag_samples,
+        max_lag_samples=max_lag_samples
     )
+    
     lag_samples = int(lag_report["lag_samples"])
 
     target_shifted = shift_values_with_nan(target_resampled, lag_samples)
     target_summary_shifted = shift_values_with_nan(target_summary_resampled[:, None], lag_samples)[:, 0]
 
     valid_mask = np.isfinite(reference_summary_overlap) & np.isfinite(target_summary_shifted)
+    
     if int(np.count_nonzero(valid_mask)) < 3:
         raise ValueError("The overlap after correlation-based lag alignment is too small.")
 
@@ -367,20 +347,23 @@ def align_target_to_reference(
     dtw_report = compute_constrained_dtw(
         reference_summary_trimmed,
         target_summary_trimmed,
-        radius=dtw_radius,
+        radius=dtw_radius
     )
+    
     target_warped = warp_target_to_reference(
         target_trimmed,
         dtw_report["path"],
-        reference_trimmed.shape[0],
+        reference_trimmed.shape[0]
     )
+    
     target_summary_warped = warp_target_to_reference(
         target_summary_trimmed[:, None],
         dtw_report["path"],
-        reference_trimmed.shape[0],
+        reference_trimmed.shape[0]
     )[:, 0]
 
     aligned_frequency_hz = estimate_sampling_frequency_hz(trimmed_timestamps)
+    # Convert sample-domain lag to seconds using the aligned grid's frequency.
     lag_seconds = 0.0 if aligned_frequency_hz <= _EPSILON else float(lag_samples / aligned_frequency_hz)
 
     return {
@@ -410,6 +393,6 @@ def align_target_to_reference(
             "num_valid_frames_after_lag": int(np.count_nonzero(valid_mask)),
             "lag_correlation": lag_report["correlation"],
             "max_lag_samples": int(max_lag_samples),
-            "dtw_radius": int(dtw_radius),
-        },
+            "dtw_radius": int(dtw_radius)
+        }
     }

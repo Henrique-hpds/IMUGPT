@@ -19,12 +19,13 @@ from .features import (
     build_pose_sensor_proxy,
     extract_quality_vector,
     load_pose_sequence3d,
-    resolve_imu_orientation_features,
+    resolve_imu_orientation_features
 )
 
 CaptureBlacklistEntry = tuple[str, int, int] | tuple[str, int, int, str | int]
 NormalizedCaptureBlacklistEntry = tuple[str, int, int, str | None]
 
+# Captures with known quality issues (bad tracking, occlusion, sync failure)
 ALL_CAPTURE_BLACKLIST: tuple[CaptureBlacklistEntry, ...] = (
     ("30ms", 2, 3),
     ("30ms", 2, 5),
@@ -36,7 +37,6 @@ ALL_CAPTURE_BLACKLIST: tuple[CaptureBlacklistEntry, ...] = (
     ("30ms", 6, 3),
     ("30ms", 6, 7, "1"),
 )  # Domain, user_id, tag_number[, take_id]
-
 
 @dataclass(frozen=True)
 class WindowedDatasetConfig:
@@ -53,14 +53,13 @@ class WindowedDatasetConfig:
     capture_blacklist: Sequence[CaptureBlacklistEntry] = ALL_CAPTURE_BLACKLIST
     drop_blacklisted_captures: bool = True
 
-
-def normalize_capture_blacklist(
-    capture_blacklist: Sequence[CaptureBlacklistEntry] | None,
-) -> set[NormalizedCaptureBlacklistEntry]:
+# Normalizes blacklist entries to (domain, user_id, tag_number, take_id|None) for uniform lookup
+def normalize_capture_blacklist(capture_blacklist: Sequence[CaptureBlacklistEntry] | None) -> set[NormalizedCaptureBlacklistEntry]:
     if capture_blacklist is None:
         return set()
 
     normalized: set[NormalizedCaptureBlacklistEntry] = set()
+
     for entry in capture_blacklist:
         if len(entry) == 3:
             domain, user_id, tag_number = entry
@@ -78,8 +77,8 @@ def normalize_capture_blacklist(
             "(domain, user_id, tag_number) or 4 fields "
             "(domain, user_id, tag_number, take_id)."
         )
+        
     return normalized
-
 
 def _normalize_take_id_value(take_id: Any) -> str | None:
     if take_id is None or pd.isna(take_id):
@@ -87,13 +86,7 @@ def _normalize_take_id_value(take_id: Any) -> str | None:
     normalized = str(take_id).strip()
     return normalized or None
 
-
-def apply_capture_blacklist(
-    captures_df: pd.DataFrame,
-    *,
-    capture_blacklist: Sequence[CaptureBlacklistEntry] | None = ALL_CAPTURE_BLACKLIST,
-    drop_blacklisted: bool = True,
-) -> pd.DataFrame:
+def apply_capture_blacklist(captures_df: pd.DataFrame,*,capture_blacklist: Sequence[CaptureBlacklistEntry] | None = ALL_CAPTURE_BLACKLIST,drop_blacklisted: bool = True) -> pd.DataFrame:
     frame = captures_df.copy()
     if frame.empty:
         frame["capture_blacklist_key"] = pd.Series(dtype=object)
@@ -102,28 +95,23 @@ def apply_capture_blacklist(
 
     blacklist = normalize_capture_blacklist(capture_blacklist)
     take_ids = (
-        frame["take_id"].map(_normalize_take_id_value)
-        if "take_id" in frame.columns
+        frame["take_id"].map(_normalize_take_id_value) if "take_id" in frame.columns
         else pd.Series([None] * len(frame), index=frame.index, dtype=object)
     )
-    exact_keys = list(
-        zip(
-            frame["domain"].astype(str),
-            frame["user_id"].astype(int),
-            frame["tag_number"].astype(int),
-            take_ids,
-        )
-    )
+    
+    exact_keys = list(zip(frame["domain"].astype(str), frame["user_id"].astype(int), frame["tag_number"].astype(int), take_ids))
+    
     broad_keys = [(domain, user_id, tag_number, None) for domain, user_id, tag_number, _ in exact_keys]
     frame["capture_blacklist_key"] = exact_keys
     frame["is_blacklisted"] = [
         exact_key in blacklist or broad_key in blacklist
         for exact_key, broad_key in zip(exact_keys, broad_keys)
     ]
+    
     if bool(drop_blacklisted):
         frame = frame.loc[~frame["is_blacklisted"]].copy()
+        
     return frame.reset_index(drop=True)
-
 
 def _load_manifest_frame(output_root: Path | str) -> pd.DataFrame:
     output_root = Path(output_root)
@@ -156,32 +144,31 @@ def _load_manifest_frame(output_root: Path | str) -> pd.DataFrame:
             )
     return pd.DataFrame(rows)
 
-
-def _merge_capture_table_with_manifest(
-    base_table: pd.DataFrame,
-    manifest_frame: pd.DataFrame,
-) -> pd.DataFrame:
+def _merge_capture_table_with_manifest(base_table: pd.DataFrame, manifest_frame: pd.DataFrame) -> pd.DataFrame:
+    
     merged = base_table.merge(
         manifest_frame,
         how="inner",
         on=["clip_id", "domain", "user_id", "tag_number"],
         suffixes=("", "_manifest"),
-        validate="one_to_one",
+        validate="one_to_one"
     )
+    
     if merged.empty:
         raise RuntimeError("Could not match capture table against virtual_imu_manifest.jsonl.")
 
     base_take_ids = (
-        merged["take_id"].map(_normalize_take_id_value)
-        if "take_id" in merged.columns
+        merged["take_id"].map(_normalize_take_id_value) if "take_id" in merged.columns
         else pd.Series([None] * len(merged), index=merged.index, dtype=object)
     )
+    
     manifest_take_ids = (
-        merged["take_id_manifest"].map(_normalize_take_id_value)
-        if "take_id_manifest" in merged.columns
+        merged["take_id_manifest"].map(_normalize_take_id_value) if "take_id_manifest" in merged.columns
         else pd.Series([None] * len(merged), index=merged.index, dtype=object)
     )
+    
     mismatched_take_ids = manifest_take_ids.notna() & base_take_ids.notna() & (manifest_take_ids != base_take_ids)
+    
     if bool(mismatched_take_ids.any()):
         mismatch_examples = merged.loc[mismatched_take_ids, ["clip_id", "take_id", "take_id_manifest"]].head(5)
         raise RuntimeError(
@@ -194,42 +181,40 @@ def _merge_capture_table_with_manifest(
     return merged
 
 
-def build_classifier_capture_table(
-    output_root: Path | str,
-    *,
-    capture_blacklist: Sequence[CaptureBlacklistEntry] | None = ALL_CAPTURE_BLACKLIST,
-    drop_blacklisted: bool = True,
-) -> pd.DataFrame:
+# Builds the full capture index: merges export table with manifest, adds subject_group/flat_tag columns, drops invalid/blacklisted clips
+def build_classifier_capture_table(output_root: Path | str, *, capture_blacklist: Sequence[CaptureBlacklistEntry] | None = ALL_CAPTURE_BLACKLIST, drop_blacklisted: bool = True) -> pd.DataFrame:
+    
     base_table = build_exported_capture_table(output_root).copy()
     manifest_frame = _load_manifest_frame(output_root).copy()
+    
     if manifest_frame.empty:
         raise RuntimeError("virtual_imu_manifest.jsonl is empty.")
 
     merged = _merge_capture_table_with_manifest(base_table, manifest_frame)
+    
     merged["subject_group"] = merged.apply(
         lambda row: f"{row['domain']}_user_{int(row['user_id']):02d}",
-        axis=1,
+        axis=1
     )
+    
     merged["flat_tag"] = merged.apply(
         lambda row: f"{row['emotion']}|{row['modality']}|{row['stimulus']}",
-        axis=1,
+        axis=1
     )
+    
     merged["frame_aligned_available"] = merged["virtual_imu_frame_aligned_npz_path"].notna()
-    merged = merged[
-        merged["pose3d_npz_path"].notna()
-        & merged["virtual_imu_npz_path"].notna()
-    ].copy()
+    merged = merged[merged["pose3d_npz_path"].notna() & merged["virtual_imu_npz_path"].notna()].copy()
+    
     merged = apply_capture_blacklist(
         merged,
         capture_blacklist=capture_blacklist,
-        drop_blacklisted=drop_blacklisted,
+        drop_blacklisted=drop_blacklisted
     )
 
     return merged.sort_values(
         ["domain", "user_id", "tag_number", "take_id", "clip_id"],
         kind="stable",
     ).reset_index(drop=True)
-
 
 def _load_virtual_capture_from_path(virtual_imu_npz_path: str | Path) -> dict[str, Any]:
     payload_path = Path(virtual_imu_npz_path)
@@ -244,7 +229,6 @@ def _load_virtual_capture_from_path(virtual_imu_npz_path: str | Path) -> dict[st
             "source": str(np.asarray(payload["source"]).item()),
             "path": str(payload_path.resolve()),
         }
-
 
 def _resolve_synthetic_npz_path(capture_row: pd.Series | dict[str, Any], *, synthetic_variant: str) -> Path:
     row = pd.Series(capture_row)
@@ -264,7 +248,6 @@ def _resolve_synthetic_npz_path(capture_row: pd.Series | dict[str, Any], *, synt
         return frame_aligned_path
     return raw_path
 
-
 def _split_real_imu_channels(real_capture: dict[str, Any]) -> tuple[np.ndarray, np.ndarray]:
     channel_axis_order = [str(value).lower() for value in real_capture["channel_axis_order"]]
     acc_indices = [channel_axis_order.index(axis_name) for axis_name in ("ax", "ay", "az")]
@@ -272,22 +255,16 @@ def _split_real_imu_channels(real_capture: dict[str, Any]) -> tuple[np.ndarray, 
     imu_block = np.asarray(real_capture["imu"], dtype=np.float32)
     return imu_block[:, :, acc_indices], imu_block[:, :, gyro_indices]
 
-
-def _resolve_selected_sensors(
-    *,
-    requested_sensors: Sequence[str] | None,
-    real_sensor_names: Sequence[str],
-    synthetic_sensor_names: Sequence[str],
-    pose_proxy_sensor_names: Sequence[str],
-) -> list[str]:
+def _resolve_selected_sensors(*, requested_sensors: Sequence[str] | None, real_sensor_names: Sequence[str], synthetic_sensor_names: Sequence[str], pose_proxy_sensor_names: Sequence[str]) -> list[str]:
+    
     shared = [
-        sensor_name
+        sensor_name 
         for sensor_name in real_sensor_names
         if sensor_name in set(synthetic_sensor_names) and sensor_name in set(pose_proxy_sensor_names)
     ]
+    
     if len(shared) == 0:
         raise ValueError("There are no sensors shared by the real, synthetic, and pose-proxy streams.")
-
     if requested_sensors is None:
         return shared
 
@@ -297,15 +274,9 @@ def _resolve_selected_sensors(
         raise ValueError(f"Requested sensors are not available in every modality: {missing}")
     return requested
 
-
-def _select_sensor_block(
-    values: np.ndarray,
-    sensor_names: Sequence[str],
-    selected_sensors: Sequence[str],
-) -> np.ndarray:
+def _select_sensor_block(values: np.ndarray, sensor_names: Sequence[str], selected_sensors: Sequence[str]) -> np.ndarray:
     indices = [list(sensor_names).index(sensor_name) for sensor_name in selected_sensors]
     return np.asarray(values[:, indices, :], dtype=np.float32)
-
 
 def _trim_real_capture(real_capture: dict[str, Any], time_range_sec: tuple[float, float]) -> dict[str, Any]:
     ts = real_capture["timestamps_sec"]
@@ -317,36 +288,26 @@ def _trim_real_capture(real_capture: dict[str, Any], time_range_sec: tuple[float
     return {
         **real_capture,
         "timestamps_sec": ts_trimmed - ts_trimmed[0],
-        "imu": real_capture["imu"][mask],
+        "imu": real_capture["imu"][mask]
     }
 
-
-def load_capture_modalities(
-    capture_row: pd.Series | dict[str, Any],
-    *,
-    synthetic_variant: str = "raw",
-) -> dict[str, Any]:
+# Loads pose3d, real IMU, and synthetic IMU for a single capture row
+def load_capture_modalities(capture_row: pd.Series | dict[str, Any], *, synthetic_variant: str = "raw") -> dict[str, Any]:
     row = pd.Series(capture_row)
     pose_sequence = load_pose_sequence3d(str(row["pose3d_npz_path"]))
     real_capture = load_real_capture(row["clip_dir"])
     time_range = row.get("real_imu_time_range_sec")
     if time_range is not None:
         real_capture = _trim_real_capture(real_capture, time_range)
-    synthetic_capture = _load_virtual_capture_from_path(
-        _resolve_synthetic_npz_path(row, synthetic_variant=synthetic_variant)
-    )
+    synthetic_capture = _load_virtual_capture_from_path(_resolve_synthetic_npz_path(row, synthetic_variant=synthetic_variant))
     return {
         "pose_sequence": pose_sequence,
         "real_capture": real_capture,
-        "synthetic_capture": synthetic_capture,
+        "synthetic_capture": synthetic_capture
     }
 
-
-def prepare_capture_windows(
-    capture_row: pd.Series | dict[str, Any],
-    *,
-    config: WindowedDatasetConfig | None = None,
-) -> dict[str, Any]:
+# Full per-capture pipeline: align modalities → extract features → segment windows → assemble metadata
+def prepare_capture_windows(capture_row: pd.Series | dict[str, Any], *, config: WindowedDatasetConfig | None = None) -> dict[str, Any]:
     row = pd.Series(capture_row).copy()
     resolved_config = WindowedDatasetConfig() if config is None else config
     modalities = load_capture_modalities(row, synthetic_variant=resolved_config.synthetic_variant)
@@ -361,7 +322,7 @@ def prepare_capture_windows(
         requested_sensors=resolved_config.selected_sensors,
         real_sensor_names=real_capture["sensor_names"],
         synthetic_sensor_names=synthetic_capture["sensor_names"],
-        pose_proxy_sensor_names=pose_proxy["sensor_names"],
+        pose_proxy_sensor_names=pose_proxy["sensor_names"]
     )
 
     pose_proxy_acc = _select_sensor_block(pose_proxy["acc"], pose_proxy["sensor_names"], selected_sensors)
@@ -374,22 +335,25 @@ def prepare_capture_windows(
     pose_proxy_orientation = resolve_imu_orientation_features(
         pose_proxy_acc,
         pose_proxy_gyro,
-        feature_mode=resolved_config.imu_feature_mode,
+        feature_mode=resolved_config.imu_feature_mode
     )
+    
     real_orientation = resolve_imu_orientation_features(
         real_acc_selected,
         real_gyro_selected,
-        feature_mode=resolved_config.imu_feature_mode,
+        feature_mode=resolved_config.imu_feature_mode
     )
+    
     synthetic_orientation = resolve_imu_orientation_features(
         synthetic_acc_selected,
         synthetic_gyro_selected,
-        feature_mode=resolved_config.imu_feature_mode,
+        feature_mode=resolved_config.imu_feature_mode
     )
 
     pose_summary = build_motion_summary_signal(pose_proxy_acc, pose_proxy_orientation["values"])
     real_summary = build_motion_summary_signal(real_acc_selected, real_orientation["values"])
 
+    # Align real IMU to pose timeline using cross-correlation + DTW
     real_alignment = align_target_to_reference(
         pose_features["timestamps_sec"],
         pose_features["values"],
@@ -399,20 +363,23 @@ def prepare_capture_windows(
         target_summary=real_summary,
         resample_method=resolved_config.alignment_resample_method,
         max_lag_samples=resolved_config.alignment_max_lag_samples,
-        dtw_radius=resolved_config.alignment_dtw_radius,
+        dtw_radius=resolved_config.alignment_dtw_radius
     )
+    
     aligned_timestamps = np.asarray(real_alignment["timestamps_sec"], dtype=np.float32)
     aligned_pose_values = np.asarray(real_alignment["reference_values"], dtype=np.float32)
     aligned_real_raw = np.asarray(real_alignment["aligned_target_values"], dtype=np.float32)
     aligned_real_acc = aligned_real_raw[:, :, :3]
     aligned_real_gyro = aligned_real_raw[:, :, 3:]
 
+    # Resample synthetic IMU to the aligned timeline (no DTW needed — same source as pose)
     aligned_synthetic_raw = resample_values_to_reference(
         synthetic_capture["timestamps_sec"],
         np.concatenate([synthetic_acc_selected, synthetic_orientation["values"]], axis=2),
         aligned_timestamps,
-        method=resolved_config.alignment_resample_method,
+        method=resolved_config.alignment_resample_method
     )
+    
     aligned_synthetic_acc = aligned_synthetic_raw[:, :, :3]
     aligned_synthetic_gyro = aligned_synthetic_raw[:, :, 3:]
 
@@ -420,18 +387,20 @@ def prepare_capture_windows(
         aligned_real_acc,
         aligned_real_gyro,
         aligned_timestamps,
-        feature_mode=resolved_config.imu_feature_mode,
+        feature_mode=resolved_config.imu_feature_mode
     )
+    
     synthetic_imu_features = build_imu_feature_tensor(
         aligned_synthetic_acc,
         aligned_synthetic_gyro,
         aligned_timestamps,
-        feature_mode=resolved_config.imu_feature_mode,
+        feature_mode=resolved_config.imu_feature_mode
     )
+    
     quality_vector = extract_quality_vector(
         row.get("quality_report"),
         pose_imu_alignment=real_alignment,
-        imu_feature_mode=resolved_config.imu_feature_mode,
+        imu_feature_mode=resolved_config.imu_feature_mode
     )
 
     pose_window_bundle = segment_signal_windows(
@@ -439,22 +408,25 @@ def prepare_capture_windows(
         window_type="n_samples",
         window_size=int(resolved_config.window_size),
         stride_or_overlap_mode="overlap",
-        overlap=float(resolved_config.overlap),
+        overlap=float(resolved_config.overlap)
     )
+    
     real_window_bundle = segment_signal_windows(
         real_imu_features["values"],
         window_type="n_samples",
         window_size=int(resolved_config.window_size),
         stride_or_overlap_mode="overlap",
-        overlap=float(resolved_config.overlap),
+        overlap=float(resolved_config.overlap)
     )
+    
     synthetic_window_bundle = segment_signal_windows(
         synthetic_imu_features["values"],
         window_type="n_samples",
         window_size=int(resolved_config.window_size),
         stride_or_overlap_mode="overlap",
-        overlap=float(resolved_config.overlap),
+        overlap=float(resolved_config.overlap)
     )
+    
     if pose_window_bundle["windows"].shape[0] != real_window_bundle["windows"].shape[0] or pose_window_bundle["windows"].shape[0] != synthetic_window_bundle["windows"].shape[0]:
         raise ValueError("Pose, real IMU, and synthetic IMU window counts must match.")
 
@@ -469,9 +441,9 @@ def prepare_capture_windows(
             rng.choice(
                 pose_windows.shape[0],
                 size=int(resolved_config.max_windows_per_capture),
-                replace=False,
-            )
-        )
+                replace=False
+        ))
+        
         pose_windows = pose_windows[chosen_indices]
         real_windows = real_windows[chosen_indices]
         synthetic_windows = synthetic_windows[chosen_indices]
@@ -510,7 +482,7 @@ def prepare_capture_windows(
                 "visible_joint_ratio": float(dict(row.get("quality_report", {})).get("visible_joint_ratio", 0.0) or 0.0),
                 "mean_confidence": float(dict(row.get("quality_report", {})).get("mean_confidence", 0.0) or 0.0),
                 "temporal_jitter_score": float(dict(row.get("quality_report", {})).get("temporal_jitter_score", 0.0) or 0.0),
-                "root_drift_score": float(dict(row.get("quality_report", {})).get("root_drift_score", 0.0) or 0.0),
+                "root_drift_score": float(dict(row.get("quality_report", {})).get("root_drift_score", 0.0) or 0.0)
             }
         )
 
@@ -537,7 +509,7 @@ def prepare_capture_windows(
         "imu_feature_mode": str(real_imu_features["feature_mode"]),
         "quality_feature_names": list(quality_vector["feature_names"]),
         "joint_names": list(pose_features["joint_names"]),
-        "selected_sensors": list(selected_sensors),
+        "selected_sensors": list(selected_sensors)
     }
 
 
@@ -551,27 +523,23 @@ def _encode_label_column(values: Sequence[str]) -> dict[str, Any]:
         "mapping": mapping,
     }
 
-
-def build_windowed_multimodal_dataset(
-    output_root: Path | str,
-    *,
-    config: WindowedDatasetConfig | None = None,
-    captures_df: pd.DataFrame | None = None,
-) -> dict[str, Any]:
+# Iterates all captures, runs prepare_capture_windows on each, and concatenates into a single dataset dict
+def build_windowed_multimodal_dataset(output_root: Path | str, *, config: WindowedDatasetConfig | None = None, captures_df: pd.DataFrame | None = None) -> dict[str, Any]:
     resolved_config = WindowedDatasetConfig() if config is None else config
     capture_table = (
         build_classifier_capture_table(
             output_root,
             capture_blacklist=resolved_config.capture_blacklist,
-            drop_blacklisted=resolved_config.drop_blacklisted_captures,
-        )
-        if captures_df is None
-        else apply_capture_blacklist(
+            drop_blacklisted=resolved_config.drop_blacklisted_captures
+        ) 
+        if captures_df is None else 
+        apply_capture_blacklist(
             captures_df,
             capture_blacklist=resolved_config.capture_blacklist,
-            drop_blacklisted=resolved_config.drop_blacklisted_captures,
+            drop_blacklisted=resolved_config.drop_blacklisted_captures
         )
     )
+    
     if capture_table.empty:
         raise RuntimeError("No capture is available to build the classifier dataset.")
 
@@ -642,5 +610,5 @@ def build_windowed_multimodal_dataset(
         "quality_feature_names": [] if quality_feature_names is None else quality_feature_names,
         "joint_names": [] if joint_names is None else joint_names,
         "selected_sensors": [] if selected_sensors is None else selected_sensors,
-        "config": resolved_config,
+        "config": resolved_config
     }

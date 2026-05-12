@@ -175,7 +175,7 @@ def build_identity_transform(
     subject_id: str,
     sensor_name: str,
     fitted_capture_ids: List[str] | None = None,
-    diagnostics: Dict[str, Any] | None = None,
+    diagnostics: Dict[str, Any] | None = None
 ) -> SensorSubjectTransform:
     """Build a neutral transform for a subject/sensor pair."""
 

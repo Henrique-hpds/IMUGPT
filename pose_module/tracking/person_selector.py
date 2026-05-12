@@ -1,4 +1,4 @@
-"""Single-person track selection for stage 5.2."""
+"""Single-person track selection"""
 
 from __future__ import annotations
 

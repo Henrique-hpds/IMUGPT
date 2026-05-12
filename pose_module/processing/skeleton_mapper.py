@@ -1,4 +1,4 @@
-"""Stage 5.6: map MotionBERT MB17 poses to the fixed IMUGPT22 skeleton."""
+"""Map MotionBERT MB17 poses to the fixed IMUGPT22 skeleton."""
 
 from __future__ import annotations
 
@@ -273,7 +273,7 @@ def _validate_motionbert17_sequence(sequence: PoseSequence3D) -> None:
     joint_names = [str(name) for name in sequence.joint_names_3d]
     if joint_names != list(MOTIONBERT_17_JOINT_NAMES):
         raise ValueError(
-            "Skeleton mapper expects stage-5.5 output ordered as MOTIONBERT_17_JOINT_NAMES."
+            "Skeleton mapper expects output ordered as MOTIONBERT_17_JOINT_NAMES."
         )
     points = np.asarray(sequence.joint_positions_xyz, dtype=np.float32)
     confidence = np.asarray(sequence.joint_confidence, dtype=np.float32)
@@ -283,11 +283,7 @@ def _validate_motionbert17_sequence(sequence: PoseSequence3D) -> None:
         raise ValueError("Skeleton mapper expects joint_confidence with shape [T, 17].")
 
 
-def _swap_masked_handedness(
-    observed_mask: np.ndarray,
-    imputed_mask: np.ndarray,
-    swap_mask: np.ndarray,
-) -> tuple[np.ndarray, np.ndarray]:
+def _swap_masked_handedness(observed_mask: np.ndarray,imputed_mask: np.ndarray,swap_mask: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     corrected_observed = np.asarray(observed_mask, dtype=bool).copy()
     corrected_imputed = np.asarray(imputed_mask, dtype=bool).copy()
     if not np.any(swap_mask):

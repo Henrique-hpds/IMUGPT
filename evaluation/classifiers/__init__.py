@@ -23,11 +23,10 @@ _EXPORT_MAP = {
     "prepare_capture_windows": (".data", "prepare_capture_windows"),
     "resample_values_to_reference": (".alignment", "resample_values_to_reference"),
     "run_experiment_suite": (".experiments", "run_experiment_suite"),
-    "run_single_experiment": (".experiments", "run_single_experiment"),
+    "run_single_experiment": (".experiments", "run_single_experiment")
 }
 
 __all__ = sorted(_EXPORT_MAP)
-
 
 def __getattr__(name: str):
     if name not in _EXPORT_MAP:

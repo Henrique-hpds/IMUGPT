@@ -1,4 +1,4 @@
-"""Stage 5.10: synthesize virtual IMU streams from IK outputs and sensor layout."""
+"""Synthesize virtual IMU streams from IK outputs and sensor layout."""
 
 from __future__ import annotations
 
@@ -76,35 +76,24 @@ def run_imusim(
         clip_id=clip_id,
         timestamps_sec=timestamps_sec,
     )
-    sensor_layout = load_sensor_layout(
-        DEFAULT_SENSOR_LAYOUT_PATH if sensor_layout_path is None else sensor_layout_path
-    )
+    sensor_layout = load_sensor_layout(DEFAULT_SENSOR_LAYOUT_PATH if sensor_layout_path is None else sensor_layout_path)
     if acc_noise_std_m_s2 is None:
         acc_noise_std_m_s2 = float(sensor_layout.get("default_acc_noise_std_m_s2", DEFAULT_ACC_NOISE_STD_M_S2))
     if gyro_noise_std_rad_s is None:
-        gyro_noise_std_rad_s = float(
-            sensor_layout.get("default_gyro_noise_std_rad_s", DEFAULT_GYRO_NOISE_STD_RAD_S)
-        )
-    gravity_vector = np.asarray(
-        sensor_layout.get("gravity_m_s2", list(gravity_m_s2)),
-        dtype=np.float32,
-    )
+        gyro_noise_std_rad_s = float(sensor_layout.get("default_gyro_noise_std_rad_s", DEFAULT_GYRO_NOISE_STD_RAD_S))
+    
+    gravity_vector = np.asarray(sensor_layout.get("gravity_m_s2", list(gravity_m_s2)), dtype=np.float32)
     if gravity_vector.shape != (3,):
         raise ValueError("gravity_m_s2 must be a 3-vector.")
 
     kinematics = forward_kinematics_from_ik_sequence(ik_sequence)
     joint_positions_global_m = np.asarray(kinematics["joint_positions_global_m"], dtype=np.float32)
-    joint_rotation_global_matrices = np.asarray(
-        kinematics["joint_rotation_global_matrices"],
-        dtype=np.float32,
-    )
-    joint_name_to_index = {
-        str(name): index for index, name in enumerate(ik_sequence.joint_names_3d)
-    }
+    joint_rotation_global_matrices = np.asarray(kinematics["joint_rotation_global_matrices"], dtype=np.float32)
+    joint_name_to_index = {str(name): index for index, name in enumerate(ik_sequence.joint_names_3d)}
     resolved_sensors = _resolve_sensor_specs(
         sensor_layout=sensor_layout,
         joint_name_to_index=joint_name_to_index,
-        joint_offsets_m=np.asarray(ik_sequence.joint_offsets_m, dtype=np.float32),
+        joint_offsets_m=np.asarray(ik_sequence.joint_offsets_m, dtype=np.float32)
     )
 
     sensor_positions = np.zeros((ik_sequence.num_frames, len(resolved_sensors), 3), dtype=np.float32)
@@ -120,7 +109,7 @@ def run_imusim(
                 "tij,j->ti",
                 joint_rotation_global_matrices[:, orientation_joint_index],
                 local_offset_m,
-                dtype=np.float32,
+                dtype=np.float32
             )
         ).astype(np.float32, copy=False)
 
@@ -131,7 +120,7 @@ def run_imusim(
         "tsji,tsj->tsi",
         sensor_rotations,
         specific_force_world,
-        dtype=np.float32,
+        dtype=np.float32
     ).astype(np.float32, copy=False)
     gyro = _estimate_local_angular_velocity(sensor_rotations, timestamps)
 
@@ -140,13 +129,13 @@ def run_imusim(
         acc = acc + rng.normal(
             0.0,
             float(acc_noise_std_m_s2),
-            size=acc.shape,
+            size=acc.shape
         ).astype(np.float32, copy=False)
     if float(gyro_noise_std_rad_s) > 0.0:
         gyro = gyro + rng.normal(
             0.0,
             float(gyro_noise_std_rad_s),
-            size=gyro.shape,
+            size=gyro.shape
         ).astype(np.float32, copy=False)
 
     raw_imu_sequence = VirtualIMUSequence(
@@ -156,7 +145,7 @@ def run_imusim(
         acc=acc.astype(np.float32, copy=False),
         gyro=gyro.astype(np.float32, copy=False),
         timestamps_sec=timestamps.astype(np.float32, copy=False),
-        source=f"{ik_sequence.source}_virtual_imu",
+        source=f"{ik_sequence.source}_virtual_imu"
     )
     calibration_report = None
     imu_sequence = raw_imu_sequence
@@ -167,7 +156,7 @@ def run_imusim(
             activity_label=real_imu_activity_label,
             signal_mode=str(real_imu_signal_mode),
             percentile_resolution=int(real_imu_percentile_resolution),
-            per_class=bool(real_imu_per_class_calibration),
+            per_class=bool(real_imu_per_class_calibration)
         )
         imu_sequence = calibration_result["virtual_imu_sequence"]
         calibration_report = dict(calibration_result["calibration_report"])
@@ -178,7 +167,7 @@ def run_imusim(
         gyro_noise_std_rad_s=float(gyro_noise_std_rad_s),
         max_acceleration_warning_m_s2=float(max_acceleration_warning_m_s2),
         max_gyro_warning_rad_s=float(max_gyro_warning_rad_s),
-        calibration_report=calibration_report,
+        calibration_report=calibration_report
     )
 
     output_dir_path = None if output_dir is None else Path(output_dir)
@@ -187,7 +176,7 @@ def run_imusim(
         "virtual_imu_raw_npz_path": None,
         "virtual_imu_report_json_path": None,
         "virtual_imu_calibration_report_json_path": None,
-        "sensor_layout_resolved_json_path": None,
+        "sensor_layout_resolved_json_path": None
     }
     if output_dir_path is not None:
         output_dir_path.mkdir(parents=True, exist_ok=True)
@@ -216,7 +205,7 @@ def run_imusim(
                         "name": str(sensor_spec["name"]),
                         "anchor_joint": str(sensor_spec["anchor_joint"]),
                         "orientation_joint": str(sensor_spec["orientation_joint"]),
-                        "local_offset_m": [float(x) for x in sensor_spec["local_offset_m"]],
+                        "local_offset_m": [float(x) for x in sensor_spec["local_offset_m"]]
                     }
                     for sensor_spec in resolved_sensors
                 ],
@@ -232,7 +221,7 @@ def run_imusim(
         "calibration_report": calibration_report,
         "artifacts": artifacts,
         "sensor_positions_global_m": sensor_positions.astype(np.float32, copy=False),
-        "sensor_rotation_global_matrices": sensor_rotations.astype(np.float32, copy=False),
+        "sensor_rotation_global_matrices": sensor_rotations.astype(np.float32, copy=False)
     }
 
 
@@ -303,7 +292,7 @@ def _normalize_imusim_inputs(
         frame_indices=np.arange(rotations.shape[0], dtype=np.int32),
         timestamps_sec=timestamps.astype(np.float32, copy=False),
         source="ik_sequence",
-        rotation_representation="quaternion_wxyz",
+        rotation_representation="quaternion_wxyz"
     )
 
 
@@ -311,7 +300,7 @@ def _resolve_sensor_specs(
     *,
     sensor_layout: Mapping[str, Any],
     joint_name_to_index: Mapping[str, int],
-    joint_offsets_m: np.ndarray,
+    joint_offsets_m: np.ndarray
 ) -> list[Dict[str, Any]]:
     resolved_sensors: list[Dict[str, Any]] = []
     for raw_sensor in sensor_layout.get("sensors", []):
@@ -358,7 +347,7 @@ def _resolve_sensor_specs(
                 "anchor_joint_index": int(joint_name_to_index[anchor_joint]),
                 "orientation_joint": str(orientation_joint),
                 "orientation_joint_index": int(joint_name_to_index[orientation_joint]),
-                "local_offset_m": local_offset.astype(np.float32, copy=False),
+                "local_offset_m": local_offset.astype(np.float32, copy=False)
             }
         )
     return resolved_sensors
@@ -376,10 +365,7 @@ def _second_derivative(values: np.ndarray, timestamps_sec: np.ndarray) -> np.nda
     return accelerations.astype(np.float32, copy=False)
 
 
-def _estimate_local_angular_velocity(
-    rotation_matrices: np.ndarray,
-    timestamps_sec: np.ndarray,
-) -> np.ndarray:
+def _estimate_local_angular_velocity(rotation_matrices: np.ndarray,timestamps_sec: np.ndarray) -> np.ndarray:
     rotations = np.asarray(rotation_matrices, dtype=np.float64)
     timestamps = np.asarray(timestamps_sec, dtype=np.float64)
     num_frames, num_sensors = rotations.shape[:2]
@@ -392,7 +378,7 @@ def _estimate_local_angular_velocity(
         delta_rotation = np.einsum(
             "sji,sjk->sik",
             rotations[frame_index],
-            rotations[frame_index + 1],
+            rotations[frame_index + 1]
         )
         # Equivalent to R_t^T @ R_t+1 for each sensor.
         interval_gyro[frame_index] = Rotation.from_matrix(delta_rotation).as_rotvec() / dt
@@ -412,7 +398,7 @@ def _build_virtual_imu_quality_report(
     gyro_noise_std_rad_s: float,
     max_acceleration_warning_m_s2: float,
     max_gyro_warning_rad_s: float,
-    calibration_report: Mapping[str, Any] | None = None,
+    calibration_report: Mapping[str, Any] | None = None
 ) -> Dict[str, Any]:
     acc = np.asarray(imu_sequence.acc, dtype=np.float32)
     gyro = np.asarray(imu_sequence.gyro, dtype=np.float32)
@@ -460,21 +446,11 @@ def _build_virtual_imu_quality_report(
         "gyro_noise_std_rad_s": float(gyro_noise_std_rad_s),
         "real_imu_calibration_applied": bool(calibration_report is not None),
         "real_imu_calibration_signal_mode": None if calibration_report is None else calibration_report.get("signal_mode"),
-        "real_imu_calibration_per_class_applied": (
-            None if calibration_report is None else calibration_report.get("per_class_applied")
-        ),
-        "real_imu_calibration_reference_path": (
-            None if calibration_report is None else calibration_report.get("reference_path")
-        ),
-        "real_imu_calibration_matched_sensor_names": (
-            [] if calibration_report is None else list(calibration_report.get("matched_sensor_names", []))
-        ),
-        "real_imu_calibration_mean_abs_delta": (
-            None if calibration_report is None else calibration_report.get("mean_abs_delta")
-        ),
-        "real_imu_calibration_max_abs_delta": (
-            None if calibration_report is None else calibration_report.get("max_abs_delta")
-        ),
+        "real_imu_calibration_per_class_applied": (None if calibration_report is None else calibration_report.get("per_class_applied")),
+        "real_imu_calibration_reference_path": (None if calibration_report is None else calibration_report.get("reference_path")),
+        "real_imu_calibration_matched_sensor_names": ([] if calibration_report is None else list(calibration_report.get("matched_sensor_names", []))),
+        "real_imu_calibration_mean_abs_delta": (None if calibration_report is None else calibration_report.get("mean_abs_delta")),
+        "real_imu_calibration_max_abs_delta": (None if calibration_report is None else calibration_report.get("max_abs_delta")),
         "max_acceleration_norm_m_s2": float(max_acc_norm),
         "max_gyro_norm_rad_s": float(max_gyro_norm),
         "assumptions": [

@@ -64,7 +64,7 @@ def resolve_capture_metadata(domain: str, user_id: int, tag_number: int) -> dict
 		"stimulus": None if protocol_info is None else protocol_info.get("stimulus"),
 		"stimulus_details": None if protocol_info is None else protocol_info.get("stimulus_details"),
 		"protocol_tag_10ms": None if protocol_info is None else protocol_info.get("tag_10ms"),
-		"protocol_tag_30ms": None if protocol_info is None else protocol_info.get("tag_30ms"),
+		"protocol_tag_30ms": None if protocol_info is None else protocol_info.get("tag_30ms")
 	}
 
 def _extract_virtual_npz_path(entry: dict[str, Any]) -> str | None:
@@ -186,7 +186,7 @@ def build_exported_capture_table(output_root: Path | str) -> pd.DataFrame:
 					entry.get("clip_id"),
 					entry.get("reference_clip_id"),
 					entry.get("window_id"),
-					entry.get("prompt_id"),
+					entry.get("prompt_id")
 				)
 				if identity is None:
 					continue
@@ -222,7 +222,7 @@ def build_exported_capture_table(output_root: Path | str) -> pd.DataFrame:
 						"take_id": normalize_take_id(entry.get("take_id"), clip_id=clip_id),
 						"clip_dir": str(real_npz.parent.resolve()),
 						"pose_dir": str(virtual_npz.parent.resolve()),
-						**capture_metadata,
+						**capture_metadata
 					}
 				)
 				seen_clip_ids.add(clip_id)
@@ -261,7 +261,7 @@ def build_exported_capture_table(output_root: Path | str) -> pd.DataFrame:
 				"take_id": normalize_take_id(metadata.get("take_id"), clip_id=clip_id),
 				"clip_dir": str(real_npz.parent.resolve()),
 				"pose_dir": str(virtual_npz.parent.resolve()),
-				**capture_metadata,
+				**capture_metadata
 			}
 		)
 		seen_clip_ids.add(clip_id)
@@ -330,7 +330,7 @@ def load_virtual_capture(pose_dir: Path | str, filename: str = "virtual_imu.npz"
 			"fps": float(np.asarray(payload["fps"]).item()),
 			"clip_id": str(np.asarray(payload["clip_id"]).item()),
 			"source": str(np.asarray(payload["source"]).item()),
-			"path": str(payload_path),
+			"path": str(payload_path)
 		}
 
 def resolve_selected_sensors(requested_sensors: Optional[Sequence[str]], available_sensors: Sequence[str]) -> list[str]:
@@ -362,7 +362,7 @@ def plot_signal_block(
 	title: str,
 	unit: str,
 	time_range_sec: Optional[tuple[float, float]] = None,
-	line_width: float = 1.5,
+	line_width: float = 1.5
 ) -> None:
     
 	timestamps_plot, values_plot = apply_time_range(timestamps_sec, values, time_range_sec)
@@ -399,7 +399,7 @@ def plot_real_virtual_capture(
 	figsize: tuple[float, float] = (16, 10),
 	line_width: float = 1.5,
 	undersample_real_to_virtual: bool = True,
-	show: bool = True,
+	show: bool = True
 ) -> tuple[pd.DataFrame, plt.Figure]:
 	"""Plots real and virtual IMU signals and returns summary table + figure."""
 	configure_capture_table_display()
@@ -436,7 +436,7 @@ def plot_real_virtual_capture(
 		"real_plot_frequency_hz": estimate_sampling_frequency_hz(real_data["timestamps_sec"]),
 		"virtual_frequency_hz": estimate_sampling_frequency_hz(virtual_data["timestamps_sec"]),
 		"mean_time_error_ms": 0.0,
-		"max_time_error_ms": 0.0,
+		"max_time_error_ms": 0.0
 	}
  
 	if undersample_real_to_virtual:
@@ -506,7 +506,7 @@ def plot_real_virtual_capture(
 			title=f"{real_plot_title} | {axis_name} axis",
 			unit=GROUP_TO_UNIT[signal_group],
 			time_range_sec=time_range_sec,
-			line_width=line_width,
+			line_width=line_width
 		)
   
 		axes[0, component_index].set_ylim(y_min, y_max)
@@ -521,7 +521,7 @@ def plot_real_virtual_capture(
 			title=f"Virtual IMU | {axis_name} axis",
 			unit=GROUP_TO_UNIT[signal_group],
 			time_range_sec=time_range_sec,
-			line_width=line_width,
+			line_width=line_width
 		)
 		axes[1, component_index].set_ylim(y_min, y_max)
 
@@ -537,7 +537,7 @@ def plot_real_virtual_capture(
 				title=f"Virtual IMU aligned | {axis_name} axis",
 				unit=GROUP_TO_UNIT[signal_group],
 				time_range_sec=time_range_sec,
-				line_width=line_width,
+				line_width=line_width
 			)
    
 			axes[2, component_index].set_ylim(y_min, y_max)
@@ -603,7 +603,7 @@ def prepare_robotemotions_capture(csv_path: Path | str, sensor_order: Sequence[s
 		"df": df,
 		"timestamps_sec": timestamps_sec,
 		"sample_slice": sample_slice,
-		"sensor_to_index": sensor_to_index,
+		"sensor_to_index": sensor_to_index
 	}
 
 
@@ -626,7 +626,7 @@ def plot_robotemotions_imus_csv(
 		sensor_order=sensor_order,
 		selected_sensors=selected_sensors,
 		start_idx=start_idx,
-		end_idx=end_idx,
+		end_idx=end_idx
 	)
 
 	df = prepared["df"]
@@ -638,12 +638,7 @@ def plot_robotemotions_imus_csv(
 
 	n_rows = len(selected_sensors)
 	n_cols = len(modalities)
-	fig, axes = plt.subplots(
-		n_rows,
-		n_cols,
-		figsize=(6 * n_cols, 3.2 * n_rows),
-		squeeze=False,
-	)
+	fig, axes = plt.subplots(n_rows, n_cols, figsize=(6 * n_cols, 3.2 * n_rows), squeeze=False)
 
 	for row_index, sensor_name in enumerate(selected_sensors):
 		sensor_idx = sensor_to_index[sensor_name]
@@ -665,7 +660,7 @@ def plot_robotemotions_imus_csv(
 						timestamps_sec.iloc[sample_slice],
 						signal_values.iloc[sample_slice],
 						label=f"{modality}_{axis_label}",
-						linewidth=1.0,
+						linewidth=1.0
 					)
 					plotted = True
 

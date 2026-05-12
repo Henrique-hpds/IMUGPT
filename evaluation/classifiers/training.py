@@ -11,27 +11,16 @@ from sklearn.utils.class_weight import compute_class_weight
 
 try:
     from tqdm import tqdm as _std_tqdm
-except ImportError:  # pragma: no cover - optional dependency guard
+except ImportError:
     _std_tqdm = None
 
 from .metrics import compute_multitask_metrics
 from .model import MultitaskFusionClassifier, ensure_torch_available
 
-_TORCH_IMPORT_ERROR: Exception | None = None
-try:
-    import torch
-    import torch.nn.functional as F
-    from torch import nn
-    from torch.utils.data import DataLoader, Dataset, WeightedRandomSampler
-except ImportError as exc:  # pragma: no cover - optional dependency guard
-    torch = None  # type: ignore[assignment]
-    F = None  # type: ignore[assignment]
-    nn = None  # type: ignore[assignment]
-    DataLoader = object  # type: ignore[assignment]
-    Dataset = object  # type: ignore[assignment]
-    WeightedRandomSampler = object  # type: ignore[assignment]
-    _TORCH_IMPORT_ERROR = exc
-
+import torch
+import torch.nn.functional as F
+from torch import nn
+from torch.utils.data import DataLoader, Dataset, WeightedRandomSampler
 
 HEAD_TO_LOGIT_KEY = {
     "emotion": "emotion_logits",
@@ -39,15 +28,6 @@ HEAD_TO_LOGIT_KEY = {
     "stimulus": "stimulus_logits",
     "flat_tag": "flat_tag_logits",
 }
-
-
-def ensure_training_dependencies() -> None:
-    ensure_torch_available()
-    if torch is None:
-        raise ImportError(
-            "evaluation.classifiers.training requires PyTorch."
-        ) from _TORCH_IMPORT_ERROR
-
 
 @dataclass(frozen=True)
 class ModelConfig:
@@ -59,7 +39,6 @@ class ModelConfig:
     use_domain_head: bool = True
     quality_dim: int = 8
     modality_dropout_p: float = 0.1
-
 
 @dataclass(frozen=True)
 class TrainingConfig:
@@ -87,7 +66,6 @@ class TrainingConfig:
     show_progress: bool = True
     progress_backend: str = "auto"
 
-
 def resolve_progress_tqdm() -> Any | None:
     if _std_tqdm is None:
         return None
@@ -106,11 +84,9 @@ def resolve_progress_tqdm() -> Any | None:
         return _std_tqdm
     return notebook_tqdm
 
-
 def _use_tqdm_progress(training_config: TrainingConfig) -> bool:
     backend = str(training_config.progress_backend).strip().lower()
     return bool(training_config.show_progress) and backend in {"auto", "tqdm"} and resolve_progress_tqdm() is not None
-
 
 class WindowTensorDataset(Dataset):
     def __init__(self, arrays: Mapping[str, Any]) -> None:
@@ -128,41 +104,34 @@ class WindowTensorDataset(Dataset):
         return int(self.pose.shape[0])
 
     def __getitem__(self, index: int) -> dict[str, torch.Tensor]:
-        ensure_training_dependencies()
         item = {
             "pose": torch.from_numpy(self.pose[index]),
             "imu": torch.from_numpy(self.imu[index]),
             "quality": torch.from_numpy(self.quality[index]),
             "domain": torch.tensor(int(self.domain[index]), dtype=torch.long),
-            "classification_mask": torch.tensor(float(self.classification_mask[index]), dtype=torch.float32),
+            "classification_mask": torch.tensor(float(self.classification_mask[index]), dtype=torch.float32)
         }
         for head_name, values in self.targets.items():
             item[f"{head_name}_target"] = torch.tensor(int(values[index]), dtype=torch.long)
         return item
 
-
 def _resolve_device(device: str) -> torch.device:
-    ensure_training_dependencies()
     normalized = str(device).strip().lower()
     if normalized == "auto":
         return torch.device("cuda" if torch.cuda.is_available() else "cpu")
     return torch.device(normalized)
-
 
 def _normalize_pose_batch(pose_batch: torch.Tensor) -> torch.Tensor:
     mean = pose_batch.mean(dim=(1, 2), keepdim=True)
     std = pose_batch.std(dim=(1, 2), keepdim=True).clamp_min(1e-6)
     return (pose_batch - mean) / std
 
-
 def _normalize_imu_batch(imu_batch: torch.Tensor) -> torch.Tensor:
     mean = imu_batch.mean(dim=1, keepdim=True)
     std = imu_batch.std(dim=1, keepdim=True).clamp_min(1e-6)
     return (imu_batch - mean) / std
 
-
 def _compute_class_weights(labels: np.ndarray, num_classes: int) -> torch.Tensor:
-    ensure_training_dependencies()
     present_classes = np.unique(np.asarray(labels, dtype=np.int64))
     if present_classes.size == 0:
         return torch.ones(num_classes, dtype=torch.float32)
@@ -170,7 +139,6 @@ def _compute_class_weights(labels: np.ndarray, num_classes: int) -> torch.Tensor
     weights = np.ones(int(num_classes), dtype=np.float32)
     weights[present_classes] = weights_present.astype(np.float32, copy=False)
     return torch.tensor(weights, dtype=torch.float32)
-
 
 def _balanced_sample_weights(labels: np.ndarray, *, power: float = 1.0) -> np.ndarray:
     label_array = np.asarray(labels, dtype=np.int64)
@@ -183,14 +151,7 @@ def _balanced_sample_weights(labels: np.ndarray, *, power: float = 1.0) -> np.nd
         weights[sample_index] = float((1.0 / label_count) ** float(power))
     return weights
 
-
-def _weighted_cross_entropy(
-    logits: torch.Tensor,
-    targets: torch.Tensor,
-    *,
-    class_weights: torch.Tensor | None,
-    label_smoothing: float,
-) -> torch.Tensor:
+def _weighted_cross_entropy(logits: torch.Tensor,targets: torch.Tensor,*,class_weights: torch.Tensor | None,label_smoothing: float) -> torch.Tensor:
     if logits.numel() == 0:
         return logits.new_zeros(())
     num_classes = logits.shape[1]
@@ -205,14 +166,7 @@ def _weighted_cross_entropy(
         losses = losses * class_weights.to(logits.device)[targets]
     return losses.mean()
 
-
-def _class_balanced_focal_loss(
-    logits: torch.Tensor,
-    targets: torch.Tensor,
-    *,
-    class_weights: torch.Tensor | None,
-    gamma: float,
-) -> torch.Tensor:
+def _class_balanced_focal_loss(logits: torch.Tensor, targets: torch.Tensor, *, class_weights: torch.Tensor | None, gamma: float) -> torch.Tensor:
     if logits.numel() == 0:
         return logits.new_zeros(())
     ce_loss = F.cross_entropy(logits, targets, weight=None, reduction="none")
@@ -222,16 +176,7 @@ def _class_balanced_focal_loss(
         focal = focal * class_weights.to(logits.device)[targets]
     return focal.mean()
 
-
-def _head_loss(
-    logits: torch.Tensor,
-    targets: torch.Tensor,
-    *,
-    class_weights: torch.Tensor | None,
-    label_smoothing: float,
-    use_cb_focal: bool,
-    focal_gamma: float,
-) -> torch.Tensor:
+def _head_loss(logits: torch.Tensor, targets: torch.Tensor, *, class_weights: torch.Tensor | None, label_smoothing: float, use_cb_focal: bool, focal_gamma: float) -> torch.Tensor:
     if use_cb_focal:
         return _class_balanced_focal_loss(
             logits,
@@ -253,7 +198,7 @@ def infer_model_shapes(arrays: Mapping[str, Any]) -> dict[str, int]:
     return {
         "pose_in_channels": int(pose.shape[-1]),
         "imu_in_channels": int(imu.shape[2] * imu.shape[3]),
-        "quality_dim": int(np.asarray(arrays["quality"], dtype=np.float32).shape[1]),
+        "quality_dim": int(np.asarray(arrays["quality"], dtype=np.float32).shape[1])
     }
 
 
@@ -269,11 +214,7 @@ def _slice_arrays(arrays: Mapping[str, Any], indices: np.ndarray) -> dict[str, A
             head_name: np.asarray(values, dtype=np.int64)[index_array]
             for head_name, values in dict(arrays["targets"]).items()
         },
-        "metadata": (
-            arrays["metadata"].iloc[index_array].reset_index(drop=True)
-            if "metadata" in arrays and arrays["metadata"] is not None
-            else None
-        ),
+        "metadata": (arrays["metadata"].iloc[index_array].reset_index(drop=True) if "metadata" in arrays and arrays["metadata"] is not None else None)
     }
 
 
@@ -284,9 +225,8 @@ def build_model(
     model_config: ModelConfig,
     use_pose_branch: bool,
     use_imu_branch: bool,
-    use_domain_head: bool,
-) -> MultitaskFusionClassifier:
-    ensure_training_dependencies()
+    use_domain_head: bool) -> MultitaskFusionClassifier:
+
     shapes = infer_model_shapes(arrays)
     return MultitaskFusionClassifier(
         pose_in_channels=shapes["pose_in_channels"],
@@ -303,15 +243,12 @@ def build_model(
         trunk_blocks=int(model_config.trunk_blocks),
         dropout=float(model_config.dropout),
         quality_dim=int(shapes["quality_dim"] if model_config.quality_dim > 0 else 0),
-        modality_dropout_p=float(model_config.modality_dropout_p),
+        modality_dropout_p=float(model_config.modality_dropout_p)
     )
 
-
 def _build_sampler(labels: np.ndarray, *, power: float) -> WeightedRandomSampler:
-    ensure_training_dependencies()
     weights = _balanced_sample_weights(np.asarray(labels, dtype=np.int64), power=float(power))
     return WeightedRandomSampler(torch.from_numpy(weights), num_samples=len(weights), replacement=True)
-
 
 def _build_classification_arrays(arrays: Mapping[str, Any]) -> dict[str, Any]:
     supervised_indices = np.flatnonzero(np.asarray(arrays["classification_mask"], dtype=np.float32) > 0.0)
@@ -319,59 +256,47 @@ def _build_classification_arrays(arrays: Mapping[str, Any]) -> dict[str, Any]:
         raise ValueError("Classification training requires at least one supervised sample.")
     return _slice_arrays(arrays, supervised_indices)
 
-
-def _build_classification_loader(
-    arrays: Mapping[str, Any],
-    training_config: TrainingConfig,
-) -> tuple[dict[str, Any], DataLoader]:
+def _build_classification_loader(arrays: Mapping[str, Any], training_config: TrainingConfig) -> tuple[dict[str, Any], DataLoader]:
+    
     classification_arrays = _build_classification_arrays(arrays)
     dataset = WindowTensorDataset(classification_arrays)
+    
     sampler = _build_sampler(
         np.asarray(classification_arrays["targets"]["flat_tag"], dtype=np.int64),
-        power=float(training_config.sampler_power),
+        power=float(training_config.sampler_power)
     )
-    batch_size = int(
-        training_config.batch_size
-        if training_config.classification_batch_size is None
-        else training_config.classification_batch_size
-    )
+    
+    batch_size = int(training_config.batch_size if training_config.classification_batch_size is None else training_config.classification_batch_size)
+    
     loader = DataLoader(
         dataset,
         batch_size=batch_size,
         sampler=sampler,
-        num_workers=int(training_config.num_workers),
+        num_workers=int(training_config.num_workers)
     )
+    
     return classification_arrays, loader
 
-
-def _build_domain_loader(
-    arrays: Mapping[str, Any],
-    training_config: TrainingConfig,
-) -> DataLoader:
+def _build_domain_loader(arrays: Mapping[str, Any], training_config: TrainingConfig) -> DataLoader:
     dataset = WindowTensorDataset(arrays)
     sampler = _build_sampler(
         np.asarray(arrays["domain"], dtype=np.int64),
-        power=float(training_config.sampler_power),
+        power=float(training_config.sampler_power)
     )
-    batch_size = int(
-        training_config.batch_size
-        if training_config.domain_batch_size is None
-        else training_config.domain_batch_size
-    )
+    
+    batch_size = int(training_config.batch_size if training_config.domain_batch_size is None else training_config.domain_batch_size)
     return DataLoader(
         dataset,
         batch_size=batch_size,
         sampler=sampler,
-        num_workers=int(training_config.num_workers),
+        num_workers=int(training_config.num_workers)
     )
-
 
 def _prepare_batch(batch: Mapping[str, torch.Tensor], device: torch.device) -> dict[str, torch.Tensor]:
     prepared = {key: value.to(device) for key, value in batch.items()}
     prepared["pose"] = _normalize_pose_batch(prepared["pose"])
     prepared["imu"] = _normalize_imu_batch(prepared["imu"])
     return prepared
-
 
 def _gather_predictions(
     model: MultitaskFusionClassifier,
@@ -381,17 +306,13 @@ def _gather_predictions(
     batch_size: int,
     device: torch.device,
     scored_class_ids: Mapping[str, Sequence[int]] | None = None,
-    filter_unsupervised: bool = True,
-) -> dict[str, Any]:
-    ensure_training_dependencies()
+    filter_unsupervised: bool = True) -> dict[str, Any]:
+    
     dataset = WindowTensorDataset(arrays)
     loader = DataLoader(dataset, batch_size=int(batch_size), shuffle=False)
     predictions: dict[str, list[np.ndarray]] = {head_name: [] for head_name in label_encoders.keys()}
     probabilities: dict[str, list[np.ndarray]] = {head_name: [] for head_name in label_encoders.keys()}
-    targets: dict[str, np.ndarray] = {
-        head_name: np.asarray(arrays["targets"][head_name], dtype=np.int64)
-        for head_name in label_encoders.keys()
-    }
+    targets: dict[str, np.ndarray] = {head_name: np.asarray(arrays["targets"][head_name], dtype=np.int64) for head_name in label_encoders.keys()}
 
     model.eval()
     with torch.no_grad():
@@ -401,8 +322,9 @@ def _gather_predictions(
                 pose_inputs=prepared["pose"],
                 imu_inputs=prepared["imu"],
                 quality_inputs=prepared["quality"],
-                domain_lambda=1.0,
+                domain_lambda=1.0
             )
+            
             for head_name in label_encoders.keys():
                 logit_key = HEAD_TO_LOGIT_KEY[head_name]
                 if logit_key not in outputs:
@@ -412,39 +334,22 @@ def _gather_predictions(
                 predictions[head_name].append(torch.argmax(probs, dim=1).cpu().numpy())
                 probabilities[head_name].append(probs.cpu().numpy())
 
-    merged_predictions = {
-        head_name: np.concatenate(head_blocks, axis=0).astype(np.int64)
-        for head_name, head_blocks in predictions.items()
-        if len(head_blocks) > 0
-    }
-    merged_probabilities = {
-        head_name: np.concatenate(head_blocks, axis=0).astype(np.float32)
-        for head_name, head_blocks in probabilities.items()
-        if len(head_blocks) > 0
-    }
+    merged_predictions = {head_name: np.concatenate(head_blocks, axis=0).astype(np.int64) for head_name, head_blocks in predictions.items() if len(head_blocks) > 0}
+    merged_probabilities = {head_name: np.concatenate(head_blocks, axis=0).astype(np.float32) for head_name, head_blocks in probabilities.items() if len(head_blocks) > 0}
+    
     supervised_mask = np.asarray(arrays["classification_mask"], dtype=np.float32) > 0.0
     evaluation_mask = supervised_mask if bool(filter_unsupervised) else np.ones_like(supervised_mask, dtype=bool)
-    filtered_targets = {
-        head_name: values[evaluation_mask]
-        for head_name, values in targets.items()
-        if head_name in merged_predictions
-    }
-    filtered_predictions = {
-        head_name: values[evaluation_mask]
-        for head_name, values in merged_predictions.items()
-    }
-    filtered_probabilities = {
-        head_name: values[evaluation_mask]
-        for head_name, values in merged_probabilities.items()
-    }
+    filtered_targets = {head_name: values[evaluation_mask] for head_name, values in targets.items() if head_name in merged_predictions}
+    
+    filtered_predictions = {head_name: values[evaluation_mask] for head_name, values in merged_predictions.items()}
+    filtered_probabilities = {head_name: values[evaluation_mask] for head_name, values in merged_probabilities.items()}
+    
     return {
         "targets": filtered_targets,
         "predictions": filtered_predictions,
         "probabilities": filtered_probabilities,
         "metadata": (
-            arrays["metadata"].iloc[np.flatnonzero(evaluation_mask)].reset_index(drop=True)
-            if "metadata" in arrays and arrays["metadata"] is not None
-            else None
+            arrays["metadata"].iloc[np.flatnonzero(evaluation_mask)].reset_index(drop=True) if "metadata" in arrays and arrays["metadata"] is not None else None
         ),
         "classification_mask": evaluation_mask.astype(bool),
         "metrics": compute_multitask_metrics(
@@ -452,10 +357,9 @@ def _gather_predictions(
             y_pred=filtered_predictions,
             probabilities=filtered_probabilities,
             label_encoders=label_encoders,
-            scored_class_ids=scored_class_ids,
-        ),
+            scored_class_ids=scored_class_ids
+        )
     }
-
 
 def evaluate_multitask_model(
     model: MultitaskFusionClassifier,
@@ -465,9 +369,7 @@ def evaluate_multitask_model(
     batch_size: int,
     device: torch.device,
     scored_class_ids: Mapping[str, Sequence[int]] | None = None,
-    filter_unsupervised: bool = True,
-) -> dict[str, Any]:
-    ensure_training_dependencies()
+    filter_unsupervised: bool = True) -> dict[str, Any]:
     return _gather_predictions(
         model,
         arrays,
@@ -475,15 +377,10 @@ def evaluate_multitask_model(
         batch_size=batch_size,
         device=device,
         scored_class_ids=scored_class_ids,
-        filter_unsupervised=filter_unsupervised,
+        filter_unsupervised=filter_unsupervised
     )
 
-
-def _resolve_selection_metric(
-    report: Mapping[str, Any],
-    *,
-    selection_head: str,
-) -> float:
+def _resolve_selection_metric(report: Mapping[str, Any], *, selection_head: str) -> float:
     metrics = dict(report.get("metrics", {}))
     per_head = dict(metrics.get("per_head", {}))
     if selection_head in per_head:
@@ -491,7 +388,6 @@ def _resolve_selection_metric(
         return float(head_metrics.get("supported_macro_f1", head_metrics.get("macro_f1", 0.0)))
     global_metric = metrics.get("global_score_macro_f1_mean")
     return 0.0 if global_metric is None else float(global_metric)
-
 
 def train_multitask_model(
     *,
@@ -504,9 +400,8 @@ def train_multitask_model(
     use_imu_branch: bool,
     use_domain_head: bool,
     scored_class_ids: Mapping[str, Sequence[int]] | None = None,
-    progress_label: str | None = None,
-) -> dict[str, Any]:
-    ensure_training_dependencies()
+    progress_label: str | None = None) -> dict[str, Any]:
+
     device = _resolve_device(training_config.device)
     model = build_model(
         arrays=train_arrays,
@@ -514,7 +409,7 @@ def train_multitask_model(
         model_config=model_config,
         use_pose_branch=use_pose_branch,
         use_imu_branch=use_imu_branch,
-        use_domain_head=use_domain_head,
+        use_domain_head=use_domain_head
     ).to(device)
 
     classification_train_arrays, classification_loader = _build_classification_loader(train_arrays, training_config)
@@ -522,7 +417,7 @@ def train_multitask_model(
     optimizer = torch.optim.AdamW(
         model.parameters(),
         lr=float(training_config.learning_rate),
-        weight_decay=float(training_config.weight_decay),
+        weight_decay=float(training_config.weight_decay)
     )
 
     class_weights = {
@@ -533,10 +428,8 @@ def train_multitask_model(
         for head_name in ("emotion", "modality", "stimulus", "flat_tag")
         if head_name in classification_train_arrays["targets"]
     }
-    domain_class_weights = _compute_class_weights(
-        np.asarray(train_arrays["domain"], dtype=np.int64),
-        2,
-    ).to(device)
+    
+    domain_class_weights = _compute_class_weights(np.asarray(train_arrays["domain"], dtype=np.int64), 2).to(device)
 
     best_state = copy.deepcopy(model.state_dict())
     best_metric = -np.inf
@@ -567,7 +460,7 @@ def train_multitask_model(
                 total=len(classification_loader),
                 desc=f"{batch_desc_prefix}Epoch {int(epoch_index) + 1}/{int(training_config.max_epochs)}",
                 unit="batch",
-                leave=False,
+                leave=False
             )
 
         for classification_batch in batch_iterator:
@@ -577,14 +470,14 @@ def train_multitask_model(
                 pose_inputs=prepared["pose"],
                 imu_inputs=prepared["imu"],
                 quality_inputs=prepared["quality"],
-                domain_lambda=0.0,
+                domain_lambda=0.0
             )
 
             loss = torch.zeros((), device=device)
             for head_name, head_weight in (
                 ("emotion", training_config.emotion_loss_weight),
                 ("modality", training_config.modality_loss_weight),
-                ("stimulus", training_config.stimulus_loss_weight),
+                ("stimulus", training_config.stimulus_loss_weight)
             ):
                 if float(head_weight) <= 0.0:
                     continue
@@ -594,7 +487,7 @@ def train_multitask_model(
                     class_weights=class_weights[head_name],
                     label_smoothing=float(training_config.label_smoothing),
                     use_cb_focal=bool(training_config.use_cb_focal and head_name in focal_heads),
-                    focal_gamma=float(training_config.focal_gamma),
+                    focal_gamma=float(training_config.focal_gamma)
                 )
 
             if "flat_tag_logits" in outputs and "flat_tag" in class_weights and float(training_config.flat_tag_loss_weight) > 0.0:
@@ -604,7 +497,7 @@ def train_multitask_model(
                     class_weights=class_weights["flat_tag"],
                     label_smoothing=float(training_config.label_smoothing),
                     use_cb_focal=bool(training_config.use_cb_focal and "flat_tag" in focal_heads),
-                    focal_gamma=float(training_config.focal_gamma),
+                    focal_gamma=float(training_config.focal_gamma)
                 )
 
             if bool(use_domain_head) and domain_iterator is not None:
@@ -614,15 +507,16 @@ def train_multitask_model(
                     pose_inputs=prepared_domain["pose"],
                     imu_inputs=prepared_domain["imu"],
                     quality_inputs=prepared_domain["quality"],
-                    domain_lambda=float(training_config.grl_lambda),
+                    domain_lambda=float(training_config.grl_lambda)
                 )
+                
                 loss = loss + float(training_config.domain_loss_weight) * _head_loss(
                     domain_outputs["domain_logits"],
                     prepared_domain["domain"],
                     class_weights=domain_class_weights,
                     label_smoothing=0.0,
                     use_cb_focal=False,
-                    focal_gamma=float(training_config.focal_gamma),
+                    focal_gamma=float(training_config.focal_gamma)
                 )
 
             loss.backward()
@@ -645,12 +539,14 @@ def train_multitask_model(
             batch_size=int(training_config.batch_size),
             device=device,
             scored_class_ids=scored_class_ids,
-            filter_unsupervised=True,
+            filter_unsupervised=True
         )
+        
         val_metric_value = _resolve_selection_metric(
             val_report,
-            selection_head=str(training_config.selection_head),
+            selection_head=str(training_config.selection_head)
         )
+        
         if val_metric_value > best_metric:
             best_metric = val_metric_value
             best_state = copy.deepcopy(model.state_dict())
@@ -660,21 +556,23 @@ def train_multitask_model(
                 "epoch": int(epoch_index + 1),
                 "train_loss": float(running_loss / max(1, num_batches)),
                 "val_selection_metric": float(val_metric_value),
-                "val_global_score_macro_f1_mean": float(val_report["metrics"].get("global_score_macro_f1_mean") or 0.0),
+                "val_global_score_macro_f1_mean": float(val_report["metrics"].get("global_score_macro_f1_mean") or 0.0)
             }
         )
+        
         if use_tqdm_progress:
             epoch_iterator.set_postfix(
                 train_loss=f"{running_loss / max(1, num_batches):.4f}",
-                val_metric=f"{float(val_metric_value):.4f}",
+                val_metric=f"{float(val_metric_value):.4f}"
             )
+            
         elif bool(training_config.show_progress):
             label = "Training" if not progress_label else progress_label
             print(
                 f"{label} | epoch {int(epoch_index) + 1}/{int(training_config.max_epochs)} "
                 f"train_loss={running_loss / max(1, num_batches):.4f} "
                 f"val_metric={float(val_metric_value):.4f}",
-                flush=True,
+                flush=True
             )
 
     if use_tqdm_progress:
@@ -688,8 +586,9 @@ def train_multitask_model(
         batch_size=int(training_config.batch_size),
         device=device,
         scored_class_ids=scored_class_ids,
-        filter_unsupervised=True,
+        filter_unsupervised=True
     )
+    
     final_val_report = _gather_predictions(
         model,
         val_arrays,
@@ -697,13 +596,14 @@ def train_multitask_model(
         batch_size=int(training_config.batch_size),
         device=device,
         scored_class_ids=scored_class_ids,
-        filter_unsupervised=True,
+        filter_unsupervised=True
     )
+    
     return {
         "model": model,
         "history": history,
         "train_report": final_train_report,
         "val_report": final_val_report,
         "best_val_selection_metric": None if best_metric == -np.inf else float(best_metric),
-        "device": str(device),
+        "device": str(device)
     }

@@ -1,50 +1,50 @@
-# Configuracao do alinhamento geometrico entre IMU virtual e IMU real.
-# Leitura rapida:
-# - `fit_from_current_pair: true` => aprende uma rotacao por captura
-# - `fit_from_current_pair: false` => reaproveita transforms fora do clip atual
+# Configuration for geometric alignment between virtual IMU and real IMU.
+# Quick reference:
+# - `fit_from_current_pair: true` => learns one rotation per capture
+# - `fit_from_current_pair: false` => reuses transforms from outside the current clip
 
-# Liga ou desliga o modulo inteiro.
+# Enables or disables the entire module.
 enable: true
 
-# Estima um pequeno atraso temporal antes do ajuste.
+# Estimates a small temporal delay before fitting.
 enable_time_lag_estimation: true
-# Estima a rotacao 3D entre virtual e real.
+# Estimates the 3D rotation between virtual and real.
 enable_rotation_alignment: true
-# Abre a porta para refino de bias/scale.
+# Opens the door for bias/scale refinement.
 enable_bias_scale_refinement: true
 
-# Mantem a busca de lag ativa. Em geral deixe `true`.
+# Keeps lag search active. Generally leave `true`.
 estimate_time_lag: true
-# Lag maximo em numero de amostras.
+# Maximum lag in number of samples.
 max_lag_samples: 20
-# Qual sinal usar para achar o lag: `gyro_norm` ou `acc_norm`.
+# Which signal to use for lag detection: `gyro_norm` or `acc_norm`.
 lag_signal: "gyro_norm"
 
-# Usa acelerometro no ajuste.
+# Uses accelerometer in the fit.
 use_acc: true
-# Usa giroscopio no ajuste.
+# Uses gyroscope in the fit.
 use_gyro: true
-# Ajusta bias por eixo. So vale se o refino estiver ligado.
+# Adjusts bias per axis. Only applies if refinement is enabled.
 use_bias: false
-# Ajusta escala por eixo. So vale se o refino estiver ligado.
+# Adjusts scale per axis. Only applies if refinement is enabled.
 use_scale: true
 
-# Se `true`, favorece trechos quase parados para usar gravidade.
+# If `true`, favors near-static windows to leverage gravity.
 gravity_window_only: true
-# Movimento minimo do gyro para considerar a amostra informativa.
+# Minimum gyro motion norm to consider a sample informative.
 min_motion_norm_gyro: 0.5 # original 0.1
-# Norma minima do acc para considerar a amostra informativa.
+# Minimum acc norm to consider a sample informative.
 min_motion_norm_acc: 0.2
-# Regularizacao numerica pequena para o ajuste.
+# Small numerical regularization for the fit.
 ridge_lambda: 1.0e-6
 
-# Pasta base para salvar artifacts do alinhamento.
+# Base directory for saving alignment artifacts.
 output_dir: "./output/imu_alignment"
-# Salva o JSON de transforms aprendidos.
+# Saves the learned transforms JSON.
 save_transforms: false
-# Salva metricas e relatorios do alinhamento.
+# Saves alignment metrics and reports.
 save_metrics: true
-# `true` = fit no par atual, por captura. `false` = usa/reaproveita transforms externos.
+# `true` = fit on current pair, per capture. `false` = use/reuse external transforms.
 fit_from_current_pair: true
-# Caminho fixo para um JSON de transforms. `null` usa o caminho padrao do output atual.
+# Fixed path to a transforms JSON. `null` uses the default path from the current output.
 transforms_path: null

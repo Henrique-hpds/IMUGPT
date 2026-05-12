@@ -1,4 +1,4 @@
-"""Temporal interpolation and smoothing helpers for stage 5.4."""
+"""Temporal interpolation and smoothing helpers"""
 
 from __future__ import annotations
 

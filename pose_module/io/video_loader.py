@@ -1,4 +1,4 @@
-"""Video metadata and frame-selection helpers for stage 5.1."""
+"""Video metadata and frame-selection helpers"""
 
 from __future__ import annotations
 
@@ -69,11 +69,7 @@ def read_video_metadata(video_path: str | Path) -> dict[str, Any]:
     }
 
 
-def select_frame_indices(
-    num_frames: int,
-    fps_original: Optional[float],
-    fps_target: int,
-) -> Tuple[np.ndarray, Optional[float], np.ndarray]:
+def select_frame_indices(num_frames: int, fps_original: Optional[float], fps_target: int):
     if int(num_frames) <= 0:
         empty = np.empty((0,), dtype=np.int32)
         return empty, None, empty.astype(np.float32)
@@ -106,10 +102,7 @@ def select_frame_indices(
     return indices, float(fps_target), timestamps
 
 
-def frame_indices_to_timestamps(
-    frame_indices: np.ndarray,
-    fps_original: Optional[float],
-) -> np.ndarray:
+def frame_indices_to_timestamps(frame_indices: np.ndarray,fps_original: Optional[float]) -> np.ndarray:
     frame_indices = np.asarray(frame_indices, dtype=np.int32)
     if fps_original is None or float(fps_original) <= 0.0:
         return frame_indices.astype(np.float32)

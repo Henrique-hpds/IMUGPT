@@ -5,12 +5,7 @@ from typing import Any, Mapping, Sequence
 
 import numpy as np
 import pandas as pd
-from sklearn.model_selection import GroupKFold, GroupShuffleSplit
-
-try:
-    from sklearn.model_selection import StratifiedGroupKFold
-except ImportError:  # pragma: no cover - depends on sklearn version
-    StratifiedGroupKFold = None
+from sklearn.model_selection import GroupKFold, GroupShuffleSplit, StratifiedGroupKFold
 
 from .metrics import (
     PRIMARY_HEADS,
@@ -28,6 +23,10 @@ from .training import (
     train_multitask_model,
 )
 
+# Each entry declares which modalities are active, how training data is assembled
+# (domain name + whether labels are supervised), and which domain is used at eval time.
+# train_blocks is a list of (domain_name, supervised) pairs — unsupervised blocks
+# contribute to domain-adversarial training but are masked out of classification loss.
 EXPERIMENT_SPECS: dict[str, dict[str, Any]] = {
     "vision_only": {
         "use_pose": True,
@@ -36,21 +35,21 @@ EXPERIMENT_SPECS: dict[str, dict[str, Any]] = {
         "train_blocks": [("real", True)],
         "eval_domain": "real",
     },
-    "imu_only_r2r": {
+    "imu_only_r2r": {           # real → real: upper-bound with real IMU labels
         "use_pose": False,
         "use_imu": True,
         "use_domain_head": False,
         "train_blocks": [("real", True)],
         "eval_domain": "real",
     },
-    "imu_only_s2r": {
+    "imu_only_s2r": {           # synthetic → real: domain adaptation with no real labels
         "use_pose": False,
         "use_imu": True,
         "use_domain_head": True,
         "train_blocks": [("synthetic", True), ("real", False)],
         "eval_domain": "real",
     },
-    "imu_only_mixed2r": {
+    "imu_only_mixed2r": {       # both domains supervised; domain head reduces representation gap
         "use_pose": False,
         "use_imu": True,
         "use_domain_head": True,
@@ -80,24 +79,25 @@ EXPERIMENT_SPECS: dict[str, dict[str, Any]] = {
     },
 }
 
-
 @dataclass(frozen=True)
 class SplitConfig:
     n_splits: int = 5
     random_state: int = 42
+    # "group_kfold" keeps all windows from the same subject in one fold;
+    # "stratified_group_kfold" additionally balances class distribution across folds.
     strategy: str = "group_kfold"
     group_column: str = "subject_group"
     stratify_column: str = "flat_tag_id"
     primary_head: str = "emotion"
+    # Classes with fewer distinct subject groups than this threshold are excluded from
+    # scored_class_ids so rare labels don't skew the benchmark metric.
     min_subject_groups_per_class: int = 2
+    # "oof": concatenate held-out predictions across folds before computing metrics (unbiased).
+    # "mean_fold": average per-fold metrics (faster but can be biased by fold size).
     aggregate_mode: str = "oof"
 
-
-def build_subject_group_splits(
-    metadata: pd.DataFrame,
-    *,
-    config: SplitConfig | None = None,
-) -> list[dict[str, Any]]:
+def build_subject_group_splits(metadata: pd.DataFrame, *, config: SplitConfig | None = None) -> list[dict[str, Any]]:
+    # Returns fold dicts with integer indices into the original metadata row order.
     resolved_config = SplitConfig() if config is None else config
     metadata_frame = metadata.reset_index(drop=True).copy()
     groups = metadata_frame[resolved_config.group_column].astype(str).to_numpy()
@@ -110,29 +110,23 @@ def build_subject_group_splits(
         splitter = GroupKFold(n_splits=int(resolved_config.n_splits))
         split_iterator = splitter.split(sample_indices, groups=groups)
     elif strategy == "stratified_group_kfold" and StratifiedGroupKFold is not None:
-        splitter = StratifiedGroupKFold(
-            n_splits=int(resolved_config.n_splits),
-            shuffle=True,
-            random_state=int(resolved_config.random_state),
-        )
+        splitter = StratifiedGroupKFold(n_splits=int(resolved_config.n_splits), shuffle=True, random_state=int(resolved_config.random_state))
         split_iterator = splitter.split(sample_indices, stratify_values, groups)
     else:
-        raise ValueError(
-            "Unsupported split strategy. Expected 'group_kfold' or 'stratified_group_kfold' with sklearn support."
-        )
+        raise ValueError("Unsupported split strategy. Expected 'group_kfold' or 'stratified_group_kfold' with sklearn support.")
 
     for split_index, (train_indices, test_indices) in enumerate(split_iterator):
         splits.append(
             {
                 "split_id": int(split_index),
                 "train_indices": np.asarray(train_indices, dtype=np.int64),
-                "test_indices": np.asarray(test_indices, dtype=np.int64),
+                "test_indices": np.asarray(test_indices, dtype=np.int64)
             }
         )
     return splits
 
-
 def _stack_blocks(blocks: Sequence[dict[str, Any]]) -> dict[str, Any]:
+    # Concatenates multi-domain blocks along the sample axis into a single training batch.
     if len(blocks) == 0:
         raise ValueError("At least one block is required.")
 
@@ -143,38 +137,31 @@ def _stack_blocks(blocks: Sequence[dict[str, Any]]) -> dict[str, Any]:
         "domain": np.concatenate([np.asarray(block["domain"], dtype=np.int64) for block in blocks], axis=0),
         "classification_mask": np.concatenate(
             [np.asarray(block["classification_mask"], dtype=np.float32) for block in blocks],
-            axis=0,
+            axis=0
         ),
         "targets": {
             head_name: np.concatenate(
                 [np.asarray(block["targets"][head_name], dtype=np.int64) for block in blocks],
-                axis=0,
+                axis=0
             )
             for head_name in blocks[0]["targets"].keys()
         },
-        "metadata": pd.concat([block["metadata"] for block in blocks], axis=0, ignore_index=True),
+        "metadata": pd.concat([block["metadata"] for block in blocks], axis=0, ignore_index=True)
     }
 
 
-def _base_block(
-    dataset_bundle: Mapping[str, Any],
-    *,
-    indices: np.ndarray,
-    domain_name: str,
-    include_pose: bool,
-    include_imu: bool,
-    supervised: bool,
-) -> dict[str, Any]:
+def _base_block(dataset_bundle: Mapping[str, Any], *, indices: np.ndarray, domain_name: str, include_pose: bool, include_imu: bool, supervised: bool):
+    # Zeroing out disabled modalities (instead of dropping them) keeps tensor shapes
+    # uniform across experiments so the same model architecture handles all configs.
     metadata = dataset_bundle["metadata"].iloc[np.asarray(indices, dtype=np.int64)].reset_index(drop=True).copy()
     pose_windows = np.asarray(dataset_bundle["pose_windows"], dtype=np.float32)[indices]
     imu_windows = (
-        np.asarray(dataset_bundle["imu_real_windows"], dtype=np.float32)[indices]
-        if str(domain_name) == "real"
+        np.asarray(dataset_bundle["imu_real_windows"], dtype=np.float32)[indices] if str(domain_name) == "real"
         else np.asarray(dataset_bundle["imu_synthetic_windows"], dtype=np.float32)[indices]
     )
     zero_pose = np.zeros_like(pose_windows, dtype=np.float32)
     zero_imu = np.zeros_like(imu_windows, dtype=np.float32)
-    domain_label = 0 if str(domain_name) == "real" else 1
+    domain_label = 0 if str(domain_name) == "real" else 1  # 0=real, 1=synthetic; used by domain-adversarial head
     metadata["source_domain"] = str(domain_name)
     metadata["is_supervised"] = bool(supervised)
 
@@ -188,18 +175,11 @@ def _base_block(
             head_name: metadata[f"{head_name}_id"].to_numpy(dtype=np.int64)
             for head_name in ("emotion", "modality", "stimulus", "flat_tag")
         },
-        "metadata": metadata,
+        "metadata": metadata
     }
 
-
-def build_experiment_arrays(
-    dataset_bundle: Mapping[str, Any],
-    *,
-    experiment_name: str,
-    train_indices: np.ndarray,
-    val_indices: np.ndarray | None = None,
-    eval_indices: np.ndarray,
-) -> dict[str, Any]:
+def build_experiment_arrays(dataset_bundle: Mapping[str, Any], *, experiment_name: str, train_indices: np.ndarray, val_indices: np.ndarray | None = None, eval_indices: np.ndarray):
+    
     if experiment_name not in EXPERIMENT_SPECS:
         raise ValueError(f"Unsupported experiment_name: {experiment_name}")
 
@@ -220,6 +200,8 @@ def build_experiment_arrays(
         return _stack_blocks(blocks)
 
     train_block = _stack_train_blocks(np.asarray(train_indices, dtype=np.int64))
+    # When no explicit val set is given, reuse the eval set for early stopping — acceptable
+    # only in quick-run / ablation mode where leakage risk is acceptable.
     resolved_val_indices = np.asarray(eval_indices if val_indices is None else val_indices, dtype=np.int64)
     val_block = _stack_train_blocks(resolved_val_indices)
     eval_block = _base_block(
@@ -228,8 +210,9 @@ def build_experiment_arrays(
         domain_name=str(spec["eval_domain"]),
         include_pose=bool(spec["use_pose"]),
         include_imu=bool(spec["use_imu"]),
-        supervised=True,
+        supervised=True
     )
+    
     return {
         "train": train_block,
         "val": val_block,
@@ -237,14 +220,10 @@ def build_experiment_arrays(
         "spec": spec,
     }
 
-
-def _train_val_split(
-    metadata: pd.DataFrame,
-    *,
-    random_state: int,
-    group_column: str = "capture_id",
-) -> tuple[np.ndarray, np.ndarray]:
+def _train_val_split(metadata: pd.DataFrame, *, random_state: int, group_column: str = "capture_id"):
     unique_groups = metadata[group_column].astype(str).nunique()
+    # Degenerate case: only one capture group, so we can't split without data leakage.
+    # Fall back to using the same indices for both train and val (no early-stopping benefit).
     if unique_groups <= 1:
         indices = np.arange(metadata.shape[0], dtype=np.int64)
         return indices, indices
@@ -268,34 +247,26 @@ def _slice_arrays(arrays: Mapping[str, Any], indices: np.ndarray) -> dict[str, A
             head_name: np.asarray(values, dtype=np.int64)[index_array]
             for head_name, values in dict(arrays["targets"]).items()
         },
-        "metadata": arrays["metadata"].iloc[index_array].reset_index(drop=True),
+        "metadata": arrays["metadata"].iloc[index_array].reset_index(drop=True)
     }
 
-
-def run_single_experiment(
-    dataset_bundle: Mapping[str, Any],
-    *,
-    experiment_name: str,
-    split: Mapping[str, Any],
-    model_config: ModelConfig | None = None,
-    training_config: TrainingConfig | None = None,
-    scored_class_ids: Mapping[str, Sequence[int]] | None = None,
-) -> dict[str, Any]:
+def run_single_experiment(dataset_bundle: Mapping[str, Any], *, experiment_name: str, split: Mapping[str, Any], model_config: ModelConfig | None = None, training_config: TrainingConfig | None = None, scored_class_ids: Mapping[str, Sequence[int]] | None = None):
+    
     resolved_model_config = ModelConfig() if model_config is None else model_config
     resolved_training_config = TrainingConfig() if training_config is None else training_config
+    
     outer_train_indices = np.asarray(split["train_indices"], dtype=np.int64)
-    inner_train_relative_indices, inner_val_relative_indices = _train_val_split(
-        dataset_bundle["metadata"].iloc[outer_train_indices].reset_index(drop=True),
-        random_state=int(split.get("split_id", 0)) + 17,
-    )
+    # Offset random_state per fold so val sets don't overlap across folds.
+    inner_train_relative_indices, inner_val_relative_indices = _train_val_split(dataset_bundle["metadata"].iloc[outer_train_indices].reset_index(drop=True), random_state=int(split.get("split_id", 0)) + 17)
     inner_train_indices = outer_train_indices[np.asarray(inner_train_relative_indices, dtype=np.int64)]
     inner_val_indices = outer_train_indices[np.asarray(inner_val_relative_indices, dtype=np.int64)]
+    
     prepared = build_experiment_arrays(
         dataset_bundle,
         experiment_name=experiment_name,
         train_indices=inner_train_indices,
         val_indices=inner_val_indices,
-        eval_indices=np.asarray(split["test_indices"], dtype=np.int64),
+        eval_indices=np.asarray(split["test_indices"], dtype=np.int64)
     )
 
     split_id = int(split.get("split_id", 0))
@@ -315,8 +286,9 @@ def run_single_experiment(
         use_imu_branch=bool(prepared["spec"]["use_imu"]),
         use_domain_head=bool(prepared["spec"]["use_domain_head"]),
         scored_class_ids=scored_class_ids,
-        progress_label=progress_label,
+        progress_label=progress_label
     )
+    
     test_report = evaluate_multitask_model(
         training_result["model"],
         prepared["eval"],
@@ -324,8 +296,9 @@ def run_single_experiment(
         batch_size=int(resolved_training_config.batch_size),
         device=training_result["model"].emotion_head[0].weight.device,
         scored_class_ids=scored_class_ids,
-        filter_unsupervised=True,
+        filter_unsupervised=True
     )
+    
     return {
         "experiment_name": str(experiment_name),
         "split_id": split_id,
@@ -334,29 +307,19 @@ def run_single_experiment(
         "history": list(training_result["history"]),
         "train_metrics": dict(training_result["train_report"]["metrics"]),
         "val_metrics": dict(training_result["val_report"]["metrics"]),
-        "test_predictions": test_report,
+        "test_predictions": test_report
     }
 
-
-def _aggregate_oof_report(
-    experiment_results: Sequence[Mapping[str, Any]],
-    *,
-    label_encoders: Mapping[str, Mapping[str, Any]],
-    scored_class_ids: Mapping[str, Sequence[int]] | None,
-) -> dict[str, Any]:
+def _aggregate_oof_report(experiment_results: Sequence[Mapping[str, Any]], *, label_encoders: Mapping[str, Mapping[str, Any]], scored_class_ids: Mapping[str, Sequence[int]] | None):
+    # Concatenates held-out predictions from all folds before computing metrics, so every
+    # sample contributes exactly once — avoids the fold-size bias of averaging per-fold scores.
     if len(experiment_results) == 0:
         return {
             "targets": {},
             "predictions": {},
             "probabilities": {},
             "metadata": pd.DataFrame(),
-            "metrics": compute_multitask_metrics(
-                y_true={},
-                y_pred={},
-                probabilities=None,
-                label_encoders=label_encoders,
-                scored_class_ids=scored_class_ids,
-            ),
+            "metrics": compute_multitask_metrics(y_true={}, y_pred={}, probabilities=None, label_encoders=label_encoders, scored_class_ids=scored_class_ids)
         }
 
     targets: dict[str, list[np.ndarray]] = {}
@@ -398,23 +361,18 @@ def _aggregate_oof_report(
         y_pred=merged_predictions,
         probabilities=merged_probabilities,
         label_encoders=label_encoders,
-        scored_class_ids=scored_class_ids,
+        scored_class_ids=scored_class_ids
     )
+    
     return {
         "targets": merged_targets,
         "predictions": merged_predictions,
         "probabilities": merged_probabilities,
         "metadata": pd.concat(metadata_blocks, axis=0, ignore_index=True) if metadata_blocks else pd.DataFrame(),
-        "metrics": metrics,
+        "metrics": metrics
     }
 
-
-def _build_oof_summary(
-    oof_reports: Mapping[str, Mapping[str, Any]],
-    *,
-    support_report: pd.DataFrame,
-    primary_head: str,
-) -> pd.DataFrame:
+def _build_oof_summary(oof_reports: Mapping[str, Mapping[str, Any]], *, support_report: pd.DataFrame, primary_head: str):
     rows = []
 
     for experiment_name, oof_report in oof_reports.items():
@@ -428,7 +386,7 @@ def _build_oof_summary(
                 "emotion_macro_f1": None if "emotion" not in per_head else per_head["emotion"]["supported_macro_f1"],
                 "modality_macro_f1": None if "modality" not in per_head else per_head["modality"]["supported_macro_f1"],
                 "stimulus_macro_f1": None if "stimulus" not in per_head else per_head["stimulus"]["supported_macro_f1"],
-                "num_samples": 0 if oof_report["metadata"].empty else int(len(oof_report["metadata"])),
+                "num_samples": 0 if oof_report["metadata"].empty else int(len(oof_report["metadata"]))
             }
         )
 
@@ -436,9 +394,9 @@ def _build_oof_summary(
     if summary.empty:
         return summary
 
+    # Rank by the primary head's F1 when available; fall back to the composite score otherwise.
     ranking_column = f"{primary_head}_macro_f1" if f"{primary_head}_macro_f1" in summary.columns else "global_score_macro_f1_mean"
     return summary.sort_values(ranking_column, ascending=False, kind="stable").reset_index(drop=True)
-
 
 def run_experiment_suite(
     dataset_bundle: Mapping[str, Any],
@@ -446,18 +404,20 @@ def run_experiment_suite(
     experiment_names: Sequence[str] | None = None,
     split_config: SplitConfig | None = None,
     model_config: ModelConfig | None = None,
-    training_config: TrainingConfig | None = None,
-) -> dict[str, Any]:
+    training_config: TrainingConfig | None = None):
+    
     selected_experiments = list(EXPERIMENT_SPECS.keys()) if experiment_names is None else [str(name) for name in experiment_names]
     resolved_split_config = SplitConfig() if split_config is None else split_config
     resolved_training_config = TrainingConfig() if training_config is None else training_config
     splits = build_subject_group_splits(dataset_bundle["metadata"], config=resolved_split_config)
+    
     support_report = build_support_report(
         dataset_bundle["metadata"],
         dataset_bundle["label_encoders"],
         group_column=str(resolved_split_config.group_column),
-        min_subject_groups=int(resolved_split_config.min_subject_groups_per_class),
+        min_subject_groups=int(resolved_split_config.min_subject_groups_per_class)
     )
+    
     scored_class_ids = build_scored_class_ids(support_report, head_names=PRIMARY_HEADS)
     results = []
     total_runs = int(len(selected_experiments) * len(splits))
@@ -469,6 +429,7 @@ def run_experiment_suite(
         and progress_backend in {"auto", "tqdm"}
         and progress_tqdm is not None
     )
+    
     if use_tqdm_progress:
         suite_progress = progress_tqdm(total=total_runs, desc="Experiment suite", unit="fold")
 
@@ -503,15 +464,17 @@ def run_experiment_suite(
         experiment_name: _aggregate_oof_report(
             [result for result in results if str(result.get("experiment_name")) == str(experiment_name)],
             label_encoders=dataset_bundle["label_encoders"],
-            scored_class_ids=scored_class_ids,
+            scored_class_ids=scored_class_ids
         )
         for experiment_name in selected_experiments
     }
+    
     oof_summary = _build_oof_summary(
         oof_reports,
         support_report=support_report,
-        primary_head=str(resolved_split_config.primary_head),
+        primary_head=str(resolved_split_config.primary_head)
     )
+    
     aggregate_mode = str(resolved_split_config.aggregate_mode).strip().lower()
     if aggregate_mode == "oof":
         summary = oof_summary.copy()
@@ -523,11 +486,12 @@ def run_experiment_suite(
                 global_score_weighted_macro_f1=("global_score_weighted_macro_f1", "mean"),
                 emotion_macro_f1=("emotion_macro_f1", "mean"),
                 modality_macro_f1=("modality_macro_f1", "mean"),
-                stimulus_macro_f1=("stimulus_macro_f1", "mean"),
+                stimulus_macro_f1=("stimulus_macro_f1", "mean")
             )
             .sort_values("emotion_macro_f1", ascending=False, kind="stable")
             .reset_index(drop=True)
         )
+        
     else:
         raise ValueError("Unsupported aggregate_mode. Expected 'oof' or 'mean_fold'.")
     return {
@@ -539,5 +503,5 @@ def run_experiment_suite(
         "oof_reports": oof_reports,
         "support_report": support_report,
         "domain_gap_summary": compute_domain_gap_summary(oof_summary),
-        "splits": splits,
+        "splits": splits
     }

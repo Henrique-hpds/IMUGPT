@@ -1,4 +1,4 @@
-"""Stage 5.5b: conservative lower-limb stabilization under lower-body occlusion."""
+"""Conservative lower-limb stabilization under lower-body occlusion."""
 
 from __future__ import annotations
 
