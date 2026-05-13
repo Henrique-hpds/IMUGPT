@@ -1,159 +1,361 @@
 # robot_emotions_vlm
 
-Standalone RobotEmotions video-description module powered by `Qwen/Qwen3-VL-8B-Instruct`.
+VLM-assisted Kimodo motion generation pipeline for the RobotEmotions dataset. Uses `Qwen3-VL-8B-Instruct` to produce text descriptions of video windows, which are then combined with pose-derived spatial anchors to condition the Kimodo diffusion model.
 
-It supports both full-clip descriptions and the main anchored pipeline based on short real video windows.
+All commands run inside the `kimodo` conda environment.
 
-For the anchored Kimodo flow, the main line is now window-level:
+## Pipeline overview
 
-1. export real `pose3d`
-2. run `describe-windows`
-3. run `build-anchor-catalog`
-4. run `generate-kimodo`
-
-## Requirements
-
-Run it directly in the Conda environment `kimodo`:
-
-```bash
-conda activate kimodo
-python -c "from transformers import AutoProcessor, Qwen3VLForConditionalGeneration; import av; print('qwen3_vl_import_ok')"
+```
+Real video + pose3d → 5-sec windows → Qwen3-VL descriptions
+  → build-anchor-catalog (root2d + optional end-effectors from pose3d.npz)
+  → generate-kimodo (SMPL-X motion conditioned on text + constraints)
+  → export-kimodo-virtual-imu (metric norm → root estimation → IMUSim)
+  → export-mixed-virtual-imu (merge real + synthetic for training)
 ```
 
-## Run
-
-Process the full dataset:
+## Environment
 
 ```bash
 conda activate kimodo
+python -c "from transformers import AutoProcessor, Qwen3VLForConditionalGeneration; import av; print('ok')"
+```
+
+Qwen3-VL weights are downloaded from Hugging Face on the first run unless `--local-files-only` is passed.
+
+---
+
+## Commands
+
+### `describe-videos`
+
+Describe full clips with Qwen3-VL and export a Kimodo prompt catalog.
+
+```bash
+# Full dataset
 python -m robot_emotions_vlm describe-videos \
   --dataset-root data/RobotEmotions \
   --output-dir output/robot_emotions_qwen
-```
 
-Process only specific domains:
-
-```bash
-conda activate kimodo
+# Specific domains
 python -m robot_emotions_vlm describe-videos \
   --dataset-root data/RobotEmotions \
   --domains 10ms 30ms \
   --output-dir output/robot_emotions_qwen
-```
 
-Process a single clip:
-
-```bash
-conda activate kimodo
+# Single clip
 python -m robot_emotions_vlm describe-videos \
   --dataset-root data/RobotEmotions \
   --clip-id robot_emotions_10ms_u02_tag11 \
   --output-dir output/robot_emotions_qwen_single
-```
 
-Use only local Hugging Face files:
-
-```bash
-conda activate kimodo
+# Offline (no HuggingFace download)
 python -m robot_emotions_vlm describe-videos \
   --dataset-root data/RobotEmotions \
   --output-dir output/robot_emotions_qwen \
   --local-files-only
 ```
 
-Describe real windows from a `pose3d_manifest.jsonl`:
+**Key options:**
+
+| Flag | Default | Description |
+|---|---|---|
+| `--model-id` | `Qwen/Qwen3-VL-8B-Instruct` | HuggingFace model ID |
+| `--num-video-frames` | `32` | Frames sampled from video |
+| `--max-new-tokens` | `384` | Generation budget |
+| `--temperature` | `0.2` | Sampling temperature |
+| `--top-p` | `0.9` | Nucleus sampling |
+| `--system-prompt-path` | built-in | Override system prompt template |
+| `--user-prompt-path` | built-in | Override user prompt template |
+| `--catalog-output-path` | auto | Custom path for the Kimodo catalog |
+| `--seed` | `123` | Generation seed |
+| `--num-samples` | `1` | Kimodo samples per clip |
+
+**Outputs:**
+
+- `video_description_manifest.jsonl`
+- `video_description_summary.json`
+- `kimodo_prompt_catalog.jsonl`
+- `<clip_id>/description.json`, `raw_response.txt`, `prompt_context.json`, `quality_report.json`
+
+---
+
+### `describe-windows`
+
+Segment each pose3d clip into overlapping windows, render a short MP4 per window, and describe each with Qwen3-VL. This is the recommended path for Kimodo generation because 5-second windows are within the model's generation range.
+
+Requires a `pose3d_manifest.jsonl` produced by the real-video pipeline (`pose_module.robot_emotions export-pose3d`).
 
 ```bash
-conda activate kimodo
 python -m robot_emotions_vlm describe-windows \
   --pose3d-manifest-path output/robot_emotions_pose3d/pose3d_manifest.jsonl \
   --output-dir output/robot_emotions_qwen_windows \
   --window-sec 5.0 \
-  --window-hop-sec 2.5
+  --window-hop-sec 2.5 \
+  --num-video-frames 48
 ```
 
-Build the anchored Kimodo catalog from the window-level Qwen export:
+**Key options:**
+
+| Flag | Default | Description |
+|---|---|---|
+| `--window-sec` | `5.0` | Window duration |
+| `--window-hop-sec` | `2.5` | Hop between windows |
+| `--max-windows-per-clip` | none | Cap windows per clip |
+| `--num-video-frames` | `48` | Frames sampled per window |
+| `--clip-id` | all | Process specific clip(s) only |
+
+All Qwen generation flags (`--model-id`, `--temperature`, etc.) are the same as `describe-videos`.
+
+**Outputs:**
+
+- `window_description_manifest.jsonl`
+- `window_description_summary.json`
+- `kimodo_window_prompt_catalog.jsonl`
+- `<prompt_id>/window.mp4`, `description.json`, `raw_response.txt`, `prompt_context.json`, `quality_report.json`
+
+---
+
+### `build-anchor-catalog`
+
+Combines the Qwen window catalog with the real pose3d to build Kimodo-ready constraints. For each window it extracts the ground trajectory (`root2d`) from `pose3d.npz`, rebases it to `x=z=0`, converts to Kimodo's coordinate system, and optionally adds sparse end-effector keyframes.
 
 ```bash
-conda activate kimodo
+# root2d only (default)
 python -m robot_emotions_vlm build-anchor-catalog \
   --pose3d-manifest-path output/robot_emotions_pose3d/pose3d_manifest.jsonl \
   --qwen-window-catalog-path output/robot_emotions_qwen_windows/kimodo_window_prompt_catalog.jsonl \
-  --output-dir output/robot_emotions_kimodo_anchors
+  --output-dir output/robot_emotions_kimodo_anchors \
+  --model Kimodo-SMPLX-RP-v1
+
+# + end-effector constraints (hands and feet, requires kimodo env)
+python -m robot_emotions_vlm build-anchor-catalog \
+  --pose3d-manifest-path output/robot_emotions_pose3d/pose3d_manifest.jsonl \
+  --qwen-window-catalog-path output/robot_emotions_qwen_windows/kimodo_window_prompt_catalog.jsonl \
+  --output-dir output/robot_emotions_kimodo_anchors_effectors \
+  --model Kimodo-SMPLX-RP-v1 \
+  --effector-keyframes 5
 ```
-This step samples exact `fullbody` key poses directly from grounded `pose3d.npz`, rebases the window so the first root starts at `x=z=0`, and retargets the sampled poses onto the Kimodo SMPLX22 skeleton as `local_joints_rot` (axis-angle), with `root2d` derived from the dense rebased root trajectory. No `ik_sequence.npz` is required. The retarget preserves the observed bone directions while discarding subject bone-lengths — the model uses its own rest-pose bone-lengths downstream, keeping the anchor geometrically consistent with Kimodo's conditioning space.
 
-If the BVH export is visually more faithful for your capture, `build-anchor-catalog` also accepts `--constraint-source pose3d_bvh` and reconstructs the sparse `fullbody` poses from `pose3d.bvh` before writing the constraints.
+**Key options:**
 
-Generate Kimodo motions for all catalog entries:
+| Flag | Default | Description |
+|---|---|---|
+| `--model` | `Kimodo-SMPLX-RP-v1` | Kimodo model for constraint format |
+| `--effector-keyframes` | `0` | Sparse end-effector keyframes (0 = root2d only) |
+| `--clip-id` | all | Restrict to specific clip(s) |
+
+**Constraint modes:**
+
+- **`root2d` only** (`--effector-keyframes 0`): anchors the ground trajectory; Kimodo freely generates pose from text.
+  - Near-static windows (`net_displacement < 0.05 m`) use `stabilized_linear` motion mode.
+  - `global_root_heading` is added only when displacement justifies a reliable heading (`>= 0.10 m`).
+- **End-effectors** (`--effector-keyframes N`): adds `left-hand`, `right-hand`, `left-foot`, `right-foot` constraints with N uniformly spaced keyframes. Each contains `global_joints_positions` (K, 22, 3). Requires IMUGPT22 → SMPLX22 retargeting.
+
+See [ANCHOR_CATALOG.md](ANCHOR_CATALOG.md) for the full constraint contract.
+
+**Outputs:**
+
+- `kimodo_anchor_catalog.jsonl`
+- `kimodo_anchor_catalog.summary.json`
+- `<prompt_id>/constraints.json`, `traceability.json`
+
+---
+
+### `generate-kimodo`
+
+Runs Kimodo batch generation for all entries in an anchor catalog.
 
 ```bash
-conda activate kimodo
+# Full catalog
 python -m robot_emotions_vlm generate-kimodo \
   --catalog-path output/robot_emotions_kimodo_anchors/kimodo_anchor_catalog.jsonl \
   --output-dir output/robot_emotions_kimodo
-```
 
-By default, `generate-kimodo` uses `Kimodo-SMPLX-RP-v1` so that an AMASS file is exported next to each generated NPZ.
-
-Generate only selected clips from the catalog:
-
-```bash
-conda activate kimodo
+# Single window
 python -m robot_emotions_vlm generate-kimodo \
   --catalog-path output/robot_emotions_kimodo_anchors/kimodo_anchor_catalog.jsonl \
   --prompt-id robot_emotions_10ms_u02_tag11__w000 \
   --output-dir output/robot_emotions_kimodo_single
 ```
 
-## Main options
+**Key options:**
 
-- `--model-id`: defaults to `Qwen/Qwen3-VL-8B-Instruct`
-- `--num-video-frames`: defaults to `32`
-- `--max-new-tokens`: defaults to `384`
-- `--temperature`: defaults to `0.2`
-- `--top-p`: defaults to `0.9`
-- `--system-prompt-path`: override the system prompt template
-- `--user-prompt-path`: override the user prompt template
-- `--catalog-output-path`: write the Kimodo catalog to a custom path
-- `describe-windows --window-sec`: window duration used by the Qwen step
-- `describe-windows --window-hop-sec`: hop used by the Qwen step
-- `generate-kimodo --duration-sec`: fallback duration when the catalog has no `duration_hint_sec`
-- `generate-kimodo --model`: choose the Kimodo model to run; default is `Kimodo-SMPLX-RP-v1`
-- `generate-kimodo --bvh`: also export BVH for SOMA models
+| Flag | Default | Description |
+|---|---|---|
+| `--model` | `Kimodo-SMPLX-RP-v1` | Kimodo model variant |
+| `--duration-sec` | `5.0` | Fallback duration when catalog has no hint |
+| `--diffusion-steps` | `100` | Diffusion denoising steps |
+| `--seed` | catalog value | Override random seed |
+| `--num-samples` | catalog value | Samples per prompt |
+| `--bvh` | off | Also export BVH (SOMA models) |
+| `--cfg-type` | model default | CFG type: `nocfg`, `regular`, `separated` |
+| `--cfg-weight` | model default | CFG weight(s) |
+| `--clip-id` / `--prompt-id` / `--window-id` | all | Filter entries |
 
-## Outputs
+**Outputs:**
 
-Root files:
-
-- `video_description_manifest.jsonl`
-- `video_description_summary.json`
-- `kimodo_prompt_catalog.jsonl`
-- `window_description_manifest.jsonl`
-- `window_description_summary.json`
-- `kimodo_window_prompt_catalog.jsonl`
-- `kimodo_anchor_catalog.jsonl`
-- `kimodo_anchor_catalog.summary.json`
 - `kimodo_generation_manifest.jsonl`
 - `kimodo_generation_summary.json`
+- `<prompt_id>/motion.npz` (or `motion/` folder when `num_samples > 1`)
+- `<prompt_id>/motion_amass.npz` (for `Kimodo-SMPLX-RP-v1`)
+- `<prompt_id>/motion.bvh` (when `--bvh`)
+- `<prompt_id>/prompt_entry.json`, `generation_config.json`
 
-Per-clip files:
+---
 
-- `description.json`
-- `raw_response.txt`
-- `prompt_context.json`
-- `quality_report.json`
-- `window.mp4` for `describe-windows`
+### `export-kimodo-virtual-imu`
 
-Per-generated clip:
+Converts a Kimodo generation manifest to synthetic virtual IMU signals, applying the same normalization and simulation stages as the real-video pipeline (metric normalization → root estimation → IMUSim).
 
-- `prompt_entry.json`
-- `generation_config.json`
-- `motion.npz` or a `motion/` folder for multiple samples
-- `motion_amass.npz` next to each NPZ when using the SMPL-X model
-- optional `motion.bvh` or `motion.csv` depending on the Kimodo model and flags
+```bash
+# Without calibration
+python -m robot_emotions_vlm export-kimodo-virtual-imu \
+  --kimodo-manifest output/robot_emotions_kimodo/kimodo_generation_manifest.jsonl \
+  --output-dir output/robot_emotions_kimodo_imu
+
+# With geometric alignment + percentile calibration against real IMU
+python -m robot_emotions_vlm export-kimodo-virtual-imu \
+  --kimodo-manifest output/robot_emotions_kimodo/kimodo_generation_manifest.jsonl \
+  --output-dir output/robot_emotions_kimodo_imu \
+  --real-imu-root output/exp_real_pose \
+  --real-imu-signal-mode acc
+```
+
+When `--real-imu-root` is provided, the pipeline resolves `imu.npz` for each window from `reference_clip_id` in the manifest and applies, in order:
+
+1. **Geometric alignment** (`run_geometric_alignment`) — corrects the gravity-axis mismatch between SMPL-X and the physical sensor mount. Controlled by `pose_module/configs/imu_alignment_config.yaml`.
+2. **Percentile calibration** (`calibrate_virtual_imu_sequence`) — maps the amplitude distribution of the synthetic signal to the real IMU reference.
+
+Expected real IMU layout: `<real-imu-root>/<domain>/user_<NN>/<clip_id>/imu.npz`
+
+**Key options:**
+
+| Flag | Default | Description |
+|---|---|---|
+| `--real-imu-root` | none | Root of real IMU data; enables calibration |
+| `--real-imu-signal-mode` | `acc` | Signal used for calibration: `acc`, `gyro`, `both` |
+| `--real-imu-percentile-resolution` | `100` | Percentile bins for rank-mapping |
+| `--no-real-imu-per-class-calibration` | off | Use full distribution instead of per-class |
+| `--real-imu-label-key` | none | Manifest field for per-class grouping (e.g. `emotion`) |
+| `--sensor-layout-path` | none | Custom sensor layout JSON |
+| `--imu-acc-noise-std-m-s2` | none | Accelerometer noise override |
+| `--imu-gyro-noise-std-rad-s` | none | Gyroscope noise override |
+| `--imu-random-seed` | `0` | Noise seed |
+| `--export-bvh` | off | Also export BVH per clip |
+| `--no-skip-existing` | off | Reprocess even if `virtual_imu.npz` exists |
+| `--clip-id` | all | Filter to specific clips |
+
+**Outputs:**
+
+- `virtual_imu_manifest.jsonl`
+- `virtual_imu_summary.json`
+- `<prompt_id>/virtual_imu/virtual_imu.npz`
+- `<prompt_id>/virtual_imu/virtual_imu_calibration_report.json` (when calibration runs)
+
+---
+
+### `export-mixed-virtual-imu`
+
+Merges a real `virtual_imu_manifest.jsonl` and a synthetic one into a single manifest for combined training experiments. No recomputation is performed.
+
+```bash
+python -m robot_emotions_vlm export-mixed-virtual-imu \
+  --real-manifest output/robot_emotions_virtual_imu/virtual_imu_manifest.jsonl \
+  --synthetic-manifest output/robot_emotions_kimodo_imu/virtual_imu_manifest.jsonl \
+  --output-dir output/robot_emotions_mixed_imu
+```
+
+**Outputs:**
+
+- `mixed_virtual_imu_manifest.jsonl`
+- `mixed_virtual_imu_summary.json`
+
+---
+
+## Full pipeline walkthrough
+
+### Step 1 — Export real pose3d (`.venv`)
+
+```bash
+./.venv/bin/python -m pose_module.robot_emotions export-pose3d \
+  --dataset-root data/RobotEmotions \
+  --domains 10ms 30ms \
+  --output-dir output/robot_emotions_pose3d
+```
+
+### Step 2 — Describe windows (kimodo env)
+
+```bash
+conda activate kimodo
+python -m robot_emotions_vlm describe-windows \
+  --pose3d-manifest-path output/robot_emotions_pose3d/pose3d_manifest.jsonl \
+  --output-dir output/robot_emotions_qwen_windows \
+  --window-sec 5.0 --window-hop-sec 2.5 --num-video-frames 48
+```
+
+### Step 3 — Build anchor catalog (kimodo env)
+
+```bash
+python -m robot_emotions_vlm build-anchor-catalog \
+  --pose3d-manifest-path output/robot_emotions_pose3d/pose3d_manifest.jsonl \
+  --qwen-window-catalog-path output/robot_emotions_qwen_windows/kimodo_window_prompt_catalog.jsonl \
+  --output-dir output/robot_emotions_kimodo_anchors \
+  --model Kimodo-SMPLX-RP-v1
+```
+
+### Step 4 — Generate motions (kimodo env)
+
+```bash
+python -m robot_emotions_vlm generate-kimodo \
+  --catalog-path output/robot_emotions_kimodo_anchors/kimodo_anchor_catalog.jsonl \
+  --output-dir output/robot_emotions_kimodo
+```
+
+### Step 5 — Export virtual IMU (kimodo env)
+
+```bash
+python -m robot_emotions_vlm export-kimodo-virtual-imu \
+  --kimodo-manifest output/robot_emotions_kimodo/kimodo_generation_manifest.jsonl \
+  --output-dir output/robot_emotions_kimodo_imu \
+  --real-imu-root output/exp_real_pose \
+  --real-imu-signal-mode acc
+```
+
+### Step 6 — Merge real + synthetic (kimodo env)
+
+```bash
+python -m robot_emotions_vlm export-mixed-virtual-imu \
+  --real-manifest output/robot_emotions_virtual_imu/virtual_imu_manifest.jsonl \
+  --synthetic-manifest output/robot_emotions_kimodo_imu/virtual_imu_manifest.jsonl \
+  --output-dir output/robot_emotions_mixed_imu
+```
+
+---
+
+## Module structure
+
+| File | Role |
+|---|---|
+| `cli.py` | CLI entry point; defines all subcommands |
+| `qwen_backend.py` | Qwen3-VL model loading and inference |
+| `windowing.py` | Window segmentation over pose3d trajectories |
+| `window_descriptions.py` | `describe-windows` orchestration |
+| `anchor_catalog.py` | `build-anchor-catalog` — constraint extraction and retargeting |
+| `retarget.py` | IMUGPT22 → SMPLX22 skeleton retargeting |
+| `kimodo_generation.py` | `generate-kimodo` batch runner |
+| `kimodo_adapter.py` | Kimodo Python API adapter |
+| `kimodo_constraints_patch.py` | Constraint format patching for Kimodo versions |
+| `schemas.py` | `VideoDescription` dataclass and JSON parsing |
+| `prompts.py` | Prompt template loading and rendering |
+| `dataset.py` | `RobotEmotionsDataset` — clip enumeration |
+| `export.py` | Manifest and artifact writers |
+| `metadata.py` | Video metadata extraction |
+| `prompt_templates/` | Editable Jinja2 / text prompt templates |
 
 ## Notes
 
-- The first real run may download model weights from Hugging Face.
-- Prompt templates are editable in `robot_emotions_vlm/prompt_templates/`.
+- Prompt templates are in `robot_emotions_vlm/prompt_templates/` and can be edited without code changes.
+- Manifests are JSONL; each line is a self-contained JSON entry so partial runs can be resumed by filtering on `status`.
+- `generate-kimodo` defaults to `Kimodo-SMPLX-RP-v1`, which exports an AMASS-compatible `motion_amass.npz` alongside each motion.
+- See [ANCHOR_CATALOG.md](ANCHOR_CATALOG.md) for the full constraint schema and retargeting details.
