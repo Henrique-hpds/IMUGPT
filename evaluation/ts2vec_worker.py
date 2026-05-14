@@ -147,6 +147,11 @@ def _build_group_folds(num_samples: int, capture_ids: np.ndarray, requested_spli
         n_splits = min(requested_splits, int(unique_groups.size))
         if StratifiedGroupKFold is not None and n_splits >= 2:
             pseudo_labels = np.arange(num_samples) % max(2, min(n_splits, 3))
+            min_class_size = int(np.bincount(pseudo_labels).min())
+            n_splits = min(n_splits, min_class_size)
+            if n_splits < 2:
+                n_splits = 2
+                pseudo_labels = np.arange(num_samples) % 2
             splitter = StratifiedGroupKFold(n_splits=n_splits, shuffle=True, random_state=int(random_state))
             splits = list(splitter.split(np.zeros(num_samples), pseudo_labels, groups=capture_ids))
             return "group", [(np.asarray(train_idx), np.asarray(test_idx)) for train_idx, test_idx in splits]
