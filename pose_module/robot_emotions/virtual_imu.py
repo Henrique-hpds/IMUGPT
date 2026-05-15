@@ -24,7 +24,12 @@ from pose_module.imu_alignment import (
 )
 from pose_module.io.cache import write_json_file
 from pose_module.pipeline import run_virtual_imu_pipeline
-from pose_module.processing.imu_calibration import calibrate_virtual_imu_sequence
+from pose_module.processing.imu_calibration import (
+    DEFAULT_CALIBRATION_PERCENTILE_RESOLUTION,
+    DEFAULT_CALIBRATION_SIGNAL_MODE,
+    build_calibration_reference_matrix,
+    calibrate_virtual_imu_sequence,
+)
 from pose_module.processing.quality import merge_virtual_imu_quality_reports
 
 from .extractor import (
@@ -54,11 +59,6 @@ def run_robot_emotions_virtual_imu(
     imu_acc_noise_std_m_s2: Optional[float] = None,
     imu_gyro_noise_std_rad_s: Optional[float] = None,
     imu_random_seed: int = 0,
-    real_imu_reference_path: Optional[str] = None,
-    real_imu_label_key: Optional[str] = None,
-    real_imu_signal_mode: str = "acc",
-    real_imu_percentile_resolution: int = 100,
-    real_imu_per_class_calibration: bool = True,
     estimate_sensor_frame: bool = False,
     estimate_sensor_names: Optional[Sequence[str]] = None,
     domains: Sequence[str] = ("10ms", "30ms"),
@@ -82,8 +82,6 @@ def run_robot_emotions_virtual_imu(
     for record in records:
         manifest_entry = extractor.ensure_exported_clip(record, output_root=output_root)
         activity_label = None
-        if real_imu_label_key not in (None, ""):
-            activity_label = manifest_entry.get("labels", {}).get(str(real_imu_label_key))
         try:
             pipeline_result = run_virtual_imu_pipeline(
                 clip_id=record.clip_id,
@@ -109,15 +107,6 @@ def run_robot_emotions_virtual_imu(
                 imu_acc_noise_std_m_s2=imu_acc_noise_std_m_s2,
                 imu_gyro_noise_std_rad_s=imu_gyro_noise_std_rad_s,
                 imu_random_seed=int(imu_random_seed),
-                real_imu_reference_path=(
-                    None if real_imu_reference_path in (None, "") else str(real_imu_reference_path)
-                ),
-                real_imu_signal_mode=str(real_imu_signal_mode),
-                real_imu_percentile_resolution=int(real_imu_percentile_resolution),
-                real_imu_per_class_calibration=bool(real_imu_per_class_calibration),
-                defer_real_imu_calibration=bool(
-                    use_subject_level_alignment and real_imu_reference_path not in (None, "")
-                ),
                 estimate_sensor_frame=bool(estimate_sensor_frame),
                 estimate_sensor_names=(
                     None if estimate_sensor_names is None else tuple(str(name) for name in estimate_sensor_names)
@@ -147,10 +136,6 @@ def run_robot_emotions_virtual_imu(
             processed_runs=processed_runs,
             output_root=output_root,
             alignment_settings=alignment_settings,
-            real_imu_reference_path=real_imu_reference_path,
-            real_imu_signal_mode=real_imu_signal_mode,
-            real_imu_percentile_resolution=real_imu_percentile_resolution,
-            real_imu_per_class_calibration=real_imu_per_class_calibration,
         )
 
     for processed in processed_runs:
@@ -183,10 +168,6 @@ def run_robot_emotions_virtual_imu(
         "num_warning": int(num_warning),
         "num_fail": int(num_fail),
         "virtual_imu_manifest_path": str(manifest_path.resolve()),
-        "real_imu_reference_path": (
-            None if real_imu_reference_path in (None, "") else str(Path(real_imu_reference_path).resolve())
-        ),
-        "real_imu_label_key": None if real_imu_label_key in (None, "") else str(real_imu_label_key),
         "sample_clip_ids": [record.clip_id for record in records[:5]],
     }
     write_json_file(summary, output_root / "virtual_imu_summary.json")
@@ -198,10 +179,6 @@ def _apply_subject_level_geometric_alignment(
     processed_runs: Sequence[Mapping[str, Any]],
     output_root: Path,
     alignment_settings: Mapping[str, Any],
-    real_imu_reference_path: Optional[str],
-    real_imu_signal_mode: str,
-    real_imu_percentile_resolution: int,
-    real_imu_per_class_calibration: bool,
 ) -> None:
     grouped_runs: dict[str, list[Mapping[str, Any]]] = {}
     for processed in processed_runs:
@@ -225,10 +202,6 @@ def _apply_subject_level_geometric_alignment(
                     processed=processed,
                     output_root=output_root,
                     transforms=transforms,
-                    real_imu_reference_path=real_imu_reference_path,
-                    real_imu_signal_mode=real_imu_signal_mode,
-                    real_imu_percentile_resolution=real_imu_percentile_resolution,
-                    real_imu_per_class_calibration=real_imu_per_class_calibration,
                 )
         except Exception as exc:
             for processed in subject_runs:
@@ -251,7 +224,7 @@ def _fit_subject_transforms(
     for processed in subject_runs:
         record = processed["record"]
         pipeline_result = processed["pipeline_result"]
-        raw_virtual_sequence = pipeline_result["imusim_result"]["raw_virtual_imu_sequence"]
+        raw_virtual_sequence = pipeline_result["imusim_result"]["virtual_imu_sequence"]
         subject_id = _subject_id_for_record(record)
         real_path = _resolve_record_real_imu_npz_path(
             record=record,
@@ -280,10 +253,6 @@ def _apply_subject_transforms_to_pipeline_result(
     processed: Mapping[str, Any],
     output_root: Path,
     transforms: Mapping[tuple[str, str], Any],
-    real_imu_reference_path: Optional[str],
-    real_imu_signal_mode: str,
-    real_imu_percentile_resolution: int,
-    real_imu_per_class_calibration: bool,
 ) -> None:
     record = processed["record"]
     manifest_entry = processed["manifest_entry"]
@@ -291,42 +260,24 @@ def _apply_subject_transforms_to_pipeline_result(
     pose_dir = Path(processed["pose_dir"])
     pose_dir.mkdir(parents=True, exist_ok=True)
 
-    raw_virtual_sequence = pipeline_result["imusim_result"]["raw_virtual_imu_sequence"]
+    virtual_sequence = pipeline_result["imusim_result"]["virtual_imu_sequence"]
     real_path = _resolve_record_real_imu_npz_path(
         record=record,
         manifest_entry=manifest_entry,
         output_root=output_root,
     )
     alignment_result = run_geometric_alignment(
-        raw_virtual_sequence,
+        virtual_sequence,
         output_dir=pose_dir,
         real_imu_npz_path=real_path,
         subject_id=_subject_id_for_record(record),
         capture_id=record.clip_id,
         transforms=transforms,
     )
-    geometrically_aligned_sequence = alignment_result["aligned_virtual_imu_sequence"]
-
-    calibration_report = None
-    final_virtual_sequence = geometrically_aligned_sequence
-    if real_imu_reference_path not in (None, ""):
-        calibration_result = calibrate_virtual_imu_sequence(
-            geometrically_aligned_sequence,
-            real_imu_reference_path=str(real_imu_reference_path),
-            activity_label=processed["activity_label"],
-            signal_mode=str(real_imu_signal_mode),
-            percentile_resolution=int(real_imu_percentile_resolution),
-            per_class=bool(real_imu_per_class_calibration),
-        )
-        final_virtual_sequence = calibration_result["virtual_imu_sequence"]
-        calibration_report = dict(calibration_result["calibration_report"])
+    final_virtual_sequence = alignment_result["aligned_virtual_imu_sequence"]
 
     final_virtual_path = pose_dir / "virtual_imu.npz"
     np.savez_compressed(final_virtual_path, **final_virtual_sequence.to_npz_payload())
-
-    if calibration_report is not None:
-        calibration_report_path = pose_dir / "virtual_imu_calibration_report.json"
-        write_json_file(calibration_report, calibration_report_path)
 
     original_virtual_quality = dict(pipeline_result.get("virtual_imu_quality_report", {}))
     virtual_imu_quality_report = _build_virtual_imu_quality_report(
@@ -335,7 +286,6 @@ def _apply_subject_transforms_to_pipeline_result(
         gyro_noise_std_rad_s=float(original_virtual_quality.get("gyro_noise_std_rad_s", 0.0)),
         max_acceleration_warning_m_s2=float(DEFAULT_MAX_ACCELERATION_WARNING_M_S2),
         max_gyro_warning_rad_s=float(DEFAULT_MAX_GYRO_WARNING_RAD_S),
-        calibration_report=calibration_report,
     )
     write_json_file(virtual_imu_quality_report, pose_dir / "virtual_imu_report.json")
 
@@ -349,7 +299,6 @@ def _apply_subject_transforms_to_pipeline_result(
     write_json_file(merged_quality, pose_dir / "quality_report.json")
 
     pipeline_result["virtual_imu_sequence"] = final_virtual_sequence
-    pipeline_result["virtual_imu_calibration_report"] = calibration_report
     pipeline_result["virtual_imu_quality_report"] = virtual_imu_quality_report
     pipeline_result["quality_report"] = merged_quality
     pipeline_result["geometric_alignment_result"] = alignment_result
@@ -535,4 +484,148 @@ def _build_virtual_imu_failure_entry(
             "ik_sequence_npz_path": str((pose_dir / "ik_sequence.npz").resolve()) if (pose_dir / "ik_sequence.npz").exists() else None,
             "ik_bvh_path": str((pose_dir / "pose3d_ik.bvh").resolve()) if (pose_dir / "pose3d_ik.bvh").exists() else None,
         },
+    }
+
+
+def calibrate_virtual_imu_manifest(
+    manifest_path: str,
+    real_imu_reference_path: str,
+    *,
+    signal_mode: str = DEFAULT_CALIBRATION_SIGNAL_MODE,
+    percentile_resolution: int = DEFAULT_CALIBRATION_PERCENTILE_RESOLUTION,
+    per_class: bool = True,
+    calibration_fraction: float = 1.0,
+    activity_label_key: Optional[str] = None,
+    in_place: bool = False,
+    output_suffix: str = "_calibrated",
+) -> Dict[str, Any]:
+    """Apply percentile calibration to all virtual IMU clips listed in a manifest.
+
+    Reads each ``virtual_imu_npz_path`` from the manifest, calibrates it against
+    the real IMU reference, and writes the result either in-place (overwriting
+    ``virtual_imu.npz``) or alongside the original (``virtual_imu_calibrated.npz``).
+
+    ``real_imu_reference_path`` can be:
+    - A single NPZ file — used directly as reference.
+    - A directory — all ``*.npz`` files inside are collected and concatenated
+      after applying ``calibration_fraction`` per clip.
+
+    Returns a summary dict with per-clip status.
+    """
+    from pose_module.interfaces import VirtualIMUSequence
+
+    manifest_path = Path(manifest_path)
+    ref_path = Path(real_imu_reference_path)
+
+    entries = [
+        json.loads(line)
+        for line in manifest_path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+
+    # Build reference matrix once for all clips
+    if ref_path.is_dir():
+        clip_npz_paths = sorted(ref_path.rglob("*.npz"))
+        if not clip_npz_paths:
+            raise ValueError(f"No NPZ files found in reference directory: {ref_path}")
+        ref_matrix = build_calibration_reference_matrix(
+            clip_npz_paths=clip_npz_paths,
+            target_sensor_names=[],  # resolved per-clip inside calibrate_virtual_imu_sequence
+            signal_mode=signal_mode,
+            calibration_fraction=calibration_fraction,
+        )
+        # Save to a temp NPZ so calibrate_virtual_imu_sequence can load it
+        import tempfile, os
+        tmp = tempfile.NamedTemporaryFile(suffix=".npz", delete=False)
+        tmp.close()
+        np.savez(tmp.name, imu=ref_matrix)
+        resolved_ref_path = tmp.name
+        _tmp_to_delete = tmp.name
+    else:
+        resolved_ref_path = str(ref_path)
+        _tmp_to_delete = None
+
+    results = []
+    num_ok = num_warning = num_fail = 0
+
+    try:
+        for entry in entries:
+            clip_id = str(entry.get("clip_id", ""))
+            artifacts = entry.get("artifacts", {})
+            virtual_imu_path = artifacts.get("virtual_imu_npz_path")
+
+            if not virtual_imu_path or not Path(virtual_imu_path).exists():
+                results.append({"clip_id": clip_id, "status": "skip", "reason": "virtual_imu_npz_path missing or not found"})
+                num_fail += 1
+                continue
+
+            activity_label = None
+            if activity_label_key not in (None, ""):
+                activity_label = entry.get("labels", {}).get(str(activity_label_key))
+
+            try:
+                with np.load(virtual_imu_path, allow_pickle=True) as payload:
+                    seq = VirtualIMUSequence(
+                        clip_id=clip_id,
+                        fps=float(payload["fps"]) if "fps" in payload and payload["fps"] is not None else None,
+                        sensor_names=[str(s) for s in np.asarray(payload["sensor_names"]).reshape(-1).tolist()],
+                        acc=np.asarray(payload["acc"], dtype=np.float32),
+                        gyro=np.asarray(payload["gyro"], dtype=np.float32),
+                        timestamps_sec=np.asarray(payload["timestamps_sec"], dtype=np.float32),
+                        source=str(payload.get("source", "virtual_imu")),
+                    )
+
+                result = calibrate_virtual_imu_sequence(
+                    seq,
+                    real_imu_reference_path=resolved_ref_path,
+                    activity_label=activity_label,
+                    signal_mode=signal_mode,
+                    percentile_resolution=percentile_resolution,
+                    per_class=per_class,
+                )
+                calibrated_seq = result["virtual_imu_sequence"]
+                report = result["calibration_report"]
+
+                if in_place:
+                    out_path = Path(virtual_imu_path)
+                else:
+                    stem = Path(virtual_imu_path).stem
+                    out_path = Path(virtual_imu_path).with_name(f"{stem}{output_suffix}.npz")
+
+                np.savez_compressed(out_path, **calibrated_seq.to_npz_payload())
+
+                report_path = out_path.with_suffix("").with_name(out_path.stem + "_calibration_report.json")
+                write_json_file(report, report_path)
+
+                status = str(report.get("status", "ok"))
+                results.append({
+                    "clip_id": clip_id,
+                    "status": status,
+                    "output_npz_path": str(out_path.resolve()),
+                    "calibration_report_path": str(report_path.resolve()),
+                })
+                if status == "ok":
+                    num_ok += 1
+                else:
+                    num_warning += 1
+            except Exception as exc:
+                results.append({"clip_id": clip_id, "status": "fail", "reason": str(exc)})
+                num_fail += 1
+    finally:
+        if _tmp_to_delete is not None:
+            os.unlink(_tmp_to_delete)
+
+    return {
+        "manifest_path": str(manifest_path.resolve()),
+        "real_imu_reference_path": str(ref_path.resolve()),
+        "signal_mode": signal_mode,
+        "percentile_resolution": percentile_resolution,
+        "per_class": per_class,
+        "calibration_fraction": calibration_fraction,
+        "in_place": in_place,
+        "num_clips": len(entries),
+        "num_ok": num_ok,
+        "num_warning": num_warning,
+        "num_fail": num_fail,
+        "clips": results,
     }

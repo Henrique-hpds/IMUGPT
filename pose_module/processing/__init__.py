@@ -1,6 +1,6 @@
 """Processing helpers for later pose stages and quality."""
 
-from .imu_calibration import calibrate_virtual_imu_sequence
+from .imu_calibration import build_calibration_reference_matrix, calibrate_virtual_imu_sequence
 from .cleaner2d import clean_pose_sequence2d
 from .lower_limb_stabilizer import run_lower_limb_stabilizer
 from .metric_normalizer import run_metric_normalizer
@@ -22,6 +22,7 @@ except ImportError:  # pragma: no cover - keep lightweight modules importable wi
 
 __all__ = [
     "clean_pose_sequence2d",
+    "build_calibration_reference_matrix",
     "calibrate_virtual_imu_sequence",
     "map_pose_sequence_to_imugpt22",
     "run_lower_limb_stabilizer",

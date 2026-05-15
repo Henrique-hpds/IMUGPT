@@ -12,20 +12,13 @@ from scipy.spatial.transform import Rotation
 from pose_module.export.ik_adapter import forward_kinematics_from_ik_sequence
 from pose_module.interfaces import IKSequence, VirtualIMUSequence
 from pose_module.io.cache import write_json_file
-from pose_module.processing.imu_calibration import (
-    DEFAULT_CALIBRATION_PERCENTILE_RESOLUTION,
-    DEFAULT_CALIBRATION_SIGNAL_MODE,
-    calibrate_virtual_imu_sequence,
-)
 
 DEFAULT_SENSOR_LAYOUT_PATH = (
     Path(__file__).resolve().parent.parent / "configs" / "sensor_layout.yaml"
 )
 DEFAULT_GRAVITY_M_S2 = (0.0, -9.81, 0.0)
 DEFAULT_IMU_SEQUENCE_FILENAME = "virtual_imu.npz"
-DEFAULT_RAW_IMU_SEQUENCE_FILENAME = "virtual_imu_raw.npz"
 DEFAULT_IMU_REPORT_FILENAME = "virtual_imu_report.json"
-DEFAULT_IMU_CALIBRATION_REPORT_FILENAME = "virtual_imu_calibration_report.json"
 DEFAULT_SENSOR_LAYOUT_REPORT_FILENAME = "sensor_layout_resolved.json"
 DEFAULT_ACC_NOISE_STD_M_S2 = 0.0
 DEFAULT_GYRO_NOISE_STD_RAD_S = 0.0
@@ -52,17 +45,10 @@ def run_imusim(
     gyro_noise_std_rad_s: float | None = None,
     random_seed: int = DEFAULT_RANDOM_SEED,
     imu_sequence_filename: str = DEFAULT_IMU_SEQUENCE_FILENAME,
-    raw_imu_sequence_filename: str = DEFAULT_RAW_IMU_SEQUENCE_FILENAME,
     report_filename: str = DEFAULT_IMU_REPORT_FILENAME,
-    calibration_report_filename: str = DEFAULT_IMU_CALIBRATION_REPORT_FILENAME,
     layout_report_filename: str = DEFAULT_SENSOR_LAYOUT_REPORT_FILENAME,
     max_acceleration_warning_m_s2: float = DEFAULT_MAX_ACCELERATION_WARNING_M_S2,
     max_gyro_warning_rad_s: float = DEFAULT_MAX_GYRO_WARNING_RAD_S,
-    real_imu_reference_path: str | Path | None = None,
-    real_imu_activity_label: Any = None,
-    real_imu_signal_mode: str = DEFAULT_CALIBRATION_SIGNAL_MODE,
-    real_imu_percentile_resolution: int = DEFAULT_CALIBRATION_PERCENTILE_RESOLUTION,
-    real_imu_per_class_calibration: bool = True,
 ) -> Dict[str, Any]:
     """Generate virtual accelerometer and gyroscope sequences from IK outputs."""
 
@@ -147,54 +133,29 @@ def run_imusim(
         timestamps_sec=timestamps.astype(np.float32, copy=False),
         source=f"{ik_sequence.source}_virtual_imu"
     )
-    calibration_report = None
-    imu_sequence = raw_imu_sequence
-    if real_imu_reference_path not in (None, ""):
-        calibration_result = calibrate_virtual_imu_sequence(
-            raw_imu_sequence,
-            real_imu_reference_path=str(real_imu_reference_path),
-            activity_label=real_imu_activity_label,
-            signal_mode=str(real_imu_signal_mode),
-            percentile_resolution=int(real_imu_percentile_resolution),
-            per_class=bool(real_imu_per_class_calibration)
-        )
-        imu_sequence = calibration_result["virtual_imu_sequence"]
-        calibration_report = dict(calibration_result["calibration_report"])
-
     quality_report = _build_virtual_imu_quality_report(
-        imu_sequence=imu_sequence,
+        imu_sequence=raw_imu_sequence,
         acc_noise_std_m_s2=float(acc_noise_std_m_s2),
         gyro_noise_std_rad_s=float(gyro_noise_std_rad_s),
         max_acceleration_warning_m_s2=float(max_acceleration_warning_m_s2),
         max_gyro_warning_rad_s=float(max_gyro_warning_rad_s),
-        calibration_report=calibration_report
     )
 
     output_dir_path = None if output_dir is None else Path(output_dir)
     artifacts: Dict[str, Any] = {
         "virtual_imu_npz_path": None,
-        "virtual_imu_raw_npz_path": None,
         "virtual_imu_report_json_path": None,
-        "virtual_imu_calibration_report_json_path": None,
-        "sensor_layout_resolved_json_path": None
+        "sensor_layout_resolved_json_path": None,
     }
     if output_dir_path is not None:
         output_dir_path.mkdir(parents=True, exist_ok=True)
         imu_sequence_path = output_dir_path / str(imu_sequence_filename)
-        np.savez_compressed(imu_sequence_path, **imu_sequence.to_npz_payload())
+        np.savez_compressed(imu_sequence_path, **raw_imu_sequence.to_npz_payload())
         artifacts["virtual_imu_npz_path"] = str(imu_sequence_path.resolve())
-        if calibration_report is not None:
-            raw_imu_sequence_path = output_dir_path / str(raw_imu_sequence_filename)
-            np.savez_compressed(raw_imu_sequence_path, **raw_imu_sequence.to_npz_payload())
-            artifacts["virtual_imu_raw_npz_path"] = str(raw_imu_sequence_path.resolve())
 
         report_path = output_dir_path / str(report_filename)
         write_json_file(quality_report, report_path)
         artifacts["virtual_imu_report_json_path"] = str(report_path.resolve())
-        if calibration_report is not None:
-            calibration_report_path = output_dir_path / str(calibration_report_filename)
-            write_json_file(calibration_report, calibration_report_path)
-            artifacts["virtual_imu_calibration_report_json_path"] = str(calibration_report_path.resolve())
 
         layout_report_path = output_dir_path / str(layout_report_filename)
         write_json_file(
@@ -215,10 +176,8 @@ def run_imusim(
         artifacts["sensor_layout_resolved_json_path"] = str(layout_report_path.resolve())
 
     return {
-        "virtual_imu_sequence": imu_sequence,
-        "raw_virtual_imu_sequence": raw_imu_sequence,
+        "virtual_imu_sequence": raw_imu_sequence,
         "quality_report": quality_report,
-        "calibration_report": calibration_report,
         "artifacts": artifacts,
         "sensor_positions_global_m": sensor_positions.astype(np.float32, copy=False),
         "sensor_rotation_global_matrices": sensor_rotations.astype(np.float32, copy=False)
@@ -398,7 +357,6 @@ def _build_virtual_imu_quality_report(
     gyro_noise_std_rad_s: float,
     max_acceleration_warning_m_s2: float,
     max_gyro_warning_rad_s: float,
-    calibration_report: Mapping[str, Any] | None = None
 ) -> Dict[str, Any]:
     acc = np.asarray(imu_sequence.acc, dtype=np.float32)
     gyro = np.asarray(imu_sequence.gyro, dtype=np.float32)
@@ -421,17 +379,11 @@ def _build_virtual_imu_quality_report(
         notes.append("accelerometer_noise_applied")
     if float(gyro_noise_std_rad_s) > 0.0:
         notes.append("gyroscope_noise_applied")
-    if calibration_report is not None:
-        notes.extend([str(value) for value in calibration_report.get("notes", [])])
 
     status = "ok"
     if not virtual_imu_ok:
         status = "fail"
     elif max_acc_norm > float(max_acceleration_warning_m_s2) or max_gyro_norm > float(max_gyro_warning_rad_s):
-        status = "warning"
-    if calibration_report is not None and calibration_report.get("status") == "fail":
-        status = "fail"
-    elif calibration_report is not None and calibration_report.get("status") == "warning" and status != "fail":
         status = "warning"
 
     return {
@@ -444,20 +396,12 @@ def _build_virtual_imu_quality_report(
         "virtual_imu_ok": bool(virtual_imu_ok),
         "acc_noise_std_m_s2": float(acc_noise_std_m_s2),
         "gyro_noise_std_rad_s": float(gyro_noise_std_rad_s),
-        "real_imu_calibration_applied": bool(calibration_report is not None),
-        "real_imu_calibration_signal_mode": None if calibration_report is None else calibration_report.get("signal_mode"),
-        "real_imu_calibration_per_class_applied": (None if calibration_report is None else calibration_report.get("per_class_applied")),
-        "real_imu_calibration_reference_path": (None if calibration_report is None else calibration_report.get("reference_path")),
-        "real_imu_calibration_matched_sensor_names": ([] if calibration_report is None else list(calibration_report.get("matched_sensor_names", []))),
-        "real_imu_calibration_mean_abs_delta": (None if calibration_report is None else calibration_report.get("mean_abs_delta")),
-        "real_imu_calibration_max_abs_delta": (None if calibration_report is None else calibration_report.get("max_abs_delta")),
         "max_acceleration_norm_m_s2": float(max_acc_norm),
         "max_gyro_norm_rad_s": float(max_gyro_norm),
         "assumptions": [
             "sensor_layout_matches_target_dataset",
             "imu_specific_force_uses_world_gravity_subtraction",
             "sensor_orientation_follows_attached_segment_joint",
-            "real_imu_calibration_is_optional_and_reference_driven",
         ],
         "limitations": [
             "kinematic_adapter_not_full_imusim_dynamics",

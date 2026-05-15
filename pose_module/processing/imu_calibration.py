@@ -137,6 +137,53 @@ def _normalize_signal_mode(signal_mode: str) -> str:
     return mode
 
 
+def build_calibration_reference_matrix(
+    *,
+    clip_npz_paths: Sequence[str | Path],
+    target_sensor_names: Sequence[str],
+    signal_mode: str = DEFAULT_CALIBRATION_SIGNAL_MODE,
+    exclude_clip_ids: Sequence[str] | None = None,
+    calibration_fraction: float = 1.0,
+) -> np.ndarray:
+    """Build a concatenated reference matrix [N, C] from multiple per-clip NPZ files.
+
+    Skips clips whose filename stem is in ``exclude_clip_ids``. Use this to build
+    a calibration reference that excludes test-set subjects.
+
+    ``calibration_fraction`` controls how much of each clip is used (e.g. 0.5 =
+    first 50% of each clip). Applied before concatenation so the budget is
+    distributed evenly across clips rather than biased toward the first clips.
+    Must be in (0.0, 1.0].
+    """
+    if not 0.0 < calibration_fraction <= 1.0:
+        raise ValueError(f"calibration_fraction must be in (0.0, 1.0], got {calibration_fraction}.")
+    resolved_signal_mode = _normalize_signal_mode(signal_mode)
+    excluded = set(str(value) for value in (exclude_clip_ids or []))
+    matrices: list[np.ndarray] = []
+
+    for path in clip_npz_paths:
+        p = Path(path)
+        if p.stem in excluded:
+            continue
+        with np.load(p, allow_pickle=True) as payload:
+            ref = _extract_reference_signal(
+                payload=payload,
+                target_sensor_names=target_sensor_names,
+                signal_mode=resolved_signal_mode,
+                reference_path=p,
+            )
+        m = np.asarray(ref["matrix"], dtype=np.float32)
+        if calibration_fraction < 1.0:
+            n = max(1, int(round(m.shape[0] * calibration_fraction)))
+            m = m[:n]
+        matrices.append(m)
+
+    if len(matrices) == 0:
+        raise ValueError("No clips remaining after exclusion — cannot build calibration reference matrix.")
+
+    return np.concatenate(matrices, axis=0)
+
+
 def _extract_reference_signal(
     *,
     payload: Mapping[str, Any],

@@ -84,9 +84,32 @@ conda run -n pose_module python -m pose_module.robot_emotions export-virtual-imu
   --fps-target 20
 ```
 
+The pipeline exports raw (uncalibrated) signals. Calibration follows a rank-transform method that can be applied in two ways:
+
+- **Per fold during evaluation** - `evaluation/classifiers_pose_experiments.ipynb` recalibrates each fold using only training-set subjects, avoiding data leakage.
+- **Batch via CLI** (deployment) - `calibrate-virtual-imu` reads the manifest and writes calibrated NPZs alongside the originals:
+
+```bash
+conda run -n pose_module python -m pose_module.robot_emotions calibrate-virtual-imu \
+  --manifest-path output/robot_emotions_virtual_imu/virtual_imu_manifest.jsonl \
+  --real-imu-reference-path data/real_imu/ \
+  --calibration-fraction 0.5 \
+  --activity-label-key action
+```
+
+| Flag | Default | Description |
+|---|---|---|
+| `--manifest-path` | required | `virtual_imu_manifest.jsonl` from `export-virtual-imu`. |
+| `--real-imu-reference-path` | required | Single NPZ file or directory of per-clip NPZ files. |
+| `--calibration-fraction` | `1.0` | Fraction of each reference clip to use (e.g. `0.5` = first 50%). |
+| `--activity-label-key` | `None` | Manifest label field for per-class calibration (e.g. `action`). |
+| `--signal-mode` | `acc` | Channels to calibrate: `acc`, `gyro`, or `both`. |
+| `--in-place` | off | Overwrite `virtual_imu.npz` instead of writing `virtual_imu_calibrated.npz`. |
+
 Outputs per clip under `output/<experiment>/<clip_id>/`:
 - `pose/pose3d/pose3d.npz` — 3D skeleton trajectory
-- `imu/virtual_imu.npz` — synthetic accelerometer + gyroscope
+- `imu/virtual_imu.npz` — synthetic accelerometer + gyroscope (uncalibrated)
+- `imu/virtual_imu_calibrated.npz` — calibrated signal (when `calibrate-virtual-imu` is run without `--in-place`)
 
 ---
 

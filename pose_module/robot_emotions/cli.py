@@ -11,7 +11,7 @@ from .extractor import RobotEmotionsExtractor
 from .pose2d import run_robot_emotions_pose2d
 from .pose3d import run_robot_emotions_pose3d
 from .prompt_exports import build_robot_emotions_prompt_catalog, run_robot_emotions_prompt_pose3d
-from .virtual_imu import run_robot_emotions_virtual_imu
+from .virtual_imu import calibrate_virtual_imu_manifest, run_robot_emotions_virtual_imu
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
@@ -131,20 +131,28 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             imu_acc_noise_std_m_s2=args.imu_acc_noise_std_m_s2,
             imu_gyro_noise_std_rad_s=args.imu_gyro_noise_std_rad_s,
             imu_random_seed=int(args.imu_random_seed),
-            real_imu_reference_path=(
-                None if args.real_imu_reference_path in (None, "") else str(args.real_imu_reference_path)
-            ),
-            real_imu_label_key=(
-                None if args.real_imu_label_key in (None, "") else str(args.real_imu_label_key)
-            ),
-            real_imu_signal_mode=str(args.real_imu_signal_mode),
-            real_imu_percentile_resolution=int(args.real_imu_percentile_resolution),
-            real_imu_per_class_calibration=bool(not args.no_real_imu_per_class_calibration),
             estimate_sensor_frame=bool(args.estimate_sensor_frame),
             estimate_sensor_names=(
                 None if args.estimate_sensor_names is None else list(args.estimate_sensor_names)
             ),
             domains=tuple(args.domains),
+        )
+        print(json.dumps(summary, indent=2, ensure_ascii=True))
+        return 0
+
+    if args.command == "calibrate-virtual-imu":
+        summary = calibrate_virtual_imu_manifest(
+            manifest_path=str(args.manifest_path),
+            real_imu_reference_path=str(args.real_imu_reference_path),
+            signal_mode=str(args.signal_mode),
+            percentile_resolution=int(args.percentile_resolution),
+            per_class=bool(not args.no_per_class),
+            calibration_fraction=float(args.calibration_fraction),
+            activity_label_key=(
+                None if args.activity_label_key in (None, "") else str(args.activity_label_key)
+            ),
+            in_place=bool(args.in_place),
+            output_suffix=str(args.output_suffix),
         )
         print(json.dumps(summary, indent=2, ensure_ascii=True))
         return 0
@@ -237,6 +245,67 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         help="Disable optional BVH export for synthetic pose3d artifacts.",
     )
 
+    calibrate_parser = subparsers.add_parser(
+        "calibrate-virtual-imu",
+        help="Apply percentile calibration to virtual IMU clips listed in a manifest.",
+    )
+    calibrate_parser.add_argument(
+        "--manifest-path",
+        type=Path,
+        required=True,
+        help="Path to virtual_imu_manifest.jsonl produced by export-virtual-imu.",
+    )
+    calibrate_parser.add_argument(
+        "--real-imu-reference-path",
+        type=str,
+        required=True,
+        help="Real IMU reference: a single NPZ file or a directory of per-clip NPZ files.",
+    )
+    calibrate_parser.add_argument(
+        "--signal-mode",
+        type=str,
+        default="acc",
+        choices=["acc", "gyro", "both"],
+        help="Signal channels to calibrate (default: acc).",
+    )
+    calibrate_parser.add_argument(
+        "--percentile-resolution",
+        type=int,
+        default=100,
+        help="Number of percentile bins for the rank-transform mapping (default: 100).",
+    )
+    calibrate_parser.add_argument(
+        "--no-per-class",
+        action="store_true",
+        help="Disable per-activity calibration and use the global distribution.",
+    )
+    calibrate_parser.add_argument(
+        "--calibration-fraction",
+        type=float,
+        default=1.0,
+        help=(
+            "Fraction of each reference clip to use (e.g. 0.5 = first 50%% of each clip). "
+            "Only applies when --real-imu-reference-path is a directory. Default 1.0."
+        ),
+    )
+    calibrate_parser.add_argument(
+        "--activity-label-key",
+        type=str,
+        default=None,
+        help="Label key from the manifest entry used for per-class calibration (e.g. action).",
+    )
+    calibrate_parser.add_argument(
+        "--in-place",
+        action="store_true",
+        help="Overwrite virtual_imu.npz with the calibrated signal instead of writing a new file.",
+    )
+    calibrate_parser.add_argument(
+        "--output-suffix",
+        type=str,
+        default="_calibrated",
+        help="Suffix appended to the output filename when not using --in-place (default: _calibrated).",
+    )
+
     export_virtual_imu_parser = subparsers.add_parser(
         "export-virtual-imu",
         help="Export the full virtual IMU pipeline alongside the extracted real IMU artifacts.",
@@ -265,36 +334,6 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         type=int,
         default=0,
         help="Random seed used for optional virtual IMU noise.",
-    )
-    export_virtual_imu_parser.add_argument(
-        "--real-imu-reference-path",
-        type=str,
-        default=None,
-        help="Optional NPZ reference with real IMU data used for percentile calibration of the virtual IMU.",
-    )
-    export_virtual_imu_parser.add_argument(
-        "--real-imu-label-key",
-        type=str,
-        default=None,
-        help="Optional label field from the RobotEmotions manifest used for per-class calibration, e.g. action.",
-    )
-    export_virtual_imu_parser.add_argument(
-        "--real-imu-signal-mode",
-        type=str,
-        default="acc",
-        choices=["acc", "gyro", "both"],
-        help="Which signal subset to calibrate against the real IMU reference.",
-    )
-    export_virtual_imu_parser.add_argument(
-        "--real-imu-percentile-resolution",
-        type=int,
-        default=100,
-        help="Number of percentile bins used by the article-style rank mapping calibration.",
-    )
-    export_virtual_imu_parser.add_argument(
-        "--no-real-imu-per-class-calibration",
-        action="store_true",
-        help="Disable per-class calibration and always use the full real IMU reference distribution.",
     )
     export_virtual_imu_parser.add_argument(
         "--estimate-sensor-frame",
