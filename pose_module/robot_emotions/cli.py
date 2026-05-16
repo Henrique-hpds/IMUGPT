@@ -136,6 +136,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 None if args.estimate_sensor_names is None else list(args.estimate_sensor_names)
             ),
             domains=tuple(args.domains),
+            pose3d_manifest_path=(
+                None if args.pose3d_manifest_path in (None, "") else str(args.pose3d_manifest_path)
+            ),
         )
         print(json.dumps(summary, indent=2, ensure_ascii=True))
         return 0
@@ -345,6 +348,16 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         nargs="+",
         default=None,
         help="Optional list of sensor names targeted by the frame-alignment estimator.",
+    )
+    export_virtual_imu_parser.add_argument(
+        "--pose3d-manifest-path",
+        type=str,
+        default=None,
+        help=(
+            "Path to a pose3d_manifest.jsonl produced by export-pose3d. "
+            "When provided, clips found in the manifest skip pose estimation and reuse "
+            "the existing pose3d.npz directly. Clips not found fall back to the full pipeline."
+        ),
     )
     return parser
 

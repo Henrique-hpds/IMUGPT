@@ -69,20 +69,24 @@ The project supports two main pipelines. All commands are run from the repositor
 Converts real video recordings into synthetic IMU data. The `pose_module` drives the full chain: 2D detection (OpenMMlab/ViTPose), 3D lifting (MotionBERT), metric normalization, root estimation, and physics-based IMU synthesis (IMUSim).
 
 ```bash
-# Export 3D poses from video
+# Step 1 — Export 3D poses from video
 conda run -n pose_module python -m pose_module.robot_emotions export-pose3d \
   --dataset-root data/RobotEmotions \
   --domains 10ms 30ms \
   --output-dir output/robot_emotions_pose3d \
-  --fps-target 20
+  --env-name openmmlab \
+  --no-debug-2d --no-debug-3d
 
-# Synthesize virtual IMU signals from 3D poses
+# Step 2 — Synthesize virtual IMU signals, reusing the poses computed above
 conda run -n pose_module python -m pose_module.robot_emotions export-virtual-imu \
   --dataset-root data/RobotEmotions \
   --domains 10ms 30ms \
   --output-dir output/robot_emotions_virtual_imu \
-  --fps-target 20
+  --pose3d-manifest-path output/robot_emotions_pose3d/pose3d_manifest.jsonl \
+  --no-debug-2d --no-debug-3d
 ```
+
+Passing `--pose3d-manifest-path` skips the pose estimation stage for every clip found in the manifest and loads the existing `pose3d.npz` directly, going straight to IK + IMUSim. Clips not found in the manifest fall back to the full pipeline. Omitting the flag runs the full pipeline for all clips (original behaviour).
 
 The pipeline exports raw (uncalibrated) signals. Calibration follows a rank-transform method that can be applied in two ways:
 
@@ -93,8 +97,7 @@ The pipeline exports raw (uncalibrated) signals. Calibration follows a rank-tran
 conda run -n pose_module python -m pose_module.robot_emotions calibrate-virtual-imu \
   --manifest-path output/robot_emotions_virtual_imu/virtual_imu_manifest.jsonl \
   --real-imu-reference-path data/real_imu/ \
-  --calibration-fraction 0.5 \
-  --activity-label-key action
+  --calibration-fraction 0.5
 ```
 
 | Flag | Default | Description |

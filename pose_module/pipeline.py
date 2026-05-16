@@ -900,7 +900,8 @@ def run_virtual_imu_from_pose3d(
 
     with np.load(str(pose3d_npz_path), allow_pickle=False) as payload:
         pose_sequence = PoseSequence3D.from_npz_payload({k: payload[k] for k in payload.files})
-    return _run_imu_stages(
+
+    imu_result = _run_imu_stages(
         clip_id=str(clip_id),
         pose_sequence=pose_sequence,
         output_dir=output_dir,
@@ -911,6 +912,37 @@ def run_virtual_imu_from_pose3d(
         imu_gyro_noise_std_rad_s=imu_gyro_noise_std_rad_s,
         imu_random_seed=imu_random_seed,
     )
+
+    pose3d_quality: Dict[str, Any] = {"status": "ok", "skipped": True, "source": str(pose3d_npz_path)}
+    ik_result = imu_result["ik_result"]
+    imusim_result = imu_result["imusim_result"]
+    virtual_imu_sequence = imu_result["virtual_imu_sequence"]
+    virtual_imu_quality = imusim_result.get("quality_report", {})
+
+    merged_quality = merge_virtual_imu_quality_reports(
+        pose3d_quality=pose3d_quality,
+        ik_quality=ik_result.get("quality_report", {}),
+        virtual_imu_quality=virtual_imu_quality,
+    )
+    write_json_file(merged_quality, virtual_imu_output_dir / "quality_report.json")
+
+    artifacts: Dict[str, Any] = {"pose3d_npz_path": str(Path(pose3d_npz_path).resolve())}
+    artifacts.update(imu_result["artifacts"])
+    artifacts["quality_report_json_path"] = str((virtual_imu_output_dir / "quality_report.json").resolve())
+
+    return {
+        "clip_id": str(clip_id),
+        "pose_sequence": pose_sequence,
+        "virtual_imu_sequence": virtual_imu_sequence,
+        "ik_sequence": ik_result["ik_sequence"],
+        "quality_report": merged_quality,
+        "pose3d_quality_report": pose3d_quality,
+        "ik_quality_report": ik_result.get("quality_report", {}),
+        "virtual_imu_quality_report": virtual_imu_quality,
+        "ik_result": ik_result,
+        "imusim_result": imusim_result,
+        "artifacts": artifacts,
+    }
 
 
 def run_virtual_imu_from_kimodo(

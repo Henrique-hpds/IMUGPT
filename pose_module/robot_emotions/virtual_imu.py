@@ -23,7 +23,7 @@ from pose_module.imu_alignment import (
     sequence_from_virtual_imu,
 )
 from pose_module.io.cache import write_json_file
-from pose_module.pipeline import run_virtual_imu_pipeline
+from pose_module.pipeline import run_virtual_imu_from_pose3d, run_virtual_imu_pipeline
 from pose_module.processing.imu_calibration import (
     DEFAULT_CALIBRATION_PERCENTILE_RESOLUTION,
     DEFAULT_CALIBRATION_SIGNAL_MODE,
@@ -62,6 +62,7 @@ def run_robot_emotions_virtual_imu(
     estimate_sensor_frame: bool = False,
     estimate_sensor_names: Optional[Sequence[str]] = None,
     domains: Sequence[str] = ("10ms", "30ms"),
+    pose3d_manifest_path: Optional[str] = None,
 ) -> Dict[str, Any]:
     extractor = RobotEmotionsExtractor(dataset_root, domains=tuple(str(domain) for domain in domains))
     records = extractor.select_records(
@@ -74,6 +75,18 @@ def run_robot_emotions_virtual_imu(
         alignment_settings.get("fit_from_current_pair", False)
     )
 
+    # Build clip_id → pose3d_npz_path index from an existing pose3d manifest, if provided.
+    pose3d_index: Dict[str, str] = {}
+    if pose3d_manifest_path is not None:
+        manifest_lines = Path(pose3d_manifest_path).read_text(encoding="utf-8").splitlines()
+        for line in manifest_lines:
+            if not line.strip():
+                continue
+            entry = json.loads(line)
+            npz_path = entry.get("artifacts", {}).get("pose3d_npz_path")
+            if npz_path and entry.get("clip_id"):
+                pose3d_index[str(entry["clip_id"])] = str(npz_path)
+
     manifest_entries = []
     processed_runs = []
     num_ok = 0
@@ -83,35 +96,49 @@ def run_robot_emotions_virtual_imu(
         manifest_entry = extractor.ensure_exported_clip(record, output_root=output_root)
         activity_label = None
         try:
-            pipeline_result = run_virtual_imu_pipeline(
-                clip_id=record.clip_id,
-                video_path=str(record.video_path.resolve()),
-                output_dir=resolve_pose_output_dir(output_root, record),
-                activity_label=activity_label,
-                fps_target=int(fps_target),
-                save_debug=bool(save_debug),
-                save_debug_2d=save_debug_2d,
-                save_debug_3d=save_debug_3d,
-                env_name=str(env_name),
-                video_metadata=manifest_entry.get("video", {}),
-                model_alias="vitpose-b",
-                motionbert_env_name=motionbert_env_name,
-                motionbert_window_size=int(motionbert_window_size),
-                motionbert_window_overlap=float(motionbert_window_overlap),
-                include_motionbert_confidence=bool(include_motionbert_confidence),
-                motionbert_device=str(motionbert_device),
-                allow_motionbert_fallback_backend=bool(allow_motionbert_fallback_backend),
-                sensor_layout_path=(
-                    None if sensor_layout_path in (None, "") else str(sensor_layout_path)
-                ),
-                imu_acc_noise_std_m_s2=imu_acc_noise_std_m_s2,
-                imu_gyro_noise_std_rad_s=imu_gyro_noise_std_rad_s,
-                imu_random_seed=int(imu_random_seed),
-                estimate_sensor_frame=bool(estimate_sensor_frame),
-                estimate_sensor_names=(
-                    None if estimate_sensor_names is None else tuple(str(name) for name in estimate_sensor_names)
-                ),
-            )
+            cached_pose3d_path = pose3d_index.get(record.clip_id)
+            if cached_pose3d_path is not None:
+                pipeline_result = run_virtual_imu_from_pose3d(
+                    clip_id=record.clip_id,
+                    pose3d_npz_path=cached_pose3d_path,
+                    output_dir=resolve_pose_output_dir(output_root, record),
+                    sensor_layout_path=(
+                        None if sensor_layout_path in (None, "") else str(sensor_layout_path)
+                    ),
+                    imu_acc_noise_std_m_s2=imu_acc_noise_std_m_s2,
+                    imu_gyro_noise_std_rad_s=imu_gyro_noise_std_rad_s,
+                    imu_random_seed=int(imu_random_seed),
+                )
+            else:
+                pipeline_result = run_virtual_imu_pipeline(
+                    clip_id=record.clip_id,
+                    video_path=str(record.video_path.resolve()),
+                    output_dir=resolve_pose_output_dir(output_root, record),
+                    activity_label=activity_label,
+                    fps_target=int(fps_target),
+                    save_debug=bool(save_debug),
+                    save_debug_2d=save_debug_2d,
+                    save_debug_3d=save_debug_3d,
+                    env_name=str(env_name),
+                    video_metadata=manifest_entry.get("video", {}),
+                    model_alias="vitpose-b",
+                    motionbert_env_name=motionbert_env_name,
+                    motionbert_window_size=int(motionbert_window_size),
+                    motionbert_window_overlap=float(motionbert_window_overlap),
+                    include_motionbert_confidence=bool(include_motionbert_confidence),
+                    motionbert_device=str(motionbert_device),
+                    allow_motionbert_fallback_backend=bool(allow_motionbert_fallback_backend),
+                    sensor_layout_path=(
+                        None if sensor_layout_path in (None, "") else str(sensor_layout_path)
+                    ),
+                    imu_acc_noise_std_m_s2=imu_acc_noise_std_m_s2,
+                    imu_gyro_noise_std_rad_s=imu_gyro_noise_std_rad_s,
+                    imu_random_seed=int(imu_random_seed),
+                    estimate_sensor_frame=bool(estimate_sensor_frame),
+                    estimate_sensor_names=(
+                        None if estimate_sensor_names is None else tuple(str(name) for name in estimate_sensor_names)
+                    ),
+                )
             processed_runs.append(
                 {
                     "record": record,
