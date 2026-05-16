@@ -209,23 +209,21 @@ python -m robot_emotions_vlm generate-kimodo \
 Converts a Kimodo generation manifest to synthetic virtual IMU signals, applying the same normalization and simulation stages as the real-video pipeline (metric normalization → root estimation → IMUSim).
 
 ```bash
-# Without calibration
+# Without geometric alignment
 python -m robot_emotions_vlm export-kimodo-virtual-imu \
   --kimodo-manifest output/robot_emotions_kimodo/kimodo_generation_manifest.jsonl \
   --output-dir output/robot_emotions_kimodo_imu
 
-# With geometric alignment + percentile calibration against real IMU
+# With geometric alignment against the reference real IMU (recommended)
 python -m robot_emotions_vlm export-kimodo-virtual-imu \
   --kimodo-manifest output/robot_emotions_kimodo/kimodo_generation_manifest.jsonl \
   --output-dir output/robot_emotions_kimodo_imu \
-  --real-imu-root output/exp_real_pose \
-  --real-imu-signal-mode acc
+  --real-imu-root output/exp_real_pose
 ```
 
-When `--real-imu-root` is provided, the pipeline resolves `imu.npz` for each window from `reference_clip_id` in the manifest and applies, in order:
+When `--real-imu-root` is provided, the pipeline resolves `imu.npz` for each window from `reference_clip_id` in the manifest and applies **geometric alignment** (`run_geometric_alignment`) — corrects the gravity-axis mismatch between SMPL-X and the physical sensor mount. Controlled by `pose_module/configs/imu_alignment_config.yaml`.
 
-1. **Geometric alignment** (`run_geometric_alignment`) — corrects the gravity-axis mismatch between SMPL-X and the physical sensor mount. Controlled by `pose_module/configs/imu_alignment_config.yaml`.
-2. **Percentile calibration** (`calibrate_virtual_imu_sequence`) — maps the amplitude distribution of the synthetic signal to the real IMU reference.
+The resulting `virtual_imu.npz` is saved **without percentile calibration**. Calibration is applied per fold at evaluation time (see `evaluation/classifiers_pose_experiments.ipynb`), restricted to training subjects only, which avoids data leakage from test-set distributions.
 
 Expected real IMU layout: `<real-imu-root>/<domain>/user_<NN>/<clip_id>/imu.npz`
 
@@ -233,11 +231,7 @@ Expected real IMU layout: `<real-imu-root>/<domain>/user_<NN>/<clip_id>/imu.npz`
 
 | Flag | Default | Description |
 |---|---|---|
-| `--real-imu-root` | none | Root of real IMU data; enables calibration |
-| `--real-imu-signal-mode` | `acc` | Signal used for calibration: `acc`, `gyro`, `both` |
-| `--real-imu-percentile-resolution` | `100` | Percentile bins for rank-mapping |
-| `--no-real-imu-per-class-calibration` | off | Use full distribution instead of per-class |
-| `--real-imu-label-key` | none | Manifest field for per-class grouping (e.g. `emotion`) |
+| `--real-imu-root` | none | Root of real IMU data; enables geometric alignment |
 | `--sensor-layout-path` | none | Custom sensor layout JSON |
 | `--imu-acc-noise-std-m-s2` | none | Accelerometer noise override |
 | `--imu-gyro-noise-std-rad-s` | none | Gyroscope noise override |
@@ -250,8 +244,8 @@ Expected real IMU layout: `<real-imu-root>/<domain>/user_<NN>/<clip_id>/imu.npz`
 
 - `virtual_imu_manifest.jsonl`
 - `virtual_imu_summary.json`
-- `<prompt_id>/virtual_imu/virtual_imu.npz`
-- `<prompt_id>/virtual_imu/virtual_imu_calibration_report.json` (when calibration runs)
+- `<prompt_id>/virtual_imu/virtual_imu.npz` — geometrically aligned, pre-calibration signal
+- `<prompt_id>/virtual_imu/virtual_imu_geometric_aligned.npz` — same signal (alias kept by alignment stage)
 
 ---
 
@@ -314,12 +308,13 @@ python -m robot_emotions_vlm generate-kimodo \
 
 ### Step 5 — Export virtual IMU (kimodo env)
 
+Applies geometric alignment against the reference real IMU. Percentile calibration is deferred to fold time in the evaluation notebook.
+
 ```bash
 python -m robot_emotions_vlm export-kimodo-virtual-imu \
   --kimodo-manifest output/robot_emotions_kimodo/kimodo_generation_manifest.jsonl \
   --output-dir output/robot_emotions_kimodo_imu \
-  --real-imu-root output/exp_real_pose \
-  --real-imu-signal-mode acc
+  --real-imu-root output/exp_real_pose
 ```
 
 ### Step 6 — Merge real + synthetic (kimodo env)

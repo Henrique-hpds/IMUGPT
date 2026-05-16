@@ -118,7 +118,7 @@ Outputs per clip under `output/<experiment>/<clip_id>/`:
 
 ### Pipeline 2 — Window-Anchored Kimodo Generation
 
-Uses real video windows as anchors: Qwen3-VL describes each 5-second segment; Kimodo generates new SMPL-X motion conditioned on the text and real joint positions.
+Uses real video windows as anchors: Qwen3-VL describes each 5-second segment; Kimodo generates new SMPL-X motion conditioned on the text and real joint positions. The resulting synthetic motions are then converted to virtual IMU signals using the same simulation stages as Pipeline 1.
 
 **Step 1 — Export real pose3d** (same as Pipeline 1, `pose_module` env):
 
@@ -133,16 +133,21 @@ conda run -n pose_module python -m pose_module.robot_emotions export-pose3d \
 ```bash
 conda run -n kimodo python -m robot_emotions_vlm describe-windows \
   --pose3d-manifest-path output/robot_emotions_pose3d/pose3d_manifest.jsonl \
-  --output-dir output/robot_emotions_qwen_windows
+  --output-dir output/robot_emotions_qwen_windows \
+  --window-sec 5.0 --window-hop-sec 2.5 --num-video-frames 48
 ```
 
 **Step 3 — Build anchor catalog** (`kimodo` env):
 
+Extracts ground trajectory and optional end-effector keyframes from the real pose3d to spatially constrain Kimodo generation.
+
 ```bash
 conda run -n kimodo python -m robot_emotions_vlm build-anchor-catalog \
-  --window-manifest-path output/robot_emotions_qwen_windows/window_description_manifest.jsonl \
   --pose3d-manifest-path output/robot_emotions_pose3d/pose3d_manifest.jsonl \
-  --output-dir output/robot_emotions_kimodo_anchors
+  --qwen-window-catalog-path output/robot_emotions_qwen_windows/kimodo_window_prompt_catalog.jsonl \
+  --output-dir output/robot_emotions_kimodo_anchors \
+  --model Kimodo-SMPLX-RP-v1 \
+  --effector-keyframes 5
 ```
 
 **Step 4 — Generate with Kimodo** (`kimodo` env):
@@ -154,7 +159,31 @@ conda run -n kimodo python -m robot_emotions_vlm generate-kimodo \
   --output-dir output/robot_emotions_kimodo
 ```
 
-Each generated clip produces `motion.npz` + `motion_amass.npz` (SMPL-X) under `output/robot_emotions_kimodo/<clip_id>/`.
+Each generated clip produces `motion.npz` + `motion_amass.npz` (SMPL-X) under `output/robot_emotions_kimodo/<prompt_id>/`.
+
+**Step 5 — Export virtual IMU** (`kimodo` env):
+
+Applies metric normalization → root estimation → IMUSim → geometric alignment. Percentile calibration is **not** applied here — it is deferred to evaluation time (per fold, restricted to training subjects) to avoid data leakage.
+
+```bash
+conda run -n kimodo python -m robot_emotions_vlm export-kimodo-virtual-imu \
+  --kimodo-manifest output/robot_emotions_kimodo/kimodo_generation_manifest.jsonl \
+  --output-dir output/robot_emotions_kimodo_imu \
+  --real-imu-root output/exp_real_pose
+```
+
+Each clip produces `virtual_imu.npz` (geometrically aligned, pre-calibration) under `output/robot_emotions_kimodo_imu/<prompt_id>/virtual_imu/`.
+
+**Step 6 — Merge real + synthetic** (`kimodo` env, optional):
+
+Combines the real-video manifest and the Kimodo manifest into a single JSONL for mixed training experiments.
+
+```bash
+conda run -n kimodo python -m robot_emotions_vlm export-mixed-virtual-imu \
+  --real-manifest output/robot_emotions_virtual_imu/virtual_imu_manifest.jsonl \
+  --synthetic-manifest output/robot_emotions_kimodo_imu/virtual_imu_manifest.jsonl \
+  --output-dir output/robot_emotions_mixed_imu
+```
 
 ---
 

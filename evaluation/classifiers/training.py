@@ -15,7 +15,7 @@ except ImportError:
     _std_tqdm = None
 
 from .metrics import compute_multitask_metrics
-from .model import MultitaskFusionClassifier, ensure_torch_available
+from .model import MultitaskFusionClassifier
 
 import torch
 import torch.nn.functional as F
