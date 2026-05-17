@@ -146,11 +146,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if args.command == "calibrate-virtual-imu":
         summary = calibrate_virtual_imu_manifest(
             manifest_path=str(args.manifest_path),
-            real_imu_reference_path=str(args.real_imu_reference_path),
             signal_mode=str(args.signal_mode),
             percentile_resolution=int(args.percentile_resolution),
             per_class=bool(not args.no_per_class),
-            calibration_fraction=float(args.calibration_fraction),
             activity_label_key=(
                 None if args.activity_label_key in (None, "") else str(args.activity_label_key)
             ),
@@ -259,12 +257,6 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         help="Path to virtual_imu_manifest.jsonl produced by export-virtual-imu.",
     )
     calibrate_parser.add_argument(
-        "--real-imu-reference-path",
-        type=str,
-        required=True,
-        help="Real IMU reference: a single NPZ file or a directory of per-clip NPZ files.",
-    )
-    calibrate_parser.add_argument(
         "--signal-mode",
         type=str,
         default="acc",
@@ -281,15 +273,6 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         "--no-per-class",
         action="store_true",
         help="Disable per-activity calibration and use the global distribution.",
-    )
-    calibrate_parser.add_argument(
-        "--calibration-fraction",
-        type=float,
-        default=1.0,
-        help=(
-            "Fraction of each reference clip to use (e.g. 0.5 = first 50%% of each clip). "
-            "Only applies when --real-imu-reference-path is a directory. Default 1.0."
-        ),
     )
     calibrate_parser.add_argument(
         "--activity-label-key",

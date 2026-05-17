@@ -88,35 +88,19 @@ conda run -n pose_module python -m pose_module.robot_emotions export-virtual-imu
 
 Passing `--pose3d-manifest-path` skips the pose estimation stage for every clip found in the manifest and loads the existing `pose3d.npz` directly, going straight to IK + IMUSim. Clips not found in the manifest fall back to the full pipeline. Omitting the flag runs the full pipeline for all clips (original behaviour).
 
-The pipeline exports raw (uncalibrated) signals. Calibration follows a rank-transform method that maps the virtual signal distribution onto a real IMU reference. There are two use cases:
+The pipeline exports raw (uncalibrated) signals. Calibration follows a rank-transform method that maps the virtual signal distribution onto the real IMU distribution of the same clip. There are two use cases:
 
 - **Per fold during evaluation** — `evaluation/classifiers_pose_experiments.ipynb` recalibrates each fold using only training-set subjects, avoiding data leakage.
-- **Batch via CLI** — `calibrate-virtual-imu` reads the manifest and writes `virtual_imu_calibrated.npz` alongside each original.
-
-The `--real-imu-reference-path` argument controls what distribution the virtual signal is mapped onto:
-
-- **Single clip** (`imu.npz`) — maps each clip onto that one reference. Use this for inspection or when a single representative session is a good reference:
+- **Batch via CLI** — `calibrate-virtual-imu` reads the manifest and calibrates each clip against its own `imu.npz`, writing `virtual_imu_calibrated.npz` alongside the original:
 
 ```bash
 conda run -n pose_module python -m pose_module.robot_emotions calibrate-virtual-imu \
-  --manifest-path output/robot_emotions_virtual_imu/virtual_imu_manifest.jsonl \
-  --real-imu-reference-path output/robot_emotions_virtual_imu/10ms/user_02/robot_emotions_10ms_u02_tag01/imu.npz
-```
-
-- **Directory of clips** — concatenates all `imu.npz` files found recursively. Use `--calibration-fraction` to limit how much of each clip enters the reference (avoids the full-dataset reference being dominated by outlier sessions):
-
-```bash
-conda run -n pose_module python -m pose_module.robot_emotions calibrate-virtual-imu \
-  --manifest-path output/robot_emotions_virtual_imu/virtual_imu_manifest.jsonl \
-  --real-imu-reference-path output/robot_emotions_virtual_imu/ \
-  --calibration-fraction 0.5
+  --manifest-path output/robot_emotions_virtual_imu/virtual_imu_manifest.jsonl
 ```
 
 | Flag | Default | Description |
 |---|---|---|
 | `--manifest-path` | required | `virtual_imu_manifest.jsonl` from `export-virtual-imu`. |
-| `--real-imu-reference-path` | required | Single `imu.npz` file or directory searched recursively for `imu.npz` files. |
-| `--calibration-fraction` | `1.0` | Fraction of each reference clip to use (only applies when path is a directory). |
 | `--activity-label-key` | `None` | Manifest label field for per-class calibration (e.g. `action`). |
 | `--signal-mode` | `acc` | Channels to calibrate: `acc`, `gyro`, or `both`. |
 | `--in-place` | off | Overwrite `virtual_imu.npz` instead of writing `virtual_imu_calibrated.npz`. |

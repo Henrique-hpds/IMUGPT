@@ -516,33 +516,26 @@ def _build_virtual_imu_failure_entry(
 
 def calibrate_virtual_imu_manifest(
     manifest_path: str,
-    real_imu_reference_path: str,
     *,
     signal_mode: str = DEFAULT_CALIBRATION_SIGNAL_MODE,
     percentile_resolution: int = DEFAULT_CALIBRATION_PERCENTILE_RESOLUTION,
     per_class: bool = True,
-    calibration_fraction: float = 1.0,
     activity_label_key: Optional[str] = None,
     in_place: bool = False,
     output_suffix: str = "_calibrated",
 ) -> Dict[str, Any]:
     """Apply percentile calibration to all virtual IMU clips listed in a manifest.
 
-    Reads each ``virtual_imu_npz_path`` from the manifest, calibrates it against
-    the real IMU reference, and writes the result either in-place (overwriting
-    ``virtual_imu.npz``) or alongside the original (``virtual_imu_calibrated.npz``).
-
-    ``real_imu_reference_path`` can be:
-    - A single NPZ file — used directly as reference.
-    - A directory — all ``*.npz`` files inside are collected and concatenated
-      after applying ``calibration_fraction`` per clip.
+    Each clip is calibrated against its own ``imu.npz``, read from
+    ``input_artifacts.imu_npz_path`` in the manifest entry. Writes
+    ``virtual_imu_calibrated.npz`` alongside the original (or overwrites
+    ``virtual_imu.npz`` when ``in_place=True``).
 
     Returns a summary dict with per-clip status.
     """
     from pose_module.interfaces import VirtualIMUSequence
 
     manifest_path = Path(manifest_path)
-    ref_path = Path(real_imu_reference_path)
 
     entries = [
         json.loads(line)
@@ -550,119 +543,83 @@ def calibrate_virtual_imu_manifest(
         if line.strip()
     ]
 
-    # Build reference matrix once for all clips
-    if ref_path.is_dir():
-        import tempfile, os
-        clip_npz_paths = sorted(ref_path.rglob("imu.npz"))
-        if not clip_npz_paths:
-            raise ValueError(f"No imu.npz files found in reference directory: {ref_path}")
-        # Resolve sensor names from the first clip so the temp NPZ carries them.
-        from pose_module.processing.imu_calibration import _extract_optional_sensor_names
-        with np.load(clip_npz_paths[0], allow_pickle=True) as _first:
-            ref_sensor_names = _extract_optional_sensor_names(_first, reference_path=clip_npz_paths[0]) or []
-        ref_matrix = build_calibration_reference_matrix(
-            clip_npz_paths=clip_npz_paths,
-            target_sensor_names=ref_sensor_names,
-            signal_mode=signal_mode,
-            calibration_fraction=calibration_fraction,
-        )
-        # Reshape [N, S*C] → [N, S, C] and save as imu [T, S, 6] so
-        # _extract_reference_signal can load it with full sensor metadata.
-        channels_per_sensor = 3 if signal_mode in ("acc", "gyro") else 6
-        num_sensors = len(ref_sensor_names) if ref_sensor_names else 1
-        ref_3d = ref_matrix.reshape(ref_matrix.shape[0], num_sensors, channels_per_sensor)
-        if signal_mode == "acc":
-            ref_imu = np.concatenate([ref_3d, np.zeros_like(ref_3d)], axis=2)
-        elif signal_mode == "gyro":
-            ref_imu = np.concatenate([np.zeros_like(ref_3d), ref_3d], axis=2)
-        else:
-            ref_imu = ref_3d
-        tmp = tempfile.NamedTemporaryFile(suffix=".npz", delete=False)
-        tmp.close()
-        np.savez(tmp.name, imu=ref_imu, sensor_names=np.array(ref_sensor_names))
-        resolved_ref_path = tmp.name
-        _tmp_to_delete = tmp.name
-    else:
-        resolved_ref_path = str(ref_path)
-        _tmp_to_delete = None
-
     results = []
     num_ok = num_warning = num_fail = 0
 
-    try:
-        for entry in entries:
-            clip_id = str(entry.get("clip_id", ""))
-            artifacts = entry.get("artifacts", {})
-            virtual_imu_path = artifacts.get("virtual_imu_npz_path")
+    for entry in entries:
+        clip_id = str(entry.get("clip_id", ""))
+        artifacts = entry.get("artifacts", {})
+        virtual_imu_path = artifacts.get("virtual_imu_npz_path")
 
-            if not virtual_imu_path or not Path(virtual_imu_path).exists():
-                results.append({"clip_id": clip_id, "status": "skip", "reason": "virtual_imu_npz_path missing or not found"})
-                num_fail += 1
-                continue
+        clip_ref = (entry.get("input_artifacts") or artifacts).get("imu_npz_path")
+        if not clip_ref or not Path(clip_ref).exists():
+            results.append({"clip_id": clip_id, "status": "skip", "reason": "imu_npz_path missing or not found"})
+            num_fail += 1
+            continue
 
-            activity_label = None
-            if activity_label_key not in (None, ""):
-                activity_label = entry.get("labels", {}).get(str(activity_label_key))
+        if not virtual_imu_path or not Path(virtual_imu_path).exists():
+            results.append({"clip_id": clip_id, "status": "skip", "reason": "virtual_imu_npz_path missing or not found"})
+            num_fail += 1
+            continue
 
-            try:
-                with np.load(virtual_imu_path, allow_pickle=True) as payload:
-                    seq = VirtualIMUSequence(
-                        clip_id=clip_id,
-                        fps=float(payload["fps"]) if "fps" in payload and payload["fps"] is not None else None,
-                        sensor_names=[str(s) for s in np.asarray(payload["sensor_names"]).reshape(-1).tolist()],
-                        acc=np.asarray(payload["acc"], dtype=np.float32),
-                        gyro=np.asarray(payload["gyro"], dtype=np.float32),
-                        timestamps_sec=np.asarray(payload["timestamps_sec"], dtype=np.float32),
-                        source=str(payload.get("source", "virtual_imu")),
-                    )
+        activity_label = None
+        if activity_label_key not in (None, ""):
+            activity_label = entry.get("labels", {}).get(str(activity_label_key))
 
-                result = calibrate_virtual_imu_sequence(
-                    seq,
-                    real_imu_reference_path=resolved_ref_path,
-                    activity_label=activity_label,
-                    signal_mode=signal_mode,
-                    percentile_resolution=percentile_resolution,
-                    per_class=per_class,
+        try:
+            with np.load(virtual_imu_path, allow_pickle=True) as payload:
+                seq = VirtualIMUSequence(
+                    clip_id=clip_id,
+                    fps=float(payload["fps"]) if "fps" in payload and payload["fps"] is not None else None,
+                    sensor_names=[str(s) for s in np.asarray(payload["sensor_names"]).reshape(-1).tolist()],
+                    acc=np.asarray(payload["acc"], dtype=np.float32),
+                    gyro=np.asarray(payload["gyro"], dtype=np.float32),
+                    timestamps_sec=np.asarray(payload["timestamps_sec"], dtype=np.float32),
+                    source=str(payload.get("source", "virtual_imu")),
                 )
-                calibrated_seq = result["virtual_imu_sequence"]
-                report = result["calibration_report"]
 
-                if in_place:
-                    out_path = Path(virtual_imu_path)
-                else:
-                    stem = Path(virtual_imu_path).stem
-                    out_path = Path(virtual_imu_path).with_name(f"{stem}{output_suffix}.npz")
+            result = calibrate_virtual_imu_sequence(
+                seq,
+                real_imu_reference_path=clip_ref,
+                activity_label=activity_label,
+                signal_mode=signal_mode,
+                percentile_resolution=percentile_resolution,
+                per_class=per_class,
+            )
+            calibrated_seq = result["virtual_imu_sequence"]
+            report = result["calibration_report"]
 
-                np.savez_compressed(out_path, **calibrated_seq.to_npz_payload())
+            if in_place:
+                out_path = Path(virtual_imu_path)
+            else:
+                stem = Path(virtual_imu_path).stem
+                out_path = Path(virtual_imu_path).with_name(f"{stem}{output_suffix}.npz")
 
-                report_path = out_path.with_suffix("").with_name(out_path.stem + "_calibration_report.json")
-                write_json_file(report, report_path)
+            np.savez_compressed(out_path, **calibrated_seq.to_npz_payload())
 
-                status = str(report.get("status", "ok"))
-                results.append({
-                    "clip_id": clip_id,
-                    "status": status,
-                    "output_npz_path": str(out_path.resolve()),
-                    "calibration_report_path": str(report_path.resolve()),
-                })
-                if status == "ok":
-                    num_ok += 1
-                else:
-                    num_warning += 1
-            except Exception as exc:
-                results.append({"clip_id": clip_id, "status": "fail", "reason": str(exc)})
-                num_fail += 1
-    finally:
-        if _tmp_to_delete is not None:
-            os.unlink(_tmp_to_delete)
+            report_path = out_path.with_suffix("").with_name(out_path.stem + "_calibration_report.json")
+            write_json_file(report, report_path)
+
+            status = str(report.get("status", "ok"))
+            results.append({
+                "clip_id": clip_id,
+                "status": status,
+                "output_npz_path": str(out_path.resolve()),
+                "calibration_report_path": str(report_path.resolve()),
+            })
+            if status == "ok":
+                num_ok += 1
+            else:
+                num_warning += 1
+        except Exception as exc:
+            results.append({"clip_id": clip_id, "status": "fail", "reason": str(exc)})
+            num_fail += 1
 
     return {
         "manifest_path": str(manifest_path.resolve()),
-        "real_imu_reference_path": str(ref_path.resolve()),
         "signal_mode": signal_mode,
         "percentile_resolution": percentile_resolution,
         "per_class": per_class,
-        "calibration_fraction": calibration_fraction,
         "in_place": in_place,
         "num_clips": len(entries),
         "num_ok": num_ok,
