@@ -24,6 +24,7 @@ ok "openmmlab packages installed"
 step "Download the local weights from the repository"
 conda run -n openmmlab python -m pose_module.download_models --env-name openmmlab
 ok "Local weights downloaded"
+
 # 2. Pose_module environment setup (3.13.12)
 step "Creating pose_module env (Python 3.13.12)..."
 conda create --name pose_module python=3.13.12 -y
@@ -43,7 +44,7 @@ conda create -n kimodo python=3.10 -y
 ok "kimodo env created"
 
 step "Installing Kimodo dependencies..."
-conda install -n openmmlab pytorch torchvision pytorch-cuda=12.4 -c pytorch -c nvidia -y
+conda install -n kimodo pytorch torchvision pytorch-cuda=12.4 -c pytorch -c nvidia -y
 # If torch import fails with an MKL error:
 # conda install -n kimodo -y mkl=2023.1.0
 cd kimodo
