@@ -890,11 +890,13 @@ def run_virtual_imu_from_pose3d(
     imu_gyro_noise_std_rad_s: Optional[float] = None,
     imu_random_seed: int = 0,
 ) -> Dict[str, Any]:
-    """Run IK + IMUSim on an already-computed pose3d.npz, writing virtual_imu.npz."""
+    """Run IK + IMUSim + geometric alignment on an already-computed pose3d.npz."""
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     ik_output_dir = _resolve_stage_output_dir(output_dir, "ik")
     virtual_imu_output_dir = _resolve_stage_output_dir(output_dir, "virtual_imu")
+    geometric_alignment_output_dir = _resolve_stage_output_dir(virtual_imu_output_dir, "geometric_alignment")
+    geometric_alignment_settings = load_alignment_runtime_settings(None)
 
     with np.load(str(pose3d_npz_path), allow_pickle=False) as payload:
         pose_sequence = PoseSequence3D.from_npz_payload({k: payload[k] for k in payload.files})
@@ -911,34 +913,57 @@ def run_virtual_imu_from_pose3d(
         imu_random_seed=imu_random_seed,
     )
 
+    resolved_real_imu_npz_path = _resolve_real_imu_npz_path(output_dir=output_dir)
+
+    if bool(geometric_alignment_settings.get("enable", False)):
+        geometric_alignment_result = _run_optional_geometric_alignment(
+            raw_virtual_imu_sequence=imu_result["virtual_imu_sequence"],
+            output_dir=geometric_alignment_output_dir,
+            real_imu_npz_path=resolved_real_imu_npz_path,
+        )
+    else:
+        geometric_alignment_result = _build_disabled_geometric_alignment_result(
+            raw_virtual_imu_sequence=imu_result["virtual_imu_sequence"],
+            config_path=geometric_alignment_settings.get("config_path"),
+        )
+
+    final_virtual_imu_sequence = geometric_alignment_result["aligned_virtual_imu_sequence"]
+
+    final_virtual_imu_quality_report = _sync_virtual_imu_pipeline_outputs(
+        output_dir=virtual_imu_output_dir,
+        imusim_result=imu_result["imusim_result"],
+        virtual_imu_sequence=final_virtual_imu_sequence,
+    )
+
     pose3d_quality: Dict[str, Any] = {"status": "ok", "skipped": True, "source": str(pose3d_npz_path)}
     ik_result = imu_result["ik_result"]
-    imusim_result = imu_result["imusim_result"]
-    virtual_imu_sequence = imu_result["virtual_imu_sequence"]
-    virtual_imu_quality = imusim_result.get("quality_report", {})
 
     merged_quality = merge_virtual_imu_quality_reports(
         pose3d_quality=pose3d_quality,
         ik_quality=ik_result.get("quality_report", {}),
-        virtual_imu_quality=virtual_imu_quality,
+        virtual_imu_quality=final_virtual_imu_quality_report,
+        geometric_alignment_quality=geometric_alignment_result["quality_report"],
     )
     write_json_file(merged_quality, virtual_imu_output_dir / "quality_report.json")
 
     artifacts: Dict[str, Any] = {"pose3d_npz_path": str(Path(pose3d_npz_path).resolve())}
     artifacts.update(imu_result["artifacts"])
+    artifacts.update(geometric_alignment_result["artifacts"])
     artifacts["quality_report_json_path"] = str((virtual_imu_output_dir / "quality_report.json").resolve())
 
     return {
         "clip_id": str(clip_id),
         "pose_sequence": pose_sequence,
-        "virtual_imu_sequence": virtual_imu_sequence,
+        "virtual_imu_sequence": final_virtual_imu_sequence,
         "ik_sequence": ik_result["ik_sequence"],
         "quality_report": merged_quality,
         "pose3d_quality_report": pose3d_quality,
         "ik_quality_report": ik_result.get("quality_report", {}),
-        "virtual_imu_quality_report": virtual_imu_quality,
+        "virtual_imu_quality_report": final_virtual_imu_quality_report,
+        "geometric_alignment_quality_report": geometric_alignment_result["quality_report"],
+        "geometric_alignment_result": geometric_alignment_result,
         "ik_result": ik_result,
-        "imusim_result": imusim_result,
+        "imusim_result": imu_result["imusim_result"],
         "artifacts": artifacts,
     }
 

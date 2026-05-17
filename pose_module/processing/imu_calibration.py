@@ -356,6 +356,9 @@ def _structured_reference_to_matrix(
         return array.reshape(int(array.shape[0]), -1), matched_names, []
 
     name_to_index = {str(name): index for index, name in enumerate(sensor_names)}
+    if len(target_sensor_names) == 0:
+        matched_names = [str(name) for name in sensor_names]
+        return array.reshape(int(array.shape[0]), -1), matched_names, []
     matched_target_indices: list[int] = []
     matched_reference_indices: list[int] = []
     missing_names: list[str] = []

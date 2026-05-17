@@ -552,20 +552,34 @@ def calibrate_virtual_imu_manifest(
 
     # Build reference matrix once for all clips
     if ref_path.is_dir():
+        import tempfile, os
         clip_npz_paths = sorted(ref_path.rglob("imu.npz"))
         if not clip_npz_paths:
             raise ValueError(f"No imu.npz files found in reference directory: {ref_path}")
+        # Resolve sensor names from the first clip so the temp NPZ carries them.
+        from pose_module.processing.imu_calibration import _extract_optional_sensor_names
+        with np.load(clip_npz_paths[0], allow_pickle=True) as _first:
+            ref_sensor_names = _extract_optional_sensor_names(_first, reference_path=clip_npz_paths[0]) or []
         ref_matrix = build_calibration_reference_matrix(
             clip_npz_paths=clip_npz_paths,
-            target_sensor_names=[],  # resolved per-clip inside calibrate_virtual_imu_sequence
+            target_sensor_names=ref_sensor_names,
             signal_mode=signal_mode,
             calibration_fraction=calibration_fraction,
         )
-        # Save to a temp NPZ so calibrate_virtual_imu_sequence can load it
-        import tempfile, os
+        # Reshape [N, S*C] → [N, S, C] and save as imu [T, S, 6] so
+        # _extract_reference_signal can load it with full sensor metadata.
+        channels_per_sensor = 3 if signal_mode in ("acc", "gyro") else 6
+        num_sensors = len(ref_sensor_names) if ref_sensor_names else 1
+        ref_3d = ref_matrix.reshape(ref_matrix.shape[0], num_sensors, channels_per_sensor)
+        if signal_mode == "acc":
+            ref_imu = np.concatenate([ref_3d, np.zeros_like(ref_3d)], axis=2)
+        elif signal_mode == "gyro":
+            ref_imu = np.concatenate([np.zeros_like(ref_3d), ref_3d], axis=2)
+        else:
+            ref_imu = ref_3d
         tmp = tempfile.NamedTemporaryFile(suffix=".npz", delete=False)
         tmp.close()
-        np.savez(tmp.name, imu=ref_matrix)
+        np.savez(tmp.name, imu=ref_imu, sensor_names=np.array(ref_sensor_names))
         resolved_ref_path = tmp.name
         _tmp_to_delete = tmp.name
     else:
