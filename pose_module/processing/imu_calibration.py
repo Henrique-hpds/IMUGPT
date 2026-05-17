@@ -552,9 +552,7 @@ def _map_percentiles(*, source: np.ndarray, target: np.ndarray, pcts: np.ndarray
     target_percentiles = np.percentile(target, pcts, axis=0)
     transformed = np.empty_like(source, dtype=np.float64)
     for channel_index in range(int(source.shape[1])):
-        bins = np.asarray(source_percentiles[:, channel_index], dtype=np.float64)
-        values = np.asarray(target_percentiles[:, channel_index], dtype=np.float64)
-        indices = np.searchsorted(bins, source[:, channel_index], side="left")
-        indices = np.clip(indices, 0, len(values) - 1)
-        transformed[:, channel_index] = values[indices]
+        xp = np.asarray(source_percentiles[:, channel_index], dtype=np.float64)
+        fp = np.asarray(target_percentiles[:, channel_index], dtype=np.float64)
+        transformed[:, channel_index] = np.interp(source[:, channel_index], xp, fp)
     return transformed
