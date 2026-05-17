@@ -552,9 +552,9 @@ def calibrate_virtual_imu_manifest(
 
     # Build reference matrix once for all clips
     if ref_path.is_dir():
-        clip_npz_paths = sorted(ref_path.rglob("*.npz"))
+        clip_npz_paths = sorted(ref_path.rglob("imu.npz"))
         if not clip_npz_paths:
-            raise ValueError(f"No NPZ files found in reference directory: {ref_path}")
+            raise ValueError(f"No imu.npz files found in reference directory: {ref_path}")
         ref_matrix = build_calibration_reference_matrix(
             clip_npz_paths=clip_npz_paths,
             target_sensor_names=[],  # resolved per-clip inside calibrate_virtual_imu_sequence

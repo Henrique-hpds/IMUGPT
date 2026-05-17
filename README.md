@@ -96,7 +96,7 @@ The pipeline exports raw (uncalibrated) signals. Calibration follows a rank-tran
 ```bash
 conda run -n pose_module python -m pose_module.robot_emotions calibrate-virtual-imu \
   --manifest-path output/robot_emotions_virtual_imu/virtual_imu_manifest.jsonl \
-  --real-imu-reference-path data/real_imu/ \
+  --real-imu-reference-path output/robot_emotions_pose3d/ \
   --calibration-fraction 0.5
 ```
 
