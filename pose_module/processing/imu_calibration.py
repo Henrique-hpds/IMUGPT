@@ -175,7 +175,14 @@ def build_calibration_reference_matrix(
         m = np.asarray(ref["matrix"], dtype=np.float32)
         if calibration_fraction < 1.0:
             n = max(1, int(round(m.shape[0] * calibration_fraction)))
-            m = m[:n]
+            rng = np.random.default_rng(seed=42)
+            extreme_indices = set(int(i) for i in np.argmax(m, axis=0))
+            extreme_indices |= set(int(i) for i in np.argmin(m, axis=0))
+            n_random = max(0, n - len(extreme_indices))
+            pool = np.array([i for i in range(m.shape[0]) if i not in extreme_indices])
+            random_indices = rng.choice(pool, size=min(n_random, len(pool)), replace=False) if n_random > 0 and len(pool) > 0 else np.array([], dtype=np.intp)
+            indices = np.sort(np.concatenate([np.array(list(extreme_indices), dtype=np.intp), random_indices.astype(np.intp)]))
+            m = m[indices]
         matrices.append(m)
 
     if len(matrices) == 0:

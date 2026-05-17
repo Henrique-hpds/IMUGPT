@@ -520,6 +520,7 @@ def calibrate_virtual_imu_manifest(
     signal_mode: str = DEFAULT_CALIBRATION_SIGNAL_MODE,
     percentile_resolution: int = DEFAULT_CALIBRATION_PERCENTILE_RESOLUTION,
     per_class: bool = True,
+    calibration_fraction: float = 1.0,
     activity_label_key: Optional[str] = None,
     in_place: bool = False,
     output_suffix: str = "_calibrated",
@@ -567,6 +568,36 @@ def calibrate_virtual_imu_manifest(
             activity_label = entry.get("labels", {}).get(str(activity_label_key))
 
         try:
+            if calibration_fraction < 1.0:
+                import tempfile, os, shutil
+                with np.load(clip_ref, allow_pickle=True) as ref_payload:
+                    ref_imu = np.asarray(ref_payload["imu"])
+                    n = max(1, int(round(ref_imu.shape[0] * calibration_fraction)))
+                    rng = np.random.default_rng(seed=42)
+                    # Reserve slots for the per-channel extremes so the percentile
+                    # mapping always covers the full amplitude range of the real signal.
+                    flat = ref_imu.reshape(ref_imu.shape[0], -1)
+                    extreme_indices = set(int(i) for i in np.argmax(flat, axis=0))
+                    extreme_indices |= set(int(i) for i in np.argmin(flat, axis=0))
+                    n_random = max(0, n - len(extreme_indices))
+                    pool = np.array([i for i in range(ref_imu.shape[0]) if i not in extreme_indices])
+                    random_indices = rng.choice(pool, size=min(n_random, len(pool)), replace=False) if n_random > 0 and len(pool) > 0 else np.array([], dtype=np.intp)
+                    indices = np.sort(np.concatenate([np.array(list(extreme_indices), dtype=np.intp), random_indices.astype(np.intp)]))
+                    ref_kwargs = {k: ref_payload[k] for k in ref_payload.files}
+                    ref_kwargs["imu"] = ref_imu[indices]
+                tmp_dir = tempfile.mkdtemp()
+                tmp_npz = os.path.join(tmp_dir, "imu.npz")
+                np.savez(tmp_npz, **ref_kwargs)
+                # Copy metadata.json so sensor name resolution works correctly
+                src_meta = Path(clip_ref).with_name("metadata.json")
+                if src_meta.exists():
+                    shutil.copy2(src_meta, os.path.join(tmp_dir, "metadata.json"))
+                effective_ref = tmp_npz
+                tmp = tmp_dir
+            else:
+                effective_ref = clip_ref
+                tmp = None
+
             with np.load(virtual_imu_path, allow_pickle=True) as payload:
                 seq = VirtualIMUSequence(
                     clip_id=clip_id,
@@ -578,14 +609,18 @@ def calibrate_virtual_imu_manifest(
                     source=str(payload.get("source", "virtual_imu")),
                 )
 
-            result = calibrate_virtual_imu_sequence(
-                seq,
-                real_imu_reference_path=clip_ref,
-                activity_label=activity_label,
-                signal_mode=signal_mode,
-                percentile_resolution=percentile_resolution,
-                per_class=per_class,
-            )
+            try:
+                result = calibrate_virtual_imu_sequence(
+                    seq,
+                    real_imu_reference_path=effective_ref,
+                    activity_label=activity_label,
+                    signal_mode=signal_mode,
+                    percentile_resolution=percentile_resolution,
+                    per_class=per_class,
+                )
+            finally:
+                if tmp is not None:
+                    shutil.rmtree(tmp, ignore_errors=True)
             calibrated_seq = result["virtual_imu_sequence"]
             report = result["calibration_report"]
 
@@ -620,6 +655,7 @@ def calibrate_virtual_imu_manifest(
         "signal_mode": signal_mode,
         "percentile_resolution": percentile_resolution,
         "per_class": per_class,
+        "calibration_fraction": calibration_fraction,
         "in_place": in_place,
         "num_clips": len(entries),
         "num_ok": num_ok,

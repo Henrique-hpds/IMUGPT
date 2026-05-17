@@ -95,12 +95,14 @@ The pipeline exports raw (uncalibrated) signals. Calibration follows a rank-tran
 
 ```bash
 conda run -n pose_module python -m pose_module.robot_emotions calibrate-virtual-imu \
-  --manifest-path output/robot_emotions_virtual_imu/virtual_imu_manifest.jsonl
+  --manifest-path output/robot_emotions_virtual_imu/virtual_imu_manifest.jsonl \
+  --calibration-fraction 0.99
 ```
 
 | Flag | Default | Description |
 |---|---|---|
 | `--manifest-path` | required | `virtual_imu_manifest.jsonl` from `export-virtual-imu`. |
+| `--calibration-fraction` | `1.0` | Fraction of each clip's real `imu.npz` to use as reference (e.g. `0.5` = first 50%). |
 | `--activity-label-key` | `None` | Manifest label field for per-class calibration (e.g. `action`). |
 | `--signal-mode` | `acc` | Channels to calibrate: `acc`, `gyro`, or `both`. |
 | `--in-place` | off | Overwrite `virtual_imu.npz` instead of writing `virtual_imu_calibrated.npz`. |

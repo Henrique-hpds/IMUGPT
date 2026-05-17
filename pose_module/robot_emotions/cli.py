@@ -149,6 +149,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             signal_mode=str(args.signal_mode),
             percentile_resolution=int(args.percentile_resolution),
             per_class=bool(not args.no_per_class),
+            calibration_fraction=float(args.calibration_fraction),
             activity_label_key=(
                 None if args.activity_label_key in (None, "") else str(args.activity_label_key)
             ),
@@ -273,6 +274,12 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         "--no-per-class",
         action="store_true",
         help="Disable per-activity calibration and use the global distribution.",
+    )
+    calibrate_parser.add_argument(
+        "--calibration-fraction",
+        type=float,
+        default=1.0,
+        help="Fraction of each clip's real imu.npz to use as calibration reference (e.g. 0.5 = first 50%%). Default 1.0.",
     )
     calibrate_parser.add_argument(
         "--activity-label-key",
