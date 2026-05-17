@@ -125,7 +125,9 @@ Uses real video windows as anchors: Qwen3-VL describes each 5-second segment; Ki
 ```bash
 conda run -n pose_module python -m pose_module.robot_emotions export-pose3d \
   --dataset-root data/RobotEmotions --domains 10ms 30ms \
-  --output-dir output/robot_emotions_pose3d --fps-target 20
+  --output-dir output/robot_emotions_pose3d \
+  --env-name openmmlab \
+  --no-debug-2d --no-debug-3d
 ```
 
 **Step 2 — Describe windows with Qwen3-VL** (`kimodo` env):

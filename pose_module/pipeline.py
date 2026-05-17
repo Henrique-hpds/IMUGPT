@@ -708,8 +708,6 @@ def run_virtual_imu_pipeline(
     )
     
     resolved_real_imu_npz_path = _resolve_real_imu_npz_path(output_dir=output_dir)
-    
-    resolved_real_imu_npz_path = _resolve_real_imu_npz_path(output_dir=output_dir)
 
     # Optionally align the synthetic signals to a real IMU reference.
     if bool(geometric_alignment_settings.get("enable", False)):
@@ -1020,8 +1018,6 @@ def _run_imu_stages(
         acc_noise_std_m_s2=imu_acc_noise_std_m_s2,
         gyro_noise_std_rad_s=imu_gyro_noise_std_rad_s,
         random_seed=int(imu_random_seed),
-        real_imu_reference_path=None,
-        real_imu_activity_label=None,
     )
     virtual_imu_sequence = imusim_result["virtual_imu_sequence"]
 
