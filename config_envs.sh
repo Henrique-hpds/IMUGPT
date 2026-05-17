@@ -45,12 +45,12 @@ ok "kimodo env created"
 
 step "Installing Kimodo dependencies..."
 conda install -n kimodo pytorch torchvision pytorch-cuda=12.4 -c pytorch -c nvidia -y
-# If torch import fails with an MKL error:
-# conda install -n kimodo -y mkl=2023.1.0
+# If torch import fails with an MKL error, install mkl 2023.1.0
+conda install -n kimodo -y mkl=2023.1.0
 cd kimodo
 conda run -n kimodo pip install -e .
 cd ..
-conda run -n kimodo pip install --upgrade huggingface_hub accelerate safetensors av
+conda run -n kimodo pip install --upgrade "transformers==5.1.0" huggingface_hub accelerate safetensors av
 ok "Kimodo dependencies installed"
 
 echo "==> All environments configured successfully."
