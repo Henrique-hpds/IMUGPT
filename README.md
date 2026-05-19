@@ -169,12 +169,12 @@ Applies metric normalization → root estimation → IMUSim → geometric alignm
 conda run -n kimodo python -m robot_emotions_vlm export-kimodo-virtual-imu \
   --kimodo-manifest output/robot_emotions_kimodo/kimodo_generation_manifest.jsonl \
   --output-dir output/robot_emotions_kimodo_imu \
-  --real-imu-root output/exp_real_pose
+  --real-imu-root output/robot_emotions_virtual_imu
 ```
 
 Each clip produces `virtual_imu.npz` (geometrically aligned, pre-calibration) under `output/robot_emotions_kimodo_imu/<prompt_id>/virtual_imu/`.
 
-**Step 6 — Merge real + synthetic** (`kimodo` env, optional):
+**Step 6 — Merge real + synthetic** (`kimodo` env):
 
 Combines the real-video manifest and the Kimodo manifest into a single JSONL for mixed training experiments.
 

@@ -139,6 +139,7 @@ def _load_manifest_frame(output_root: Path | str) -> pd.DataFrame:
                     "pose3d_npz_path": artifacts.get("pose3d_npz_path"),
                     "virtual_imu_npz_path": artifacts.get("virtual_imu_npz_path"),
                     "virtual_imu_frame_aligned_npz_path": artifacts.get("virtual_imu_frame_aligned_npz_path"),
+                    "virtual_imu_geometric_aligned_npz_path": artifacts.get("virtual_imu_geometric_aligned_npz_path"),
                     "quality_report": quality_report,
                 }
             )
@@ -203,6 +204,10 @@ def build_classifier_capture_table(output_root: Path | str, *, capture_blacklist
     )
     
     merged["frame_aligned_available"] = merged["virtual_imu_frame_aligned_npz_path"].notna()
+    merged["virtual_imu_uncalibrated_npz_path"] = merged["virtual_imu_geometric_aligned_npz_path"]
+    merged["real_imu_reference_npz_path"] = merged["clip_dir"].apply(
+        lambda d: str(Path(d) / "imu.npz") if pd.notna(d) else None
+    )
     merged = merged[merged["pose3d_npz_path"].notna() & merged["virtual_imu_npz_path"].notna()].copy()
     
     merged = apply_capture_blacklist(
