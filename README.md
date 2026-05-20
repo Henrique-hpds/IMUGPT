@@ -66,6 +66,8 @@ The project supports two main pipelines. All commands are run from the repositor
 
 ### Pipeline 1 — Video → Virtual IMU
 
+![Main Pipeline](assets/main_pipeline-1.png)
+
 Converts real video recordings into synthetic IMU data. The `pose_module` drives the full chain: 2D detection (OpenMMlab/ViTPose), 3D lifting (MotionBERT), metric normalization, root estimation, and physics-based IMU synthesis (IMUSim).
 
 ```bash
@@ -96,7 +98,7 @@ The pipeline exports raw (uncalibrated) signals. Calibration follows a rank-tran
 ```bash
 conda run -n pose_module python -m pose_module.robot_emotions calibrate-virtual-imu \
   --manifest-path output/robot_emotions_virtual_imu/virtual_imu_manifest.jsonl \
-  --calibration-fraction 0.99
+  --calibration-fraction 0.5
 ```
 
 | Flag | Default | Description |
