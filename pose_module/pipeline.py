@@ -661,8 +661,10 @@ def run_virtual_imu_pipeline(
     imu_random_seed: int = 0,
     estimate_sensor_frame: bool = False,
     estimate_sensor_names: Sequence[str] | None = None,
+    gyro_rotation_smoothing_window_sec: Optional[float] = None,
+    gyro_rotation_smoothing_polyorder: int = 3,
 ) -> Dict[str, Any]:
-    
+
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     ik_output_dir = _resolve_stage_output_dir(output_dir, "ik")
@@ -705,8 +707,10 @@ def run_virtual_imu_pipeline(
         acc_noise_std_m_s2=imu_acc_noise_std_m_s2,
         gyro_noise_std_rad_s=imu_gyro_noise_std_rad_s,
         random_seed=int(imu_random_seed),
+        gyro_rotation_smoothing_window_sec=gyro_rotation_smoothing_window_sec,
+        gyro_rotation_smoothing_polyorder=int(gyro_rotation_smoothing_polyorder),
     )
-    
+
     resolved_real_imu_npz_path = _resolve_real_imu_npz_path(output_dir=output_dir)
 
     # Optionally align the synthetic signals to a real IMU reference.
@@ -889,6 +893,8 @@ def run_virtual_imu_from_pose3d(
     imu_acc_noise_std_m_s2: Optional[float] = None,
     imu_gyro_noise_std_rad_s: Optional[float] = None,
     imu_random_seed: int = 0,
+    gyro_rotation_smoothing_window_sec: Optional[float] = None,
+    gyro_rotation_smoothing_polyorder: int = 3,
 ) -> Dict[str, Any]:
     """Run IK + IMUSim + geometric alignment on an already-computed pose3d.npz."""
     output_dir = Path(output_dir)
@@ -911,6 +917,8 @@ def run_virtual_imu_from_pose3d(
         imu_acc_noise_std_m_s2=imu_acc_noise_std_m_s2,
         imu_gyro_noise_std_rad_s=imu_gyro_noise_std_rad_s,
         imu_random_seed=imu_random_seed,
+        gyro_rotation_smoothing_window_sec=gyro_rotation_smoothing_window_sec,
+        gyro_rotation_smoothing_polyorder=int(gyro_rotation_smoothing_polyorder),
     )
 
     resolved_real_imu_npz_path = _resolve_real_imu_npz_path(output_dir=output_dir)
@@ -980,6 +988,8 @@ def run_virtual_imu_from_kimodo(
     imu_acc_noise_std_m_s2: Optional[float] = None,
     imu_gyro_noise_std_rad_s: Optional[float] = None,
     imu_random_seed: int = 0,
+    gyro_rotation_smoothing_window_sec: Optional[float] = None,
+    gyro_rotation_smoothing_polyorder: int = 3,
 ) -> Dict[str, Any]:
     """Kimodo motion.npz → smoothed pose3d → IK → virtual_imu.npz.
 
@@ -1009,6 +1019,8 @@ def run_virtual_imu_from_kimodo(
         imu_acc_noise_std_m_s2=imu_acc_noise_std_m_s2,
         imu_gyro_noise_std_rad_s=imu_gyro_noise_std_rad_s,
         imu_random_seed=imu_random_seed,
+        gyro_rotation_smoothing_window_sec=gyro_rotation_smoothing_window_sec,
+        gyro_rotation_smoothing_polyorder=int(gyro_rotation_smoothing_polyorder),
     )
     artifacts = dict(pose3d_result["artifacts"])
     artifacts.update(imu_result["artifacts"])
@@ -1034,6 +1046,8 @@ def _run_imu_stages(
     imu_acc_noise_std_m_s2: Optional[float],
     imu_gyro_noise_std_rad_s: Optional[float],
     imu_random_seed: int,
+    gyro_rotation_smoothing_window_sec: Optional[float] = None,
+    gyro_rotation_smoothing_polyorder: int = 3,
 ) -> Dict[str, Any]:
     ik_result = run_ik(pose_sequence, output_dir=ik_output_dir)
     imusim_result = run_imusim(
@@ -1043,6 +1057,8 @@ def _run_imu_stages(
         acc_noise_std_m_s2=imu_acc_noise_std_m_s2,
         gyro_noise_std_rad_s=imu_gyro_noise_std_rad_s,
         random_seed=int(imu_random_seed),
+        gyro_rotation_smoothing_window_sec=gyro_rotation_smoothing_window_sec,
+        gyro_rotation_smoothing_polyorder=int(gyro_rotation_smoothing_polyorder),
     )
     virtual_imu_sequence = imusim_result["virtual_imu_sequence"]
 

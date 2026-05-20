@@ -7,6 +7,64 @@ from typing import Tuple
 import numpy as np
 
 
+def smooth_quaternion_sequence(
+    quaternions_wxyz: np.ndarray,
+    *,
+    window_length: int,
+    polyorder: int,
+) -> np.ndarray:
+    """Savitzky-Golay smooth a quaternion sequence with SO(3) double-cover handling.
+
+    Handles the q / -q ambiguity by flipping each quaternion to the same hemisphere
+    as its predecessor before smoothing, then re-normalises after.
+
+    Parameters
+    ----------
+    quaternions_wxyz:
+        Shape ``(T, S, 4)`` or ``(T, 4)``.  W-first convention.
+    window_length:
+        Savitzky-Golay window in frames (must be odd and > polyorder).
+    polyorder:
+        Polynomial order for the Savitzky-Golay filter.
+
+    Returns
+    -------
+    Smoothed, unit quaternions with the same shape and dtype as the input.
+    """
+    quats = np.asarray(quaternions_wxyz, dtype=np.float64)
+    original_shape = quats.shape
+    scalar_input = quats.ndim == 2
+    if scalar_input:
+        quats = quats[:, None, :]  # (T, 1, 4)
+
+    num_frames, num_sensors = quats.shape[:2]
+    result = quats.copy()
+
+    for sensor_index in range(num_sensors):
+        # Fix double-cover: flip each quaternion so it stays in the same
+        # hemisphere as the previous one.
+        for frame_index in range(1, num_frames):
+            if float(np.dot(result[frame_index, sensor_index], result[frame_index - 1, sensor_index])) < 0.0:
+                result[frame_index, sensor_index] = -result[frame_index, sensor_index]
+
+        # Smooth all 4 components jointly with the same filter.
+        smoothed = savgol_smooth(
+            result[:, sensor_index, :],
+            window_length=window_length,
+            polyorder=polyorder,
+        )
+
+        # Re-normalise to unit quaternion.
+        norms = np.linalg.norm(smoothed, axis=1, keepdims=True)
+        norms = np.where(norms < 1e-8, 1.0, norms)
+        result[:, sensor_index, :] = smoothed / norms
+
+    if scalar_input:
+        result = result[:, 0, :]
+
+    return result.reshape(original_shape).astype(quaternions_wxyz.dtype)
+
+
 def interpolate_short_gaps(
     values: np.ndarray,
     valid_mask: np.ndarray,

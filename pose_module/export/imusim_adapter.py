@@ -25,6 +25,8 @@ DEFAULT_GYRO_NOISE_STD_RAD_S = 0.0
 DEFAULT_RANDOM_SEED = 0
 DEFAULT_MAX_ACCELERATION_WARNING_M_S2 = 100.0
 DEFAULT_MAX_GYRO_WARNING_RAD_S = 25.0
+DEFAULT_GYRO_SMOOTHING_WINDOW_SEC = 0.3
+DEFAULT_GYRO_SMOOTHING_POLYORDER = 3
 _EPSILON = 1e-6
 
 
@@ -49,6 +51,8 @@ def run_imusim(
     layout_report_filename: str = DEFAULT_SENSOR_LAYOUT_REPORT_FILENAME,
     max_acceleration_warning_m_s2: float = DEFAULT_MAX_ACCELERATION_WARNING_M_S2,
     max_gyro_warning_rad_s: float = DEFAULT_MAX_GYRO_WARNING_RAD_S,
+    gyro_rotation_smoothing_window_sec: float | None = DEFAULT_GYRO_SMOOTHING_WINDOW_SEC,
+    gyro_rotation_smoothing_polyorder: int = DEFAULT_GYRO_SMOOTHING_POLYORDER,
 ) -> Dict[str, Any]:
     """Generate virtual accelerometer and gyroscope sequences from IK outputs."""
 
@@ -108,7 +112,17 @@ def run_imusim(
         specific_force_world,
         dtype=np.float32
     ).astype(np.float32, copy=False)
-    gyro = _estimate_local_angular_velocity(sensor_rotations, timestamps)
+
+    # Smooth sensor rotation matrices in quaternion space before differentiating.
+    # Frame-by-frame IK introduces discontinuities (especially axial roll on limbs)
+    # that get amplified when computing angular velocity via finite differences.
+    sensor_rotations_for_gyro = _smooth_sensor_rotations(
+        sensor_rotations,
+        timestamps,
+        window_sec=gyro_rotation_smoothing_window_sec,
+        polyorder=int(gyro_rotation_smoothing_polyorder),
+    )
+    gyro = _estimate_local_angular_velocity(sensor_rotations_for_gyro, timestamps)
 
     rng = np.random.default_rng(int(random_seed))
     if float(acc_noise_std_m_s2) > 0.0:
@@ -310,6 +324,55 @@ def _resolve_sensor_specs(
             }
         )
     return resolved_sensors
+
+
+def _smooth_sensor_rotations(
+    rotation_matrices: np.ndarray,
+    timestamps_sec: np.ndarray,
+    *,
+    window_sec: float | None,
+    polyorder: int,
+) -> np.ndarray:
+    """Return rotation matrices smoothed via Savitzky-Golay on quaternions.
+
+    Converts each sensor's rotation sequence to quaternions, fixes the SO(3)
+    double-cover, applies Savitzky-Golay smoothing, re-normalises, and converts
+    back to rotation matrices.  When ``window_sec`` is None or zero the input is
+    returned unchanged.
+    """
+    if window_sec is None or float(window_sec) <= 0.0:
+        return rotation_matrices
+
+    from pose_module.processing.temporal_filters import smooth_quaternion_sequence
+
+    rotations = np.asarray(rotation_matrices, dtype=np.float64)
+    timestamps = np.asarray(timestamps_sec, dtype=np.float64)
+    num_frames, num_sensors = rotations.shape[:2]
+    if num_frames <= 1:
+        return rotation_matrices
+
+    # Derive fps from the timestamp spacing.
+    dt_median = float(np.median(np.diff(timestamps)))
+    fps = 1.0 / max(dt_median, _EPSILON)
+    window_frames = max(int(polyorder) + 2, int(round(float(window_sec) * fps)))
+    if window_frames % 2 == 0:
+        window_frames += 1
+
+    # (T*S, 3, 3) → quaternions xyzw → wxyz
+    quats_xyzw = Rotation.from_matrix(rotations.reshape(-1, 3, 3)).as_quat()
+    quats_wxyz = np.concatenate(
+        [quats_xyzw[:, 3:4], quats_xyzw[:, :3]], axis=1
+    ).reshape(num_frames, num_sensors, 4)
+
+    smoothed_wxyz = smooth_quaternion_sequence(
+        quats_wxyz, window_length=window_frames, polyorder=int(polyorder)
+    )
+
+    # wxyz → xyzw → rotation matrices
+    smoothed_flat = smoothed_wxyz.reshape(-1, 4)
+    smoothed_xyzw = np.concatenate([smoothed_flat[:, 1:], smoothed_flat[:, 0:1]], axis=1)
+    smoothed_matrices = Rotation.from_quat(smoothed_xyzw).as_matrix()
+    return smoothed_matrices.reshape(num_frames, num_sensors, 3, 3).astype(np.float32, copy=False)
 
 
 def _second_derivative(values: np.ndarray, timestamps_sec: np.ndarray) -> np.ndarray:
